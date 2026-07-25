@@ -1,0 +1,18 @@
+[package]
+name = "generator-lab"
+description = "Treeline world-generation inspection and experimentation tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+treeline-coordinates.workspace = true
+treeline-geography.workspace = true
+treeline-terrain.workspace = true
+
+[lints]
+workspace = true
+

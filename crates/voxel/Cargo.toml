@@ -1,0 +1,16 @@
+[package]
+name = "treeline-voxel"
+description = "Voxel chunks, samples, edits, material channels, and LOD alignment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+treeline-coordinates.workspace = true
+treeline-terrain.workspace = true
+
+[lints]
+workspace = true
+

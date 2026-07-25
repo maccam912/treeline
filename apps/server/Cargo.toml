@@ -1,0 +1,18 @@
+[package]
+name = "server"
+description = "Treeline authoritative headless server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+treeline-platform.workspace = true
+treeline-protocol.workspace = true
+treeline-world.workspace = true
+
+[lints]
+workspace = true
+

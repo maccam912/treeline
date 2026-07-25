@@ -1,0 +1,4 @@
+*.tlcanopy filter=lfs diff=lfs merge=lfs -text
+*.tldem filter=lfs diff=lfs merge=lfs -text
+*.tlrgb filter=lfs diff=lfs merge=lfs -text
+*.tlwater filter=lfs diff=lfs merge=lfs -text

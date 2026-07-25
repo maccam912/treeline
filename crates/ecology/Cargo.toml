@@ -1,0 +1,12 @@
+[package]
+name = "treeline-ecology"
+description = "Environmental suitability, vegetation, species, and forest structure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
