@@ -1,0 +1,8 @@
+/target/
+*.profraw
+*.swp
+*.tmp
+.DS_Store
+.idea/
+.vscode/
+

@@ -1,0 +1,16 @@
+[package]
+name = "treeline-world"
+description = "World streaming, region lifecycle, LOD, caching, and generation jobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+treeline-coordinates.workspace = true
+treeline-voxel.workspace = true
+
+[lints]
+workspace = true
+

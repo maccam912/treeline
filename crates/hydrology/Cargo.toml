@@ -1,0 +1,15 @@
+[package]
+name = "treeline-hydrology"
+description = "Hydrological basins, river networks, lakes, and active water summaries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+treeline-coordinates.workspace = true
+
+[lints]
+workspace = true
+
