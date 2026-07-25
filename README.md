@@ -11,21 +11,24 @@ before changing architecture or priorities.
 
 ## Current status
 
-This repository is a compileable foundation, not yet a playable prototype. It
-establishes the boundaries described in the design and provides small,
-test-backed primitives for:
+This repository now includes a small playable terrain toy alongside the
+test-backed foundations described in the design. The prototype provides:
 
 - stable world identity and coordinate hashing;
-- functional terrain density sampling;
+- a deterministic rolling-hill signed-density field;
+- Marching Cubes terrain extraction;
+- a native `winit` + `wgpu` client with simple lighting;
+- mouse-look, walking, sprinting, and terrain-following movement;
+- deterministic 32 m terrain chunks streamed around the moving player;
+- distance-selected 2 m, 4 m, and 8 m terrain LODs with Transvoxel seams;
 - continuous deterministic regional fields;
 - hydrology and cave graph invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
 
-Heavy runtime dependencies such as `wgpu`, `winit`, and `iroh` should be added
-when their first end-to-end feature is implemented. Keeping them out of the
-initial scaffold makes the baseline quick to build and keeps architectural
-intent separate from unused dependency weight.
+The terrain toy now has an unbounded movement path through deterministic
+near-to-mid terrain chunks. Dedicated far terrain, asynchronous job scheduling,
+vegetation, survival, and networking have not been added yet.
 
 ## Getting started
 
@@ -43,6 +46,16 @@ Run one of the scaffold applications with:
 cargo run -p generator-lab
 ```
 
+Run the playable terrain toy with:
+
+```sh
+cargo run -p client
+```
+
+Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
+to sprint. Press Escape to release the cursor; click the window to capture it
+again.
+
 ## Repository map
 
 - `crates/` contains narrowly scoped game libraries.
@@ -55,4 +68,3 @@ cargo run -p generator-lab
 ## License
 
 Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
-
