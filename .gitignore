@@ -1,8 +1,8 @@
 /target/
+/apps/client/dist/
 *.profraw
 *.swp
 *.tmp
 .DS_Store
 .idea/
 .vscode/
-

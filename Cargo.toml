@@ -30,6 +30,7 @@ treeline-voxel = { path = "crates/voxel" }
 treeline-world = { path = "crates/world" }
 wgpu = "24.0.5"
 winit = "0.30.12"
+wasm-bindgen-futures = "0.4"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

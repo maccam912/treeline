@@ -3,8 +3,12 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::num::NonZeroUsize;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Condvar, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::{WorldIdentity, WorldPosition};
@@ -190,17 +194,28 @@ pub struct GeneratedTerrainMesh {
     pub mesh: Result<Mesh, MeshingError>,
 }
 
-/// Terrain worker queue ordered by visible generation priority.
+/// Terrain generation queue ordered by visible generation priority.
 ///
 /// Jobs already being generated are allowed to finish. Pending jobs always
 /// start in priority order, with submission order breaking ties. Completion
 /// order is deliberately not observable by generation itself: every mesh is a
-/// pure function of its field and [`ChunkMeshSpec`].
+/// pure function of its field and [`ChunkMeshSpec`]. Native builds use worker
+/// threads; browser builds complete one queued mesh at a time between event-loop
+/// turns.
 #[derive(Debug)]
 pub struct TerrainMeshQueue<F> {
+    #[cfg(not(target_arch = "wasm32"))]
     shared: Arc<QueueState<F>>,
+    #[cfg(not(target_arch = "wasm32"))]
     ready: Receiver<GeneratedTerrainMesh>,
+    #[cfg(not(target_arch = "wasm32"))]
     workers: Vec<JoinHandle<()>>,
+    #[cfg(target_arch = "wasm32")]
+    field: F,
+    #[cfg(target_arch = "wasm32")]
+    pending: BinaryHeap<Reverse<QueuedTerrainMesh>>,
+    #[cfg(target_arch = "wasm32")]
+    yield_after_mesh: bool,
     next_sequence: u64,
 }
 
@@ -208,36 +223,64 @@ impl<F> TerrainMeshQueue<F>
 where
     F: DensityField + SurfaceField + Send + Sync + 'static,
 {
-    /// Starts workers while reserving one available hardware thread for the
-    /// window, rendering, and simulation work.
+    /// Starts native workers while reserving one available hardware thread for
+    /// the window, rendering, and simulation work.
+    ///
+    /// Browser builds retain the same priority queue but generate incrementally
+    /// on the main thread because GitHub Pages does not provide the headers
+    /// required for shared-memory WebAssembly threads.
     pub fn new(field: F) -> Self {
-        let available = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
-        let worker_count =
-            NonZeroUsize::new(available.get().saturating_sub(1)).unwrap_or(NonZeroUsize::MIN);
-        Self::with_worker_count(field, worker_count)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let available = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+            let worker_count =
+                NonZeroUsize::new(available.get().saturating_sub(1)).unwrap_or(NonZeroUsize::MIN);
+            Self::with_worker_count(field, worker_count)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::with_worker_count(field, NonZeroUsize::MIN)
+        }
     }
 
-    /// Starts an explicit non-zero number of terrain workers.
+    /// Starts an explicit non-zero number of native terrain workers.
+    ///
+    /// Browser builds ignore `worker_count` and use their incremental queue.
     pub fn with_worker_count(field: F, worker_count: NonZeroUsize) -> Self {
-        let shared = Arc::new(QueueState {
-            field,
-            pending: Mutex::new(PendingJobs::default()),
-            wake_workers: Condvar::new(),
-        });
-        let (ready_sender, ready) = mpsc::channel();
-        let workers = (0..worker_count.get())
-            .map(|_| {
-                let shared = Arc::clone(&shared);
-                let ready_sender = ready_sender.clone();
-                thread::spawn(move || terrain_worker(&shared, &ready_sender))
-            })
-            .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let shared = Arc::new(QueueState {
+                field,
+                pending: Mutex::new(PendingJobs::default()),
+                wake_workers: Condvar::new(),
+            });
+            let (ready_sender, ready) = mpsc::channel();
+            let workers = (0..worker_count.get())
+                .map(|_| {
+                    let shared = Arc::clone(&shared);
+                    let ready_sender = ready_sender.clone();
+                    thread::spawn(move || terrain_worker(&shared, &ready_sender))
+                })
+                .collect();
 
-        Self {
-            shared,
-            ready,
-            workers,
-            next_sequence: 0,
+            Self {
+                shared,
+                ready,
+                workers,
+                next_sequence: 0,
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = worker_count;
+            Self {
+                field,
+                pending: BinaryHeap::new(),
+                yield_after_mesh: false,
+                next_sequence: 0,
+            }
         }
     }
 
@@ -249,42 +292,76 @@ where
             spec,
         };
         self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.shared
-            .pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .jobs
-            .push(Reverse(job));
-        self.shared.wake_workers.notify_one();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.shared
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .jobs
+                .push(Reverse(job));
+            self.shared.wake_workers.notify_one();
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        self.pending.push(Reverse(job));
     }
 
     /// Returns one completed mesh without waiting for a worker.
-    pub fn try_next(&self) -> Option<GeneratedTerrainMesh> {
-        match self.ready.try_recv() {
-            Ok(mesh) => Some(mesh),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+    pub fn try_next(&mut self) -> Option<GeneratedTerrainMesh> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match self.ready.try_recv() {
+                Ok(mesh) => Some(mesh),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.yield_after_mesh {
+                self.yield_after_mesh = false;
+                return None;
+            }
+            let Reverse(job) = self.pending.pop()?;
+            let mesh = match job.spec {
+                TerrainMeshSpec::Far(spec) => far_terrain_mesh(&self.field, spec),
+                TerrainMeshSpec::Near(spec) => {
+                    transvoxel_chunk(&self.field, spec.chunk, spec.lod, spec.transition_faces)
+                }
+            };
+            self.yield_after_mesh = true;
+            Some(GeneratedTerrainMesh {
+                spec: job.spec,
+                mesh,
+            })
         }
     }
 }
 
 impl<F> Drop for TerrainMeshQueue<F> {
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut pending = self
-                .shared
-                .pending
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            pending.closed = true;
-            pending.jobs.clear();
-        }
-        self.shared.wake_workers.notify_all();
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            {
+                let mut pending = self
+                    .shared
+                    .pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                pending.closed = true;
+                pending.jobs.clear();
+            }
+            self.shared.wake_workers.notify_all();
+            for worker in self.workers.drain(..) {
+                let _ = worker.join();
+            }
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct QueueState<F> {
     field: F,
@@ -292,6 +369,7 @@ struct QueueState<F> {
     wake_workers: Condvar,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 struct PendingJobs {
     jobs: BinaryHeap<Reverse<QueuedTerrainMesh>>,
@@ -305,6 +383,7 @@ struct QueuedTerrainMesh {
     spec: TerrainMeshSpec,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn terrain_worker<F>(shared: &QueueState<F>, ready: &Sender<GeneratedTerrainMesh>)
 where
     F: DensityField + SurfaceField,

@@ -76,12 +76,22 @@ Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
 to sprint. Press Escape to release the cursor; click the window to capture it
 again.
 
+Build the browser version with [Trunk](https://trunk-rs.dev/):
+
+```sh
+rustup target add wasm32-unknown-unknown
+trunk build apps/client/index.html --release
+```
+
+Pushes to `main` build this browser version and deploy it through GitHub Pages.
+
 ## Repository map
 
 - `crates/` contains narrowly scoped game libraries.
 - `apps/` contains executable composition roots.
 - `.github/workflows/ci.yml` runs formatting, lint, test, and documentation
   checks.
+- `.github/workflows/pages.yml` builds and deploys the browser client.
 - `AGENTS.md` is the contributor and coding-agent guide.
 - `DESIGN.md` is the durable product and architecture north star.
 
