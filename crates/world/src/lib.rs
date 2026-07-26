@@ -173,6 +173,7 @@ impl RegionState {
 /// Job tiers make distant terrain visible before near-world detail finishes.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GenerationPriority {
+    PlayerTerrain,
     Horizon,
     FarTerrain,
     NearTerrain,
@@ -945,7 +946,8 @@ mod tests {
     }
 
     #[test]
-    fn horizon_jobs_sort_before_surface_detail() {
+    fn visible_terrain_priorities_sort_before_detail() {
+        assert!(GenerationPriority::PlayerTerrain < GenerationPriority::Horizon);
         assert!(GenerationPriority::Horizon < GenerationPriority::SurfaceDetail);
     }
 
@@ -990,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_jobs_order_horizon_before_near_terrain() {
+    fn pending_jobs_order_player_then_horizon_then_near_terrain() {
         let spec = ChunkMeshSpec {
             chunk: ChunkIndex::new(0, 0),
             lod: ChunkIndex::MAX_LOD,
@@ -1007,10 +1009,23 @@ mod tests {
             sequence: 1,
             spec: TerrainMeshSpec::Near(spec),
         }));
+        pending.push(Reverse(QueuedTerrainMesh {
+            priority: GenerationPriority::PlayerTerrain,
+            sequence: 2,
+            spec: TerrainMeshSpec::Near(spec),
+        }));
 
+        assert_eq!(
+            pending.pop().expect("queued player terrain job").0.priority,
+            GenerationPriority::PlayerTerrain
+        );
         assert_eq!(
             pending.pop().expect("queued horizon job").0.priority,
             GenerationPriority::Horizon
+        );
+        assert_eq!(
+            pending.pop().expect("queued near job").0.priority,
+            GenerationPriority::NearTerrain
         );
     }
 
