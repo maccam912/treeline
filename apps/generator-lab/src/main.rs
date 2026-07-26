@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
-use treeline_ecology::{Soil, SoilSample};
+use treeline_ecology::{ForestDistribution, ForestSample, Soil, SoilSample};
 use treeline_geography::{
     Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
     WatershedRegion, WatershedRegionIndex,
@@ -40,10 +40,11 @@ enum ViewMode {
     Precipitation,
     Snowpack,
     Soil,
+    Forest,
 }
 
 impl ViewMode {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Terrain,
         Self::Watersheds,
         Self::FlowAccumulation,
@@ -54,6 +55,7 @@ impl ViewMode {
         Self::Precipitation,
         Self::Snowpack,
         Self::Soil,
+        Self::Forest,
     ];
 
     const fn label(self) -> &'static str {
@@ -68,21 +70,23 @@ impl ViewMode {
             Self::Precipitation => "precipitation",
             Self::Snowpack => "snowpack",
             Self::Soil => "soil",
+            Self::Forest => "forest distribution",
         }
     }
 
-    const fn shortcut(self) -> u8 {
+    const fn shortcut(self) -> &'static str {
         match self {
-            Self::Terrain => 1,
-            Self::Watersheds => 2,
-            Self::FlowAccumulation => 3,
-            Self::Rivers => 4,
-            Self::Lakes => 5,
-            Self::Erosion => 6,
-            Self::Temperature => 7,
-            Self::Precipitation => 8,
-            Self::Snowpack => 9,
-            Self::Soil => 0,
+            Self::Terrain => "1",
+            Self::Watersheds => "2",
+            Self::FlowAccumulation => "3",
+            Self::Rivers => "4",
+            Self::Lakes => "5",
+            Self::Erosion => "6",
+            Self::Temperature => "7",
+            Self::Precipitation => "8",
+            Self::Snowpack => "9",
+            Self::Soil => "0",
+            Self::Forest => "F",
         }
     }
 }
@@ -416,6 +420,10 @@ impl GeneratorLab {
                 self.mode = ViewMode::Soil;
                 true
             }
+            KeyCode::KeyF => {
+                self.mode = ViewMode::Forest;
+                true
+            }
             _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
@@ -507,6 +515,9 @@ impl GeneratorLab {
         let Some(soil) = Soil::new(world).sample(x, z) else {
             return;
         };
+        let Some(forest) = ForestDistribution::new(world).sample(x, z) else {
+            return;
+        };
         let watershed = WatershedRegionIndex::containing(x, z)
             .and_then(|index| WatershedRegion::generate(world, index));
         let drainage = watershed
@@ -554,7 +565,7 @@ impl GeneratorLab {
             },
         );
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | ridge +{:.0} m | {drainage_summary}",
             self.season.label(),
             seasonal_climate.mean_temperature_celsius,
             seasonal_climate.snowpack_water_equivalent_millimeters,
@@ -562,10 +573,13 @@ impl GeneratorLab {
             soil.texture.label(),
             soil.acidity_ph,
             soil.surface_moisture * 100.0,
+            forest.canopy_cover_fraction * 100.0,
+            forest.dominant_group().label(),
+            forest.stand_age_years,
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
         );
         self.inspection = Some(summary);
         self.window.request_redraw();
@@ -841,6 +855,7 @@ fn draw_keyboard_help(ui: &mut egui::Ui) {
     ui.heading("Keyboard & mouse");
     for help in [
         "1–9  Select view layer",
+        "0 / F  Soil / forest distribution",
         "C  Advance climate season",
         "WASD / arrows  Pan",
         "+ / − / wheel  Zoom",
@@ -900,6 +915,7 @@ fn generate_drainage_mesh(
     let generated_terrain = (mode == ViewMode::Erosion).then(|| GeneratedWorldTerrain::new(world));
     let climate = Climate::new(world);
     let soil = Soil::new(world);
+    let forest = ForestDistribution::new(world);
     let mut regions = BTreeMap::new();
     let mut river_networks = BTreeMap::new();
     let mut positions = Vec::with_capacity(count_x * count_z);
@@ -929,6 +945,13 @@ fn generate_drainage_mesh(
                     .sample(world_x, world_z)
                     .ok_or_else(|| std::io::Error::other("failed to sample soil"))?;
                 colors.push(soil_color(sample));
+                continue;
+            }
+            if mode == ViewMode::Forest {
+                let sample = forest
+                    .sample(world_x, world_z)
+                    .ok_or_else(|| std::io::Error::other("failed to sample forest"))?;
+                colors.push(forest_color(sample));
                 continue;
             }
             let region_index = WatershedRegionIndex::containing(world_x, world_z)
@@ -1071,9 +1094,11 @@ fn drainage_color(
                 1.0,
             ]
         }),
-        ViewMode::Temperature | ViewMode::Precipitation | ViewMode::Snowpack | ViewMode::Soil => {
-            [1.0, 0.0, 1.0, 1.0]
-        }
+        ViewMode::Temperature
+        | ViewMode::Precipitation
+        | ViewMode::Snowpack
+        | ViewMode::Soil
+        | ViewMode::Forest => [1.0, 0.0, 1.0, 1.0],
     }
 }
 
@@ -1140,6 +1165,29 @@ fn soil_color(soil: SoilSample) -> [f32; 4] {
     ]
 }
 
+fn forest_color(forest: ForestSample) -> [f32; 4] {
+    let composition = forest.composition;
+    let evergreen = f64_as_f32(composition.evergreen_needleleaf_fraction);
+    let cold_deciduous = f64_as_f32(composition.cold_deciduous_fraction);
+    let temperate = f64_as_f32(composition.temperate_broadleaf_fraction);
+    let dry = f64_as_f32(composition.dry_woodland_fraction);
+    let canopy = f64_as_f32(forest.canopy_cover_fraction);
+    let disturbance = f64_as_f32(forest.disturbance_severity);
+    let forest_tint = [
+        (evergreen * 0.04) + (cold_deciduous * 0.24) + (temperate * 0.10) + (dry * 0.38),
+        (evergreen * 0.22) + (cold_deciduous * 0.43) + (temperate * 0.36) + (dry * 0.42),
+        (evergreen * 0.12) + (cold_deciduous * 0.15) + (temperate * 0.09) + (dry * 0.17),
+    ];
+    let bare = [0.62, 0.53, 0.33];
+    let visible_cover = (canopy * 1.15).clamp(0.0, 1.0);
+    [
+        lerp_f32(bare[0], forest_tint[0], visible_cover) + (disturbance * 0.10),
+        lerp_f32(bare[1], forest_tint[1], visible_cover) - (disturbance * 0.08),
+        lerp_f32(bare[2], forest_tint[2], visible_cover) - (disturbance * 0.04),
+        1.0,
+    ]
+}
+
 fn hash_channel(key: u64, shift: u32) -> f32 {
     let byte = u8::try_from((key >> shift) & 0xff).expect("masked hash lane fits u8");
     0.25 + (f32::from(byte) / 255.0 * 0.65)
@@ -1162,4 +1210,44 @@ fn usize_as_f64(value: usize) -> f64 {
 #[allow(clippy::cast_precision_loss)]
 fn u64_as_f32(value: u64) -> f32 {
     value as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forest_view_generates_varied_opaque_coverage_colors() {
+        let mesh = generate_mesh(
+            0x5eed,
+            [0.0, 0.0],
+            64_000.0,
+            64,
+            64,
+            ViewMode::Forest,
+            Season::Summer,
+        )
+        .expect("forest view mesh");
+        let first = mesh.colors[0];
+
+        assert_eq!(mesh.colors.len(), mesh.positions.len());
+        assert!(
+            mesh.colors
+                .iter()
+                .all(|color| (color[3] - 1.0).abs() < f32::EPSILON)
+        );
+        assert!(mesh.colors.iter().any(|color| {
+            color
+                .iter()
+                .zip(first)
+                .map(|(channel, first_channel)| (channel - first_channel).abs())
+                .sum::<f32>()
+                > 0.01
+        }));
+        assert!(mesh.colors.iter().all(|color| {
+            color[..3]
+                .iter()
+                .all(|channel| (0.0..=1.0).contains(channel))
+        }));
+    }
 }

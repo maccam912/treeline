@@ -2213,8 +2213,11 @@ The world generator is the game.
 - [x] Soil. Deterministic soil texture and composition, depth, surface moisture,
       acidity, organic matter, and ecology-facing species suitability derive
       from geology, erosion, and climate.
-- [ ] **NEXT** — Forest distribution
-- [ ] Procedural trees
+- [x] Forest distribution. Continuous deterministic canopy cover, biomass,
+      stand age, disturbance, and tree functional-group composition derive
+      from climate, soil, terrain exposure, snowpack, and spatially correlated
+      stand history, with a dedicated Generator Lab view and inspection data.
+- [ ] **NEXT** — Procedural trees
 - [ ] Surface rocks
 - [ ] Ground vegetation
 - [ ] **PARTIAL** — Snow. Climate generates seasonal snowfall, accumulation,
