@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
+use treeline_ecology::{Soil, SoilSample};
 use treeline_geography::{
     Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
     WatershedRegion, WatershedRegionIndex,
@@ -38,10 +39,11 @@ enum ViewMode {
     Temperature,
     Precipitation,
     Snowpack,
+    Soil,
 }
 
 impl ViewMode {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Terrain,
         Self::Watersheds,
         Self::FlowAccumulation,
@@ -51,6 +53,7 @@ impl ViewMode {
         Self::Temperature,
         Self::Precipitation,
         Self::Snowpack,
+        Self::Soil,
     ];
 
     const fn label(self) -> &'static str {
@@ -64,6 +67,7 @@ impl ViewMode {
             Self::Temperature => "temperature",
             Self::Precipitation => "precipitation",
             Self::Snowpack => "snowpack",
+            Self::Soil => "soil",
         }
     }
 
@@ -78,6 +82,7 @@ impl ViewMode {
             Self::Temperature => 7,
             Self::Precipitation => 8,
             Self::Snowpack => 9,
+            Self::Soil => 0,
         }
     }
 }
@@ -407,6 +412,10 @@ impl GeneratorLab {
                 self.mode = ViewMode::Snowpack;
                 true
             }
+            KeyCode::Digit0 => {
+                self.mode = ViewMode::Soil;
+                true
+            }
             _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
@@ -495,6 +504,9 @@ impl GeneratorLab {
         let Some(seasonal_climate) = Climate::new(world).sample_season(x, z, self.season) else {
             return;
         };
+        let Some(soil) = Soil::new(world).sample(x, z) else {
+            return;
+        };
         let watershed = WatershedRegionIndex::containing(x, z)
             .and_then(|index| WatershedRegion::generate(world, index));
         let drainage = watershed
@@ -542,15 +554,18 @@ impl GeneratorLab {
             },
         );
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | ridge +{:.0} m | {drainage_summary}",
             self.season.label(),
             seasonal_climate.mean_temperature_celsius,
             seasonal_climate.snowpack_water_equivalent_millimeters,
             climate.annual_precipitation_millimeters,
+            soil.texture.label(),
+            soil.acidity_ph,
+            soil.surface_moisture * 100.0,
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
         );
         self.inspection = Some(summary);
         self.window.request_redraw();
@@ -884,6 +899,7 @@ fn generate_drainage_mesh(
     let world = WorldIdentity::new(seed, GENERATOR_VERSION, 0);
     let generated_terrain = (mode == ViewMode::Erosion).then(|| GeneratedWorldTerrain::new(world));
     let climate = Climate::new(world);
+    let soil = Soil::new(world);
     let mut regions = BTreeMap::new();
     let mut river_networks = BTreeMap::new();
     let mut positions = Vec::with_capacity(count_x * count_z);
@@ -906,6 +922,13 @@ fn generate_drainage_mesh(
                     .sample_season(world_x, world_z, season)
                     .ok_or_else(|| std::io::Error::other("failed to sample seasonal climate"))?;
                 colors.push(climate_color(annual, seasonal, mode));
+                continue;
+            }
+            if mode == ViewMode::Soil {
+                let sample = soil
+                    .sample(world_x, world_z)
+                    .ok_or_else(|| std::io::Error::other("failed to sample soil"))?;
+                colors.push(soil_color(sample));
                 continue;
             }
             let region_index = WatershedRegionIndex::containing(world_x, world_z)
@@ -1048,7 +1071,7 @@ fn drainage_color(
                 1.0,
             ]
         }),
-        ViewMode::Temperature | ViewMode::Precipitation | ViewMode::Snowpack => {
+        ViewMode::Temperature | ViewMode::Precipitation | ViewMode::Snowpack | ViewMode::Soil => {
             [1.0, 0.0, 1.0, 1.0]
         }
     }
@@ -1095,6 +1118,26 @@ fn climate_color(
         }
         _ => [1.0, 0.0, 1.0, 1.0],
     }
+}
+
+fn soil_color(soil: SoilSample) -> [f32; 4] {
+    let sand = f64_as_f32(soil.composition.sand_fraction);
+    let silt = f64_as_f32(soil.composition.silt_fraction);
+    let clay = f64_as_f32(soil.composition.clay_fraction);
+    let moisture = f64_as_f32(soil.surface_moisture);
+    let organic = f64_as_f32(soil.organic_matter_fraction / 0.17);
+    let mineral = [
+        (sand * 0.76) + (silt * 0.50) + (clay * 0.58),
+        (sand * 0.62) + (silt * 0.49) + (clay * 0.30),
+        (sand * 0.34) + (silt * 0.43) + (clay * 0.22),
+    ];
+    let darkening = 1.0 - (organic * 0.45);
+    [
+        mineral[0] * darkening * (1.0 - (moisture * 0.18)),
+        mineral[1] * darkening,
+        (mineral[2] * darkening) + (moisture * 0.16),
+        1.0,
+    ]
 }
 
 fn hash_channel(key: u64, shift: u32) -> f32 {

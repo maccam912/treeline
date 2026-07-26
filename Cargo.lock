@@ -563,6 +563,7 @@ dependencies = [
  "glam",
  "pollster",
  "treeline-coordinates",
+ "treeline-ecology",
  "treeline-geography",
  "treeline-hydrology",
  "treeline-mesher",
@@ -1982,6 +1983,11 @@ version = "0.1.0"
 [[package]]
 name = "treeline-ecology"
 version = "0.1.0"
+dependencies = [
+ "treeline-coordinates",
+ "treeline-geography",
+ "treeline-terrain",
+]
 
 [[package]]
 name = "treeline-geography"
@@ -2054,6 +2060,7 @@ name = "treeline-world"
 version = "0.1.0"
 dependencies = [
  "treeline-coordinates",
+ "treeline-ecology",
  "treeline-geography",
  "treeline-hydrology",
  "treeline-mesher",

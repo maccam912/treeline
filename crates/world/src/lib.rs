@@ -12,9 +12,8 @@ use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::{WorldIdentity, WorldPosition};
-use treeline_geography::{
-    DrainageCellIndex, SEASONAL_CLIMATE_GENERATOR_VERSION, WatershedRegionIndex,
-};
+use treeline_ecology::SOIL_GENERATOR_VERSION;
+use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
 use treeline_hydrology::{
     GullyNetwork, GullyTerrainInfluence, Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
 };
@@ -33,7 +32,7 @@ pub const LAKE_GENERATOR_VERSION: u32 = 4;
 /// Generator version that first composes macro, meso, and micro erosion.
 pub const EROSION_GENERATOR_VERSION: u32 = 5;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = SEASONAL_CLIMATE_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = SOIL_GENERATOR_VERSION;
 
 /// Equilibrium lake water at one horizontal world position.
 #[derive(Clone, Copy, Debug, PartialEq)]

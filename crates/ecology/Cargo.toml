@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[dependencies]
+treeline-coordinates.workspace = true
+treeline-geography.workspace = true
+treeline-terrain.workspace = true
+
 [lints]
 workspace = true
-
