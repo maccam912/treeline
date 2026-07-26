@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition};
 use treeline_geography::{
     Climate, DRAINAGE_CELL_EDGE_METERS, DrainageCellIndex, MacroElevation,
-    OROGRAPHIC_CLIMATE_GENERATOR_VERSION, RegionalProfile, WatershedRegion, WatershedRegionIndex,
+    OROGRAPHIC_CLIMATE_GENERATOR_VERSION, RegionalProfile, SEASONAL_CLIMATE_GENERATOR_VERSION,
+    WatershedRegion, WatershedRegionIndex,
 };
 
 const SECONDS_PER_YEAR: f64 = 31_556_952.0;
@@ -498,6 +499,19 @@ impl LakeNetwork {
 
 fn local_runoff(world: WorldIdentity, cell: DrainageCellIndex) -> Option<f64> {
     let [x, z] = cell.center();
+    let cell_area_square_meters = DRAINAGE_CELL_EDGE_METERS * DRAINAGE_CELL_EDGE_METERS;
+    if world.generator_version >= SEASONAL_CLIMATE_GENERATOR_VERSION {
+        let climate = Climate::new(world).sample(x, z)?;
+        let rainfall_meters = (climate.annual_precipitation_millimeters
+            - climate.annual_snowfall_water_equivalent_millimeters)
+            / 1_000.0;
+        let snowmelt_meters = climate.annual_snowmelt_millimeters / 1_000.0;
+        let rainfall_runoff_fraction =
+            (0.72 - (climate.warmth_fraction() * 0.42)).clamp(0.15, 0.75);
+        let annual_runoff_depth_meters =
+            (rainfall_meters * rainfall_runoff_fraction) + (snowmelt_meters * 0.85);
+        return Some(annual_runoff_depth_meters * cell_area_square_meters / SECONDS_PER_YEAR);
+    }
     let (annual_precipitation_meters, runoff_fraction) =
         if world.generator_version >= OROGRAPHIC_CLIMATE_GENERATOR_VERSION {
             let climate = Climate::new(world).sample(x, z)?;
@@ -512,7 +526,6 @@ fn local_runoff(world: WorldIdentity, cell: DrainageCellIndex) -> Option<f64> {
                 (0.75 - (profile.mean_temperature * 0.5)).clamp(0.15, 0.75),
             )
         };
-    let cell_area_square_meters = DRAINAGE_CELL_EDGE_METERS * DRAINAGE_CELL_EDGE_METERS;
     Some(annual_precipitation_meters * cell_area_square_meters * runoff_fraction / SECONDS_PER_YEAR)
 }
 
@@ -562,6 +575,8 @@ mod tests {
     const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 2, 0);
     const CLIMATE_WORLD: WorldIdentity =
         WorldIdentity::new(0x5eed, OROGRAPHIC_CLIMATE_GENERATOR_VERSION, 0);
+    const SEASONAL_WORLD: WorldIdentity =
+        WorldIdentity::new(0x5eed, SEASONAL_CLIMATE_GENERATOR_VERSION, 0);
 
     #[test]
     fn river_direction_rejects_uphill_segments() {
@@ -591,6 +606,32 @@ mod tests {
 
         assert_eq!(
             local_runoff(CLIMATE_WORLD, cell).expect("runoff").to_bits(),
+            expected.to_bits()
+        );
+    }
+
+    #[test]
+    fn local_runoff_combines_rainfall_and_snowmelt_in_version_seven() {
+        let cell = DrainageCellIndex::new(-17, 23);
+        let [x, z] = cell.center();
+        let climate = Climate::new(SEASONAL_WORLD)
+            .sample(x, z)
+            .expect("finite climate");
+        let rainfall_meters = (climate.annual_precipitation_millimeters
+            - climate.annual_snowfall_water_equivalent_millimeters)
+            / 1_000.0;
+        let snowmelt_meters = climate.annual_snowmelt_millimeters / 1_000.0;
+        let expected_depth = rainfall_meters
+            * (0.72 - (climate.warmth_fraction() * 0.42)).clamp(0.15, 0.75)
+            + (snowmelt_meters * 0.85);
+        let cell_area = DRAINAGE_CELL_EDGE_METERS * DRAINAGE_CELL_EDGE_METERS;
+        let expected = expected_depth * cell_area / SECONDS_PER_YEAR;
+
+        assert!(climate.annual_snowfall_water_equivalent_millimeters > 0.0);
+        assert_eq!(
+            local_runoff(SEASONAL_WORLD, cell)
+                .expect("runoff")
+                .to_bits(),
             expected.to_bits()
         );
     }
@@ -820,6 +861,30 @@ mod tests {
             stable_hash(&words),
             10_915_097_629_159_196_840,
             "changing this value changes climate-fed regional rivers"
+        );
+    }
+
+    #[test]
+    fn seasonal_runoff_river_network_has_a_golden_fingerprint() {
+        let network = RiverNetwork::generate(SEASONAL_WORLD, WatershedRegionIndex::new(-1, 2))
+            .expect("network");
+        let words = network
+            .segments()
+            .iter()
+            .step_by(17)
+            .flat_map(|segment| {
+                [
+                    u64::from_le_bytes(segment.source_cell.x.to_le_bytes()),
+                    u64::from_le_bytes(segment.source_cell.z.to_le_bytes()),
+                    segment.discharge_cubic_meters_per_second.to_bits(),
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_hash(&words),
+            16_346_003_465_188_982_832,
+            "changing this value changes seasonal-runoff regional rivers"
         );
     }
 

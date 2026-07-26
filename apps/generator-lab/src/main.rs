@@ -5,7 +5,8 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_geography::{
-    Climate, ClimateSample, DrainageCell, RegionalProfile, WatershedRegion, WatershedRegionIndex,
+    Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
+    WatershedRegion, WatershedRegionIndex,
 };
 use treeline_hydrology::{LakeNetwork, RiverNetwork, RiverSegment};
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
@@ -36,9 +37,22 @@ enum ViewMode {
     Erosion,
     Temperature,
     Precipitation,
+    Snowpack,
 }
 
 impl ViewMode {
+    const ALL: [Self; 9] = [
+        Self::Terrain,
+        Self::Watersheds,
+        Self::FlowAccumulation,
+        Self::Rivers,
+        Self::Lakes,
+        Self::Erosion,
+        Self::Temperature,
+        Self::Precipitation,
+        Self::Snowpack,
+    ];
+
     const fn label(self) -> &'static str {
         match self {
             Self::Terrain => "terrain",
@@ -49,6 +63,21 @@ impl ViewMode {
             Self::Erosion => "erosion",
             Self::Temperature => "temperature",
             Self::Precipitation => "precipitation",
+            Self::Snowpack => "snowpack",
+        }
+    }
+
+    const fn shortcut(self) -> u8 {
+        match self {
+            Self::Terrain => 1,
+            Self::Watersheds => 2,
+            Self::FlowAccumulation => 3,
+            Self::Rivers => 4,
+            Self::Lakes => 5,
+            Self::Erosion => 6,
+            Self::Temperature => 7,
+            Self::Precipitation => 8,
+            Self::Snowpack => 9,
         }
     }
 }
@@ -103,6 +132,7 @@ impl ApplicationHandler for GeneratorLabApp {
         if window_id != lab.window.id() {
             return;
         }
+        let egui_consumed = lab.handle_window_event(&event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -119,7 +149,7 @@ impl ApplicationHandler for GeneratorLabApp {
                 Err(error) => eprintln!("Generator Lab render failed: {error}"),
             },
             WindowEvent::CursorMoved { position, .. } => lab.cursor = position,
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !egui_consumed => {
                 let direction = match delta {
                     MouseScrollDelta::LineDelta(_, vertical) => f64::from(vertical),
                     MouseScrollDelta::PixelDelta(position) => position.y.signum(),
@@ -132,7 +162,7 @@ impl ApplicationHandler for GeneratorLabApp {
                 state: ElementState::Pressed,
                 button,
                 ..
-            } => match button {
+            } if !egui_consumed => match button {
                 MouseButton::Left => lab.inspect_cursor(),
                 MouseButton::Right => {
                     lab.center = lab.cursor_world_position();
@@ -146,7 +176,7 @@ impl ApplicationHandler for GeneratorLabApp {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape {
                         event_loop.exit();
-                    } else {
+                    } else if !egui_consumed {
                         lab.handle_key(code);
                     }
                 }
@@ -165,11 +195,16 @@ struct GeneratorLab {
     surface_config: wgpu::SurfaceConfiguration,
     renderer: TerrainRenderer,
     mesh: TerrainMesh,
+    egui_context: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
     seed: u64,
     center: [f64; 2],
     span_meters: f64,
     cursor: PhysicalPosition<f64>,
     mode: ViewMode,
+    season: Season,
+    inspection: Option<String>,
 }
 
 impl GeneratorLab {
@@ -220,6 +255,16 @@ impl GeneratorLab {
             surface_config.width,
             surface_config.height,
         );
+        let egui_context = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_context.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(f64_as_f32(window.scale_factor())),
+            window.theme(),
+            usize::try_from(device.limits().max_texture_dimension_2d).ok(),
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
         let seed = 0x5eed;
         let center = [0.0, 0.0];
         let span_meters = 128_000.0;
@@ -231,6 +276,7 @@ impl GeneratorLab {
             surface_config.width,
             surface_config.height,
             mode,
+            Season::default(),
         )?;
         let mesh = renderer.upload_mesh(&device, &mesh_data)?;
         let cursor = PhysicalPosition::new(
@@ -246,15 +292,29 @@ impl GeneratorLab {
             surface_config,
             renderer,
             mesh,
+            egui_context,
+            egui_state,
+            egui_renderer,
             seed,
             center,
             span_meters,
             cursor,
             mode,
+            season: Season::default(),
+            inspection: None,
         };
         lab.update_camera();
-        lab.update_title(None);
+        lab.update_title();
+        lab.window.request_redraw();
         Ok(lab)
+    }
+
+    fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
+        let response = self.egui_state.on_window_event(&self.window, event);
+        if response.repaint {
+            self.window.request_redraw();
+        }
+        response.consumed
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn Error>> {
@@ -307,6 +367,10 @@ impl GeneratorLab {
                 self.center = self.cursor_world_position();
                 true
             }
+            KeyCode::KeyC => {
+                self.season = self.season.next();
+                true
+            }
             KeyCode::Digit1 => {
                 self.mode = ViewMode::Terrain;
                 true
@@ -339,6 +403,10 @@ impl GeneratorLab {
                 self.mode = ViewMode::Precipitation;
                 true
             }
+            KeyCode::Digit9 => {
+                self.mode = ViewMode::Snowpack;
+                true
+            }
             _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
@@ -362,10 +430,11 @@ impl GeneratorLab {
             self.surface_config.width,
             self.surface_config.height,
             self.mode,
+            self.season,
         )?;
         self.mesh = self.renderer.upload_mesh(&self.device, &mesh_data)?;
         self.update_camera();
-        self.update_title(None);
+        self.update_title();
         self.window.request_redraw();
         Ok(())
     }
@@ -404,7 +473,7 @@ impl GeneratorLab {
         ]
     }
 
-    fn inspect_cursor(&self) {
+    fn inspect_cursor(&mut self) {
         let [x, z] = self.cursor_world_position();
         let world = WorldIdentity::new(self.seed, GENERATOR_VERSION, 0);
         let terrain = WildernessTerrain::new(world);
@@ -421,6 +490,9 @@ impl GeneratorLab {
             return;
         };
         let Some(climate) = Climate::new(world).sample(x, z) else {
+            return;
+        };
+        let Some(seasonal_climate) = Climate::new(world).sample_season(x, z, self.season) else {
             return;
         };
         let watershed = WatershedRegionIndex::containing(x, z)
@@ -470,35 +542,59 @@ impl GeneratorLab {
             },
         );
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {:.1} °C | {:.0} mm/yr | ridge +{:.0} m | {drainage_summary}",
-            climate.mean_temperature_celsius,
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | ridge +{:.0} m | {drainage_summary}",
+            self.season.label(),
+            seasonal_climate.mean_temperature_celsius,
+            seasonal_climate.snowpack_water_equivalent_millimeters,
             climate.annual_precipitation_millimeters,
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nclimate: {climate:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
         );
-        self.update_title(Some(&summary));
+        self.inspection = Some(summary);
+        self.window.request_redraw();
     }
 
-    fn update_title(&self, inspection: Option<&str>) {
-        let base = format!(
-            "Treeline Generator Lab — {} | seed {:x} | center ({:.1}, {:.1}) km | span {:.0} km | 1 terrain · 2 watersheds · 3 flow · 4 rivers · 5 lakes · 6 erosion · 7 temperature · 8 precipitation · WASD pan · +/- zoom · R seed · click inspect",
+    fn update_title(&self) {
+        self.window.set_title(&format!(
+            "Treeline Generator Lab — {} ({}) — seed {:x}",
             self.mode.label(),
+            self.season.label(),
             self.seed,
-            self.center[0] / 1_000.0,
-            self.center[1] / 1_000.0,
-            self.span_meters / 1_000.0
-        );
-        self.window.set_title(
-            inspection
-                .map(|inspection| format!("{base} | {inspection}"))
-                .as_deref()
-                .unwrap_or(&base),
-        );
+        ));
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        let context = self.egui_context.clone();
+        let snapshot = LabUiSnapshot {
+            mode: self.mode,
+            season: self.season,
+            seed: self.seed,
+            center: self.center,
+            span_meters: self.span_meters,
+            cursor_world: self.cursor_world_position(),
+            inspection: self.inspection.as_deref(),
+        };
+        let mut ui_action = LabUiAction::default();
+        let full_output = context.run(raw_input, |context| {
+            draw_generator_lab_ui(context, snapshot, &mut ui_action);
+        });
+        self.egui_state
+            .handle_platform_output(&self.window, full_output.platform_output);
+        self.apply_ui_action(ui_action);
+
+        let paint_jobs = context.tessellate(full_output.shapes, full_output.pixels_per_point);
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.surface_config.width, self.surface_config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        for (texture_id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *texture_id, image_delta);
+        }
+
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -508,11 +604,237 @@ impl GeneratorLab {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Generator Lab frame encoder"),
             });
+        let mut command_buffers = self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
         self.renderer
             .render(&mut encoder, &view, std::iter::once(&self.mesh));
-        self.queue.submit(Some(encoder.finish()));
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Generator Lab UI render pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+                .forget_lifetime();
+            self.egui_renderer
+                .render(&mut pass, &paint_jobs, &screen_descriptor);
+        }
+        command_buffers.push(encoder.finish());
+        self.queue.submit(command_buffers);
+        for texture_id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(texture_id);
+        }
         frame.present();
         Ok(())
+    }
+
+    fn apply_ui_action(&mut self, action: LabUiAction) {
+        let mut changed = false;
+        if let Some(mode) = action.mode
+            && mode != self.mode
+        {
+            self.mode = mode;
+            changed = true;
+        }
+        if action.next_season {
+            self.season = self.season.next();
+            changed = true;
+        }
+        if action.seed_delta < 0 {
+            self.seed = self.seed.wrapping_sub(1);
+            changed = true;
+        } else if action.seed_delta > 0 {
+            self.seed = self.seed.wrapping_add(1);
+            changed = true;
+        }
+        if action.reset_center {
+            self.center = [0.0, 0.0];
+            changed = true;
+        }
+        if action.pan != [0, 0] {
+            let step = self.span_meters * 0.15;
+            self.center[0] += f64::from(action.pan[0]) * step;
+            self.center[1] += f64::from(action.pan[1]) * step;
+            changed = true;
+        }
+        if let Some(factor) = action.zoom_factor {
+            self.span_meters *= factor;
+            changed = true;
+        }
+        self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
+        if changed && let Err(error) = self.regenerate() {
+            eprintln!("failed to update Generator Lab from UI: {error}");
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LabUiSnapshot<'inspection> {
+    mode: ViewMode,
+    season: Season,
+    seed: u64,
+    center: [f64; 2],
+    span_meters: f64,
+    cursor_world: [f64; 2],
+    inspection: Option<&'inspection str>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LabUiAction {
+    mode: Option<ViewMode>,
+    next_season: bool,
+    seed_delta: i8,
+    pan: [i8; 2],
+    zoom_factor: Option<f64>,
+    reset_center: bool,
+}
+
+fn draw_generator_lab_ui(
+    context: &egui::Context,
+    snapshot: LabUiSnapshot<'_>,
+    action: &mut LabUiAction,
+) {
+    egui::TopBottomPanel::top("generator_lab_status").show(context, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Treeline Generator Lab");
+            ui.separator();
+            ui.label(format!("View: {}", snapshot.mode.label()));
+            ui.separator();
+            ui.label(format!("Season: {}", snapshot.season.label()));
+            ui.separator();
+            ui.monospace(format!("Seed: {:016x}", snapshot.seed));
+            ui.separator();
+            ui.label(format!(
+                "Center: ({:.1}, {:.1}) km",
+                snapshot.center[0] / 1_000.0,
+                snapshot.center[1] / 1_000.0
+            ));
+            ui.separator();
+            ui.label(format!("Span: {:.0} km", snapshot.span_meters / 1_000.0));
+        });
+    });
+
+    egui::SidePanel::left("generator_lab_controls")
+        .resizable(false)
+        .default_width(240.0)
+        .show(context, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("View layers");
+                ui.add_space(4.0);
+                for mode in ViewMode::ALL {
+                    let label = format!("{}   {}", mode.shortcut(), mode.label());
+                    if ui.selectable_label(snapshot.mode == mode, label).clicked() {
+                        action.mode = Some(mode);
+                    }
+                }
+
+                draw_climate_season_ui(ui, snapshot.season, action);
+                ui.separator();
+                ui.heading("Navigate");
+                ui.add_space(4.0);
+                egui::Grid::new("generator_lab_navigation")
+                    .spacing([6.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("");
+                        if ui.add_sized([58.0, 28.0], egui::Button::new("↑")).clicked() {
+                            action.pan[1] = -1;
+                        }
+                        ui.end_row();
+
+                        if ui.add_sized([58.0, 28.0], egui::Button::new("←")).clicked() {
+                            action.pan[0] = -1;
+                        }
+                        if ui
+                            .add_sized([58.0, 28.0], egui::Button::new("Home"))
+                            .clicked()
+                        {
+                            action.reset_center = true;
+                        }
+                        if ui.add_sized([58.0, 28.0], egui::Button::new("→")).clicked() {
+                            action.pan[0] = 1;
+                        }
+                        ui.end_row();
+
+                        ui.label("");
+                        if ui.add_sized([58.0, 28.0], egui::Button::new("↓")).clicked() {
+                            action.pan[1] = 1;
+                        }
+                        ui.end_row();
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("−  Zoom out").clicked() {
+                        action.zoom_factor = Some(1.4);
+                    }
+                    if ui.button("+  Zoom in").clicked() {
+                        action.zoom_factor = Some(0.7);
+                    }
+                });
+                ui.label(format!(
+                    "Cursor: ({:.1}, {:.1}) km",
+                    snapshot.cursor_world[0] / 1_000.0,
+                    snapshot.cursor_world[1] / 1_000.0
+                ));
+
+                ui.separator();
+                ui.heading("World seed");
+                ui.monospace(format!("{:016x}", snapshot.seed));
+                ui.horizontal(|ui| {
+                    if ui.button("← Previous").clicked() {
+                        action.seed_delta = -1;
+                    }
+                    if ui.button("Next →").clicked() {
+                        action.seed_delta = 1;
+                    }
+                });
+
+                draw_keyboard_help(ui);
+
+                if let Some(inspection) = snapshot.inspection {
+                    ui.separator();
+                    ui.heading("Inspection");
+                    ui.label(inspection);
+                }
+            });
+        });
+}
+
+fn draw_climate_season_ui(ui: &mut egui::Ui, season: Season, action: &mut LabUiAction) {
+    ui.separator();
+    ui.heading("Climate season");
+    ui.label(season.label());
+    if ui.button("Next season (C)").clicked() {
+        action.next_season = true;
+    }
+}
+
+fn draw_keyboard_help(ui: &mut egui::Ui) {
+    ui.separator();
+    ui.heading("Keyboard & mouse");
+    for help in [
+        "1–9  Select view layer",
+        "C  Advance climate season",
+        "WASD / arrows  Pan",
+        "+ / − / wheel  Zoom",
+        "R  Next seed",
+        "T / right-click  Center on cursor",
+        "Left-click terrain  Inspect",
+        "Esc  Quit",
+    ] {
+        ui.label(help);
     }
 }
 
@@ -523,9 +845,10 @@ fn generate_mesh(
     width: u32,
     height: u32,
     mode: ViewMode,
+    season: Season,
 ) -> Result<treeline_mesher::Mesh, Box<dyn Error>> {
     if mode != ViewMode::Terrain {
-        return generate_drainage_mesh(seed, center, span_meters, width, height, mode);
+        return generate_drainage_mesh(seed, center, span_meters, width, height, mode, season);
     }
     let (columns, spacing) = grid_dimensions(span_meters, width, height);
     let field = GeneratedWorldTerrain::new(WorldIdentity::new(seed, GENERATOR_VERSION, 0));
@@ -547,6 +870,7 @@ fn generate_drainage_mesh(
     width: u32,
     height: u32,
     mode: ViewMode,
+    season: Season,
 ) -> Result<Mesh, Box<dyn Error>> {
     let (columns, spacing) = grid_dimensions(span_meters, width, height);
     let count_x = columns
@@ -571,11 +895,17 @@ fn generate_drainage_mesh(
             let world_x = origin_x + (usize_as_f64(x) * spacing);
             positions.push([f64_as_f32(world_x), 0.0, f64_as_f32(world_z)]);
             normals.push([0.0, 1.0, 0.0]);
-            if matches!(mode, ViewMode::Temperature | ViewMode::Precipitation) {
-                let sample = climate
+            if matches!(
+                mode,
+                ViewMode::Temperature | ViewMode::Precipitation | ViewMode::Snowpack
+            ) {
+                let annual = climate
                     .sample(world_x, world_z)
                     .ok_or_else(|| std::io::Error::other("failed to sample climate"))?;
-                colors.push(climate_color(sample, mode));
+                let seasonal = climate
+                    .sample_season(world_x, world_z, season)
+                    .ok_or_else(|| std::io::Error::other("failed to sample seasonal climate"))?;
+                colors.push(climate_color(annual, seasonal, mode));
                 continue;
             }
             let region_index = WatershedRegionIndex::containing(world_x, world_z)
@@ -718,15 +1048,21 @@ fn drainage_color(
                 1.0,
             ]
         }),
-        ViewMode::Temperature | ViewMode::Precipitation => [1.0, 0.0, 1.0, 1.0],
+        ViewMode::Temperature | ViewMode::Precipitation | ViewMode::Snowpack => {
+            [1.0, 0.0, 1.0, 1.0]
+        }
     }
 }
 
-fn climate_color(sample: ClimateSample, mode: ViewMode) -> [f32; 4] {
+fn climate_color(
+    annual: ClimateSample,
+    seasonal: SeasonalClimateSample,
+    mode: ViewMode,
+) -> [f32; 4] {
     match mode {
         ViewMode::Temperature => {
             let warmth =
-                f64_as_f32((sample.mean_temperature_celsius + 20.0) / 55.0).clamp(0.0, 1.0);
+                f64_as_f32((seasonal.mean_temperature_celsius + 35.0) / 70.0).clamp(0.0, 1.0);
             let temperate = 1.0 - ((warmth - 0.5).abs() * 2.0);
             [
                 lerp_f32(0.08, 0.92, warmth),
@@ -736,12 +1072,24 @@ fn climate_color(sample: ClimateSample, mode: ViewMode) -> [f32; 4] {
             ]
         }
         ViewMode::Precipitation => {
-            let moisture =
-                f64_as_f32(sample.annual_precipitation_millimeters / 3_000.0).clamp(0.0, 1.0);
+            let moisture = f64_as_f32(seasonal.precipitation_millimeters / 900.0).clamp(0.0, 1.0);
             [
                 lerp_f32(0.62, 0.04, moisture),
                 lerp_f32(0.34, 0.64, moisture),
                 lerp_f32(0.10, 0.92, moisture),
+                1.0,
+            ]
+        }
+        ViewMode::Snowpack => {
+            let snow = f64_as_f32(seasonal.snowpack_water_equivalent_millimeters / 1_200.0)
+                .clamp(0.0, 1.0);
+            let permanent =
+                f64_as_f32(annual.permanent_snowpack_water_equivalent_millimeters / 1_200.0)
+                    .clamp(0.0, 1.0);
+            [
+                lerp_f32(0.20, 0.94 - (permanent * 0.08), snow),
+                lerp_f32(0.18, 0.98, snow),
+                lerp_f32(0.14, 1.0, snow),
                 1.0,
             ]
         }

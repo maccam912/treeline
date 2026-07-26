@@ -20,6 +20,31 @@ const DOMAIN_WIND_Z: u64 = 0x5749_4e44_5f5a;
 const MACRO_CELL_EDGE_METERS: f64 = 64_000.0;
 const CLIMATE_CELL_EDGE_METERS: f64 = 100_000.0;
 const WIND_CELL_EDGE_METERS: f64 = 400_000.0;
+const LATITUDE_HALF_CYCLE_METERS: f64 = 2_000_000.0;
+const OCEAN_SEARCH_RADIUS_METERS: f64 = 800_000.0;
+const OCEAN_SAMPLE_DISTANCES_METERS: [f64; 2] = [250_000.0, 750_000.0];
+const OCEAN_SAMPLE_DIRECTIONS: [[f64; 2]; 8] = [
+    [1.0, 0.0],
+    [-1.0, 0.0],
+    [0.0, 1.0],
+    [0.0, -1.0],
+    [
+        std::f64::consts::FRAC_1_SQRT_2,
+        std::f64::consts::FRAC_1_SQRT_2,
+    ],
+    [
+        -std::f64::consts::FRAC_1_SQRT_2,
+        std::f64::consts::FRAC_1_SQRT_2,
+    ],
+    [
+        std::f64::consts::FRAC_1_SQRT_2,
+        -std::f64::consts::FRAC_1_SQRT_2,
+    ],
+    [
+        -std::f64::consts::FRAC_1_SQRT_2,
+        -std::f64::consts::FRAC_1_SQRT_2,
+    ],
+];
 const OROGRAPHIC_SAMPLE_STEP_METERS: f64 = 12_000.0;
 const OROGRAPHIC_SAMPLE_COUNT: u32 = 4;
 pub const DRAINAGE_CELL_EDGE_METERS: f64 = 2_000.0;
@@ -28,6 +53,59 @@ const WATERSHED_REGION_CELLS_I64: i64 = 64;
 pub const WATERSHED_REGION_EDGE_METERS: f64 = 128_000.0;
 /// Generator version that first derives climate from elevation and prevailing wind.
 pub const OROGRAPHIC_CLIMATE_GENERATOR_VERSION: u32 = 6;
+/// Generator version that adds latitude, continentality, seasons, and snowpack.
+pub const SEASONAL_CLIMATE_GENERATOR_VERSION: u32 = 7;
+
+/// A representative quarter of the deterministic annual climate cycle.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Season {
+    #[default]
+    Winter,
+    Spring,
+    Summer,
+    Autumn,
+}
+
+impl Season {
+    pub const ALL: [Self; 4] = [Self::Winter, Self::Spring, Self::Summer, Self::Autumn];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Winter => "winter",
+            Self::Spring => "spring",
+            Self::Summer => "summer",
+            Self::Autumn => "autumn",
+        }
+    }
+
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Winter => Self::Spring,
+            Self::Spring => Self::Summer,
+            Self::Summer => Self::Autumn,
+            Self::Autumn => Self::Winter,
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Winter => 0,
+            Self::Spring => 1,
+            Self::Summer => 2,
+            Self::Autumn => 3,
+        }
+    }
+
+    const fn temperature_factor(self) -> f64 {
+        match self {
+            Self::Winter => -0.85,
+            Self::Spring => -0.15,
+            Self::Summer => 0.85,
+            Self::Autumn => 0.15,
+        }
+    }
+}
 
 /// Coherent environmental parameters sampled at a horizontal world position.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,9 +210,11 @@ impl Climate {
     /// Wind is a spatially correlated vector field. Four fixed-distance
     /// upwind terrain samples establish windward lift and lee-side rain
     /// shadow. These world-space samples make the result independent of voxel
-    /// LOD, job order, and the watershed artifact containing the point. Wind
-    /// vector normalization uses deliberately specified IEEE-754 `f64`
-    /// operations and is part of the generation contract.
+    /// LOD, job order, and the watershed artifact containing the point.
+    /// Version 7 adds a broad repeating latitude-like field and fixed
+    /// world-space macro-elevation samples as an explainable ocean-proximity
+    /// proxy. Wind normalization and all latitude, continentality, and
+    /// seasonal `f64` operations are part of the generation contract.
     pub fn sample(self, x: f64, z: f64) -> Option<ClimateSample> {
         let profile = RegionalProfile::sample(self.world, x, z)?;
         let elevation_meters = MacroElevation::new(self.world)
@@ -161,9 +241,10 @@ impl Climate {
         let orographic_lift_meters = (elevation_meters - upwind_elevation_meters).max(0.0);
         let rain_shadow_meters = (highest_upwind_elevation_meters - elevation_meters).max(0.0);
 
-        let baseline_temperature_celsius = -6.0 + (profile.mean_temperature * 34.0);
+        let temperature = temperature_controls(self.world, profile, x, z, elevation_meters)?;
         let elevation_cooling_celsius = elevation_meters.max(0.0) * 0.0065;
-        let mean_temperature_celsius = baseline_temperature_celsius - elevation_cooling_celsius;
+        let mean_temperature_celsius =
+            temperature.baseline_temperature_celsius - elevation_cooling_celsius;
 
         let baseline_annual_precipitation_millimeters = 250.0 + (profile.precipitation * 2_250.0);
         let windward_gain = 0.8 * (orographic_lift_meters / 1_000.0).clamp(0.0, 1.0);
@@ -172,6 +253,17 @@ impl Climate {
         let annual_precipitation_millimeters =
             baseline_annual_precipitation_millimeters * precipitation_multiplier;
 
+        let snow = if self.world.generator_version >= SEASONAL_CLIMATE_GENERATOR_VERSION {
+            snow_cycle(
+                mean_temperature_celsius,
+                temperature.seasonal_temperature_amplitude_celsius,
+                annual_precipitation_millimeters,
+                temperature.precipitation_seasonality_fraction,
+            )
+        } else {
+            SnowCycle::default()
+        };
+
         Some(ClimateSample {
             elevation_meters,
             prevailing_wind,
@@ -179,11 +271,60 @@ impl Climate {
             highest_upwind_elevation_meters,
             orographic_lift_meters,
             rain_shadow_meters,
-            baseline_temperature_celsius,
+            latitude_warmth_fraction: temperature.latitude_warmth_fraction,
+            ocean_proximity_fraction: temperature.ocean_proximity_fraction,
+            continentality_fraction: temperature.continentality_fraction,
+            latitude_temperature_celsius: temperature.latitude_temperature_celsius,
+            regional_temperature_anomaly_celsius: temperature.regional_temperature_anomaly_celsius,
+            continentality_adjustment_celsius: temperature.continentality_adjustment_celsius,
+            baseline_temperature_celsius: temperature.baseline_temperature_celsius,
             elevation_cooling_celsius,
             mean_temperature_celsius,
+            seasonal_temperature_amplitude_celsius: temperature
+                .seasonal_temperature_amplitude_celsius,
+            precipitation_seasonality_fraction: temperature.precipitation_seasonality_fraction,
             baseline_annual_precipitation_millimeters,
             annual_precipitation_millimeters,
+            annual_snowfall_water_equivalent_millimeters: snow.annual_snowfall,
+            permanent_snowpack_water_equivalent_millimeters: snow.permanent_snowpack,
+            maximum_snowpack_water_equivalent_millimeters: snow.maximum_snowpack,
+            annual_snowmelt_millimeters: snow.annual_snowmelt,
+        })
+    }
+
+    /// Samples one explicit season without consulting simulation or wall-clock state.
+    pub fn sample_season(self, x: f64, z: f64, season: Season) -> Option<SeasonalClimateSample> {
+        let annual = self.sample(x, z)?;
+        if self.world.generator_version < SEASONAL_CLIMATE_GENERATOR_VERSION {
+            return Some(SeasonalClimateSample {
+                season,
+                mean_temperature_celsius: annual.mean_temperature_celsius,
+                precipitation_millimeters: annual.annual_precipitation_millimeters * 0.25,
+                rainfall_millimeters: annual.annual_precipitation_millimeters * 0.25,
+                snowfall_water_equivalent_millimeters: 0.0,
+                snowpack_water_equivalent_millimeters: 0.0,
+                snowmelt_millimeters: 0.0,
+            });
+        }
+        let snow = snow_cycle(
+            annual.mean_temperature_celsius,
+            annual.seasonal_temperature_amplitude_celsius,
+            annual.annual_precipitation_millimeters,
+            annual.precipitation_seasonality_fraction,
+        );
+        let index = season.index();
+        Some(SeasonalClimateSample {
+            season,
+            mean_temperature_celsius: seasonal_temperature(
+                annual.mean_temperature_celsius,
+                annual.seasonal_temperature_amplitude_celsius,
+                season,
+            ),
+            precipitation_millimeters: snow.precipitation[index],
+            rainfall_millimeters: snow.rainfall[index],
+            snowfall_water_equivalent_millimeters: snow.snowfall[index],
+            snowpack_water_equivalent_millimeters: snow.snowpack[index],
+            snowmelt_millimeters: snow.snowmelt[index],
         })
     }
 }
@@ -197,11 +338,23 @@ pub struct ClimateSample {
     pub highest_upwind_elevation_meters: f64,
     pub orographic_lift_meters: f64,
     pub rain_shadow_meters: f64,
+    pub latitude_warmth_fraction: f64,
+    pub ocean_proximity_fraction: f64,
+    pub continentality_fraction: f64,
+    pub latitude_temperature_celsius: f64,
+    pub regional_temperature_anomaly_celsius: f64,
+    pub continentality_adjustment_celsius: f64,
     pub baseline_temperature_celsius: f64,
     pub elevation_cooling_celsius: f64,
     pub mean_temperature_celsius: f64,
+    pub seasonal_temperature_amplitude_celsius: f64,
+    pub precipitation_seasonality_fraction: f64,
     pub baseline_annual_precipitation_millimeters: f64,
     pub annual_precipitation_millimeters: f64,
+    pub annual_snowfall_water_equivalent_millimeters: f64,
+    pub permanent_snowpack_water_equivalent_millimeters: f64,
+    pub maximum_snowpack_water_equivalent_millimeters: f64,
+    pub annual_snowmelt_millimeters: f64,
 }
 
 impl ClimateSample {
@@ -212,6 +365,44 @@ impl ClimateSample {
     pub fn warmth_fraction(self) -> f64 {
         ((self.mean_temperature_celsius + 20.0) / 55.0).clamp(0.0, 1.0)
     }
+}
+
+/// Explainable climate state for one representative season.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeasonalClimateSample {
+    pub season: Season,
+    pub mean_temperature_celsius: f64,
+    pub precipitation_millimeters: f64,
+    pub rainfall_millimeters: f64,
+    pub snowfall_water_equivalent_millimeters: f64,
+    pub snowpack_water_equivalent_millimeters: f64,
+    pub snowmelt_millimeters: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SnowCycle {
+    precipitation: [f64; 4],
+    rainfall: [f64; 4],
+    snowfall: [f64; 4],
+    snowpack: [f64; 4],
+    snowmelt: [f64; 4],
+    annual_snowfall: f64,
+    permanent_snowpack: f64,
+    maximum_snowpack: f64,
+    annual_snowmelt: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TemperatureControls {
+    latitude_warmth_fraction: f64,
+    ocean_proximity_fraction: f64,
+    continentality_fraction: f64,
+    latitude_temperature_celsius: f64,
+    regional_temperature_anomaly_celsius: f64,
+    continentality_adjustment_celsius: f64,
+    baseline_temperature_celsius: f64,
+    seasonal_temperature_amplitude_celsius: f64,
+    precipitation_seasonality_fraction: f64,
 }
 
 /// Integer identity of a cell on the global drainage lattice.
@@ -710,6 +901,162 @@ fn hash_fraction(key: u64, lane: u64) -> f64 {
     hash53_as_f64(mixed >> 11) / 9_007_199_254_740_991.0
 }
 
+fn temperature_controls(
+    world: WorldIdentity,
+    profile: RegionalProfile,
+    x: f64,
+    z: f64,
+    elevation_meters: f64,
+) -> Option<TemperatureControls> {
+    if world.generator_version < SEASONAL_CLIMATE_GENERATOR_VERSION {
+        let baseline_temperature_celsius = -6.0 + (profile.mean_temperature * 34.0);
+        return Some(TemperatureControls {
+            latitude_warmth_fraction: profile.mean_temperature,
+            ocean_proximity_fraction: 0.0,
+            continentality_fraction: 1.0,
+            latitude_temperature_celsius: baseline_temperature_celsius,
+            regional_temperature_anomaly_celsius: 0.0,
+            continentality_adjustment_celsius: 0.0,
+            baseline_temperature_celsius,
+            seasonal_temperature_amplitude_celsius: 0.0,
+            precipitation_seasonality_fraction: 0.0,
+        });
+    }
+
+    let latitude_warmth_fraction = latitude_warmth(z)?;
+    let ocean_proximity_fraction = ocean_proximity(world, x, z, elevation_meters)?;
+    let continentality_fraction = 1.0 - ocean_proximity_fraction;
+    let latitude_temperature_celsius = -14.0 + (latitude_warmth_fraction * 36.0);
+    let regional_temperature_anomaly_celsius = (profile.mean_temperature - 0.5) * 12.0;
+    let continentality_adjustment_celsius = -3.0 * continentality_fraction;
+    let baseline_temperature_celsius = latitude_temperature_celsius
+        + regional_temperature_anomaly_celsius
+        + continentality_adjustment_celsius;
+    Some(TemperatureControls {
+        latitude_warmth_fraction,
+        ocean_proximity_fraction,
+        continentality_fraction,
+        latitude_temperature_celsius,
+        regional_temperature_anomaly_celsius,
+        continentality_adjustment_celsius,
+        baseline_temperature_celsius,
+        seasonal_temperature_amplitude_celsius: 5.0
+            + (continentality_fraction * 18.0)
+            + ((1.0 - latitude_warmth_fraction) * 4.0),
+        precipitation_seasonality_fraction: 0.05 + (continentality_fraction * 0.25),
+    })
+}
+
+fn latitude_warmth(z: f64) -> Option<f64> {
+    if !z.is_finite() {
+        return None;
+    }
+    let phase = (z / LATITUDE_HALF_CYCLE_METERS).rem_euclid(2.0);
+    let triangular_warmth = 1.0 - (phase - 1.0).abs();
+    Some(smoothstep(triangular_warmth))
+}
+
+fn ocean_proximity(
+    world: WorldIdentity,
+    x: f64,
+    z: f64,
+    local_elevation_meters: f64,
+) -> Option<f64> {
+    let mut proximity = ocean_likeness(local_elevation_meters);
+    let terrain = MacroElevation::new(world);
+    for distance in OCEAN_SAMPLE_DISTANCES_METERS {
+        let distance_weight =
+            1.0 - (0.65 * (distance / OCEAN_SEARCH_RADIUS_METERS).clamp(0.0, 1.0));
+        for [direction_x, direction_z] in OCEAN_SAMPLE_DIRECTIONS {
+            let elevation = terrain
+                .sample(x + (direction_x * distance), z + (direction_z * distance))?
+                .elevation_meters;
+            proximity = proximity.max(ocean_likeness(elevation) * distance_weight);
+        }
+    }
+    Some(proximity.clamp(0.0, 1.0))
+}
+
+fn ocean_likeness(elevation_meters: f64) -> f64 {
+    ((60.0 - elevation_meters) / 100.0).clamp(0.0, 1.0)
+}
+
+fn seasonal_temperature(annual_mean_celsius: f64, amplitude_celsius: f64, season: Season) -> f64 {
+    annual_mean_celsius + (amplitude_celsius * season.temperature_factor())
+}
+
+fn snow_fraction(temperature_celsius: f64) -> f64 {
+    ((2.0 - temperature_celsius) / 4.0).clamp(0.0, 1.0)
+}
+
+fn snow_cycle(
+    annual_mean_temperature_celsius: f64,
+    seasonal_temperature_amplitude_celsius: f64,
+    annual_precipitation_millimeters: f64,
+    precipitation_seasonality_fraction: f64,
+) -> SnowCycle {
+    let precipitation_weights = [
+        0.25 + (precipitation_seasonality_fraction * 0.5),
+        0.25,
+        0.25 - (precipitation_seasonality_fraction * 0.5),
+        0.25,
+    ];
+    let mut cycle = SnowCycle::default();
+    let mut temperatures = [0.0; 4];
+    for season in Season::ALL {
+        let index = season.index();
+        temperatures[index] = seasonal_temperature(
+            annual_mean_temperature_celsius,
+            seasonal_temperature_amplitude_celsius,
+            season,
+        );
+        cycle.precipitation[index] =
+            annual_precipitation_millimeters * precipitation_weights[index];
+        cycle.snowfall[index] = cycle.precipitation[index] * snow_fraction(temperatures[index]);
+        cycle.rainfall[index] = cycle.precipitation[index] - cycle.snowfall[index];
+        cycle.annual_snowfall += cycle.snowfall[index];
+    }
+
+    let warmest_temperature = temperatures.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let permanent_fraction = snow_fraction(warmest_temperature);
+    cycle.permanent_snowpack = cycle.annual_snowfall * permanent_fraction * 2.0;
+    let meltable_fraction = 1.0 - permanent_fraction;
+    let spring_melt_weight = (temperatures[Season::Spring.index()] + 2.0).max(0.0);
+    let summer_melt_weight = (temperatures[Season::Summer.index()] + 2.0).max(0.0);
+    let total_melt_weight = spring_melt_weight + summer_melt_weight;
+    let meltable_snowfall = cycle.annual_snowfall * meltable_fraction;
+    let spring_melt_target = if total_melt_weight > 0.0 {
+        meltable_snowfall * spring_melt_weight / total_melt_weight
+    } else {
+        0.0
+    };
+
+    let mut snowpack = cycle.permanent_snowpack;
+    let mut maximum_snowpack = snowpack;
+    for season in [
+        Season::Autumn,
+        Season::Winter,
+        Season::Spring,
+        Season::Summer,
+    ] {
+        let index = season.index();
+        snowpack += cycle.snowfall[index] * meltable_fraction;
+        maximum_snowpack = maximum_snowpack.max(snowpack);
+        let available_to_melt = (snowpack - cycle.permanent_snowpack).max(0.0);
+        let melt = match season {
+            Season::Spring => spring_melt_target.min(available_to_melt),
+            Season::Summer => available_to_melt,
+            Season::Winter | Season::Autumn => 0.0,
+        };
+        snowpack -= melt;
+        cycle.snowmelt[index] = melt;
+        cycle.snowpack[index] = snowpack;
+        cycle.annual_snowmelt += melt;
+    }
+    cycle.maximum_snowpack = maximum_snowpack;
+    cycle
+}
+
 fn prevailing_wind(world: WorldIdentity, x: f64, z: f64) -> Option<[f64; 2]> {
     let wind_x = (value_field(world, DOMAIN_WIND_X, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
     let wind_z = (value_field(world, DOMAIN_WIND_Z, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
@@ -910,6 +1257,148 @@ mod tests {
         assert_eq!(
             fingerprint, 3_353_464_691_744_025_732,
             "changing this value changes generated orographic climate"
+        );
+    }
+
+    #[test]
+    fn seasonal_climate_is_explicit_deterministic_and_water_balanced() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            SEASONAL_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let annual = climate.sample(-73_125.0, 19_875.0).expect("annual climate");
+        let first = Season::ALL.map(|season| {
+            climate
+                .sample_season(-73_125.0, 19_875.0, season)
+                .expect("seasonal climate")
+        });
+        let second = Season::ALL.map(|season| {
+            climate
+                .sample_season(-73_125.0, 19_875.0, season)
+                .expect("same seasonal climate")
+        });
+
+        assert_eq!(first, second);
+        let precipitation = first
+            .iter()
+            .map(|sample| sample.precipitation_millimeters)
+            .sum::<f64>();
+        let snowfall = first
+            .iter()
+            .map(|sample| sample.snowfall_water_equivalent_millimeters)
+            .sum::<f64>();
+        let snowmelt = first
+            .iter()
+            .map(|sample| sample.snowmelt_millimeters)
+            .sum::<f64>();
+        assert!((precipitation - annual.annual_precipitation_millimeters).abs() < 1.0e-9);
+        assert!((snowfall - annual.annual_snowfall_water_equivalent_millimeters).abs() < 1.0e-9);
+        assert!((snowmelt - annual.annual_snowmelt_millimeters).abs() < 1.0e-9);
+        for sample in first {
+            assert!(
+                (sample.rainfall_millimeters + sample.snowfall_water_equivalent_millimeters
+                    - sample.precipitation_millimeters)
+                    .abs()
+                    < 1.0e-9
+            );
+            assert!(sample.snowpack_water_equivalent_millimeters >= 0.0);
+        }
+    }
+
+    #[test]
+    fn latitude_and_continentality_have_explainable_climate_effects() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            SEASONAL_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let cold_band = climate.sample(0.0, 0.0).expect("cold latitude band");
+        let warm_band = climate
+            .sample(0.0, LATITUDE_HALF_CYCLE_METERS)
+            .expect("warm latitude band");
+
+        assert!(cold_band.latitude_temperature_celsius < warm_band.latitude_temperature_celsius);
+        for sample in [cold_band, warm_band] {
+            assert_eq!(
+                sample.baseline_temperature_celsius.to_bits(),
+                (sample.latitude_temperature_celsius
+                    + sample.regional_temperature_anomaly_celsius
+                    + sample.continentality_adjustment_celsius)
+                    .to_bits()
+            );
+            assert!(
+                (sample.continentality_fraction + sample.ocean_proximity_fraction - 1.0).abs()
+                    < f64::EPSILON
+            );
+            assert_eq!(
+                sample.seasonal_temperature_amplitude_celsius.to_bits(),
+                (5.0 + (sample.continentality_fraction * 18.0)
+                    + ((1.0 - sample.latitude_warmth_fraction) * 4.0))
+                    .to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn seasonal_climate_is_continuous_across_negative_latitude_boundaries() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            SEASONAL_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let south = climate.sample(-12_000.0, -0.01).expect("south climate");
+        let north = climate.sample(-12_000.0, 0.01).expect("north climate");
+
+        assert!((south.latitude_warmth_fraction - north.latitude_warmth_fraction).abs() < 1.0e-9);
+        assert!((south.mean_temperature_celsius - north.mean_temperature_celsius).abs() < 0.1);
+        assert!(
+            (south.maximum_snowpack_water_equivalent_millimeters
+                - north.maximum_snowpack_water_equivalent_millimeters)
+                .abs()
+                < 1.0
+        );
+    }
+
+    #[test]
+    fn seasonal_climate_has_a_golden_fingerprint() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            SEASONAL_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let samples = [
+            (-1_891_000.0, -2_037_000.0),
+            (-764_000.0, -936_000.0),
+            (-1.0, 1.0),
+            (828_000.0, 1_052_000.0),
+            (2_117_000.0, 2_083_000.0),
+        ];
+        let fingerprint = stable_hash(
+            &samples
+                .into_iter()
+                .flat_map(|(x, z)| {
+                    let annual = climate.sample(x, z).expect("finite");
+                    let winter = climate.sample_season(x, z, Season::Winter).expect("winter");
+                    let summer = climate.sample_season(x, z, Season::Summer).expect("summer");
+                    [
+                        annual.mean_temperature_celsius.to_bits(),
+                        annual.annual_precipitation_millimeters.to_bits(),
+                        annual.ocean_proximity_fraction.to_bits(),
+                        annual
+                            .maximum_snowpack_water_equivalent_millimeters
+                            .to_bits(),
+                        winter.mean_temperature_celsius.to_bits(),
+                        winter.snowpack_water_equivalent_millimeters.to_bits(),
+                        summer.mean_temperature_celsius.to_bits(),
+                        summer.snowmelt_millimeters.to_bits(),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            fingerprint, 16_179_459_295_312_885_200,
+            "changing this value changes generated seasonal climate"
         );
     }
 

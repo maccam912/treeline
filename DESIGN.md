@@ -2206,16 +2206,20 @@ The world generator is the game.
 
 **Phase status: In progress**
 
-- [ ] **NEXT / PARTIAL** — climate. Spatially correlated prevailing winds,
-      elevation cooling, orographic precipitation, and rain shadows now feed
-      river discharge and erosion. Continentality, latitude-like structure,
-      seasons, and snowpack remain.
-- [ ] Soil
+- [x] Climate. Spatially correlated prevailing winds, latitude-like structure,
+      continentality, elevation cooling, orographic precipitation, rain
+      shadows, explicit seasons, and deterministic snowpack feed river
+      discharge and erosion.
+- [ ] **NEXT / PARTIAL** — Soil. Erosion already exposes deterministic soil
+      depth and surface material, but soil composition, moisture, acidity, and
+      ecology-facing suitability remain.
 - [ ] Forest distribution
 - [ ] Procedural trees
 - [ ] Surface rocks
 - [ ] Ground vegetation
-- [ ] Snow
+- [ ] **PARTIAL** — Snow. Climate generates seasonal snowfall, accumulation,
+      permanent snowpack, and meltwater runoff, but terrain coverage and
+      rendering remain.
 - [ ] Wetlands
 - [ ] Reefs
 
