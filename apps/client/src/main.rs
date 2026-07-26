@@ -5,11 +5,14 @@ use std::time::Instant;
 
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
-use treeline_mesher::transvoxel_chunk;
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::RollingHills;
 use treeline_voxel::ChunkIndex;
-use treeline_world::{ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig};
+use treeline_world::{
+    ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig, FarTerrainMeshSpec, FarTerrainStreamer,
+    FarTerrainStreamingConfig, FarTileIndex, GenerationPriority, NearTerrainCutout,
+    TerrainMeshQueue, TerrainMeshSpec,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -144,7 +147,12 @@ struct Game {
     surface_config: wgpu::SurfaceConfiguration,
     renderer: TerrainRenderer,
     terrain_chunks: BTreeMap<ChunkIndex, ResidentTerrainChunk>,
+    far_terrain_tiles: BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
+    requested_chunks: BTreeMap<ChunkIndex, ChunkMeshSpec>,
+    requested_far_tiles: BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
+    terrain_jobs: TerrainMeshQueue<RollingHills>,
     chunk_streamer: ChunkStreamer,
+    far_terrain_streamer: FarTerrainStreamer,
     terrain: RollingHills,
     camera: Camera,
     input: InputState,
@@ -204,19 +212,26 @@ impl Game {
             surface_config.height,
         );
         let chunk_streamer = ChunkStreamer::new(ChunkStreamingConfig::default());
+        let far_terrain_streamer = FarTerrainStreamer::new(FarTerrainStreamingConfig::default());
         let mut terrain_chunks = BTreeMap::new();
+        let mut far_terrain_tiles = BTreeMap::new();
+        let mut requested_chunks = BTreeMap::new();
+        let mut requested_far_tiles = BTreeMap::new();
+        let mut terrain_jobs = TerrainMeshQueue::new(terrain);
 
         let start_x = 0.0;
         let start_z = 70.0;
         let start_y = surface_height(terrain, start_x, start_z) + EYE_HEIGHT;
         let camera = Camera::new(Vec3::new(start_x, start_y, start_z));
-        stream_terrain_chunks(
-            &device,
-            &renderer,
-            terrain,
+        schedule_terrain(
             chunk_streamer,
+            far_terrain_streamer,
             camera.world_position(),
             &mut terrain_chunks,
+            &mut far_terrain_tiles,
+            &mut requested_chunks,
+            &mut requested_far_tiles,
+            &mut terrain_jobs,
         )?;
         renderer.update_camera(
             &queue,
@@ -232,7 +247,12 @@ impl Game {
             surface_config,
             renderer,
             terrain_chunks,
+            far_terrain_tiles,
+            requested_chunks,
+            requested_far_tiles,
+            terrain_jobs,
             chunk_streamer,
+            far_terrain_streamer,
             terrain,
             camera,
             input: InputState::default(),
@@ -276,13 +296,17 @@ impl Game {
         let delta_seconds = (now - self.previous_frame).as_secs_f32().min(0.1);
         self.previous_frame = now;
         self.camera.walk(&self.input, self.terrain, delta_seconds);
-        if let Err(error) = stream_terrain_chunks(
+        if let Err(error) = update_terrain(
             &self.device,
             &self.renderer,
-            self.terrain,
             self.chunk_streamer,
+            self.far_terrain_streamer,
             self.camera.world_position(),
             &mut self.terrain_chunks,
+            &mut self.far_terrain_tiles,
+            &mut self.requested_chunks,
+            &mut self.requested_far_tiles,
+            &mut self.terrain_jobs,
         ) {
             eprintln!("terrain chunk streaming failed: {error}");
         }
@@ -306,7 +330,10 @@ impl Game {
         self.renderer.render(
             &mut encoder,
             &view,
-            self.terrain_chunks.values().map(|resident| &resident.mesh),
+            self.far_terrain_tiles
+                .values()
+                .map(|resident| &resident.mesh)
+                .chain(self.terrain_chunks.values().map(|resident| &resident.mesh)),
         );
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -316,6 +343,11 @@ impl Game {
 
 struct ResidentTerrainChunk {
     spec: ChunkMeshSpec,
+    mesh: TerrainMesh,
+}
+
+struct ResidentFarTerrainTile {
+    spec: FarTerrainMeshSpec,
     mesh: TerrainMesh,
 }
 
@@ -375,7 +407,7 @@ impl Camera {
 
     fn view_projection(&self, width: u32, height: u32) -> [[f32; 4]; 4] {
         let aspect = u32_as_f32(width) / u32_as_f32(height.max(1));
-        let projection = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 500.0);
+        let projection = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 5_000.0);
         let view = Mat4::look_to_rh(self.position, self.direction(), Vec3::Y);
         (projection * view).to_cols_array_2d()
     }
@@ -431,54 +463,148 @@ fn surface_height(terrain: RollingHills, x: f32, z: f32) -> f32 {
     f64_as_f32(height)
 }
 
-fn stream_terrain_chunks(
+#[allow(clippy::too_many_arguments)]
+fn update_terrain(
     device: &wgpu::Device,
     renderer: &TerrainRenderer,
-    terrain: RollingHills,
-    streamer: ChunkStreamer,
+    chunk_streamer: ChunkStreamer,
+    far_streamer: FarTerrainStreamer,
     player_position: WorldPosition,
     chunks: &mut BTreeMap<ChunkIndex, ResidentTerrainChunk>,
+    far_tiles: &mut BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
+    requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
+    requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
+    jobs: &mut TerrainMeshQueue<RollingHills>,
 ) -> Result<(), Box<dyn Error>> {
-    let loaded = chunks
+    while let Some(generated) = jobs.try_next() {
+        match generated.spec {
+            TerrainMeshSpec::Near(spec) => {
+                if requested.get(&spec.chunk) != Some(&spec) {
+                    continue;
+                }
+                requested.remove(&spec.chunk);
+                chunks.insert(
+                    spec.chunk,
+                    ResidentTerrainChunk {
+                        spec,
+                        mesh: renderer.upload_mesh(device, &generated.mesh?)?,
+                    },
+                );
+            }
+            TerrainMeshSpec::Far(spec) => {
+                if requested_far.get(&spec.tile) != Some(&spec) {
+                    continue;
+                }
+                requested_far.remove(&spec.tile);
+                far_tiles.insert(
+                    spec.tile,
+                    ResidentFarTerrainTile {
+                        spec,
+                        mesh: renderer.upload_mesh(device, &generated.mesh?)?,
+                    },
+                );
+            }
+        }
+    }
+
+    schedule_terrain(
+        chunk_streamer,
+        far_streamer,
+        player_position,
+        chunks,
+        far_tiles,
+        requested,
+        requested_far,
+        jobs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_terrain(
+    chunk_streamer: ChunkStreamer,
+    far_streamer: FarTerrainStreamer,
+    player_position: WorldPosition,
+    chunks: &mut BTreeMap<ChunkIndex, ResidentTerrainChunk>,
+    far_tiles: &mut BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
+    requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
+    requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
+    jobs: &mut TerrainMeshQueue<RollingHills>,
+) -> Result<(), Box<dyn Error>> {
+    let mut tracked_chunks = chunks
         .iter()
         .map(|(&chunk, resident)| (chunk, resident.spec))
         .collect::<BTreeMap<_, _>>();
-    let plan = streamer
-        .plan(player_position, &loaded)
+    tracked_chunks.extend(requested.iter().map(|(&chunk, &spec)| (chunk, spec)));
+    let chunk_plan = chunk_streamer
+        .plan(player_position, &tracked_chunks)
         .ok_or_else(|| std::io::Error::other("player position is outside chunk index range"))?;
-    if plan.load.is_empty() && plan.unload.is_empty() {
-        return Ok(());
-    }
 
-    for chunk in &plan.unload {
+    for chunk in &chunk_plan.unload {
         chunks.remove(chunk);
+        requested.remove(chunk);
     }
 
-    let mut triangle_count = 0;
     let mut lod_counts = [0_usize; 3];
-    for spec in &plan.load {
-        let mesh = transvoxel_chunk(&terrain, spec.chunk, spec.lod, spec.transition_faces)?;
-        triangle_count += mesh.indices.len() / 3;
+    for spec in &chunk_plan.load {
         let lod_index = usize::from(spec.lod.get() - ChunkIndex::NEAR_LOD.get());
         lod_counts[lod_index] += 1;
-        chunks.insert(
-            spec.chunk,
-            ResidentTerrainChunk {
-                spec: *spec,
-                mesh: renderer.upload_mesh(device, &mesh)?,
-            },
+        requested.insert(spec.chunk, *spec);
+    }
+
+    let near_cutout = if chunk_plan.load.is_empty() && requested.is_empty() {
+        NearTerrainCutout::around(chunk_plan.center, chunk_streamer.config().load_radius())
+    } else {
+        None
+    };
+    let mut tracked_far = far_tiles
+        .iter()
+        .map(|(&tile, resident)| (tile, resident.spec))
+        .collect::<BTreeMap<_, _>>();
+    tracked_far.extend(requested_far.iter().map(|(&tile, &spec)| (tile, spec)));
+    let far_plan = far_streamer
+        .plan(player_position, &tracked_far, near_cutout)
+        .ok_or_else(|| std::io::Error::other("player position is outside far tile index range"))?;
+    for tile in &far_plan.unload {
+        far_tiles.remove(tile);
+        requested_far.remove(tile);
+    }
+    for spec in &far_plan.load {
+        requested_far.insert(spec.tile, *spec);
+        let priority = if spec.tile.chebyshev_distance(far_plan.center)
+            == far_streamer.config().load_radius()
+        {
+            GenerationPriority::Horizon
+        } else {
+            GenerationPriority::FarTerrain
+        };
+        jobs.enqueue(priority, TerrainMeshSpec::Far(*spec));
+    }
+    for spec in &chunk_plan.load {
+        jobs.enqueue(
+            GenerationPriority::NearTerrain,
+            TerrainMeshSpec::Near(*spec),
         );
     }
+
+    if chunk_plan.load.is_empty()
+        && chunk_plan.unload.is_empty()
+        && far_plan.load.is_empty()
+        && far_plan.unload.is_empty()
+    {
+        return Ok(());
+    }
     eprintln!(
-        "streamed center ({}, {}): meshed {} chunks [LOD2 {}, LOD3 {}, LOD4 {}] / {} triangles, unloaded {}, resident {}",
-        plan.center.x,
-        plan.center.z,
-        plan.load.len(),
+        "streaming center ({}, {}): queued {} far tiles and {} chunks [LOD2 {}, LOD3 {}, LOD4 {}], unloaded {} far / {} near, resident {} far / {} near",
+        chunk_plan.center.x,
+        chunk_plan.center.z,
+        far_plan.load.len(),
+        chunk_plan.load.len(),
         lod_counts[0],
         lod_counts[1],
         lod_counts[2],
-        triangle_count,
-        plan.unload.len(),
+        far_plan.unload.len(),
+        chunk_plan.unload.len(),
+        far_tiles.len(),
         chunks.len()
     );
     Ok(())

@@ -238,7 +238,6 @@ dependencies = [
  "glam",
  "pollster",
  "treeline-coordinates",
- "treeline-mesher",
  "treeline-renderer",
  "treeline-terrain",
  "treeline-voxel",
@@ -1925,6 +1924,8 @@ name = "treeline-world"
 version = "0.1.0"
 dependencies = [
  "treeline-coordinates",
+ "treeline-mesher",
+ "treeline-terrain",
  "treeline-voxel",
 ]
 
