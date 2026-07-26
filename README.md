@@ -41,9 +41,11 @@ test-backed foundations described in the design. The prototype provides:
   deterministic snowpack and meltwater-fed runoff;
 - deterministic lakes derived from filled drainage basins, with level water
   surfaces, stable identities, spill outlets, and near/far rendering;
+- deterministic soil profiles and continuous forest distributions with canopy
+  cover, biomass, stand history, and tree functional-group composition;
 - an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
   terrain/watershed/flow/river/lake/erosion/temperature/precipitation/snowpack
-  views, selectable seasons, and parameter inspection;
+  /soil/forest views, selectable seasons, and parameter inspection;
 - hydrology and cave graph invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
@@ -56,8 +58,9 @@ previous terrain contracts. Filled drainage basins become rendered lakes with
 generator version 4. Multi-scale erosion is enabled by generator version 5.
 Orographic climate begins with generator version 6. Latitude-like climate,
 continentality, seasons, snowpack, and meltwater runoff begin with generator
-version 7; versions 1–6 retain their prior generation contracts. Vegetation,
-survival, and networking have not been added yet.
+version 7. Soil profiles begin with generator version 8, and forest distribution
+with version 9; older identities retain their prior generation contracts.
+Rendered vegetation, survival, and networking have not been added yet.
 
 ## Getting started
 
@@ -78,8 +81,9 @@ cargo run -p generator-lab
 In Generator Lab, use WASD or the arrow keys to pan, `+`/`-` or the mouse wheel
 to zoom, `R` to advance the seed, and `1` through `9` to view terrain,
 watersheds, flow accumulation, rivers, lakes, erosion, seasonal temperature,
-seasonal precipitation, or snowpack. Press `C` to advance the displayed
-season. Left-click to inspect a location, and right-click to teleport the view.
+seasonal precipitation, or snowpack. Press `0` for soil and `F` for forest
+distribution. Press `C` to advance the displayed season. Left-click to inspect
+a location, and right-click to teleport the view.
 
 Run the playable terrain toy with:
 
