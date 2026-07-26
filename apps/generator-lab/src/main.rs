@@ -322,10 +322,8 @@ impl GeneratorLab {
             _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
-        if changed {
-            if let Err(error) = self.regenerate() {
-                eprintln!("failed to update Generator Lab view: {error}");
-            }
+        if changed && let Err(error) = self.regenerate() {
+            eprintln!("failed to update Generator Lab view: {error}");
         }
     }
 

@@ -50,7 +50,7 @@ Vegetation, survival, and networking have not been added yet.
 
 ## Getting started
 
-Install Rust 1.85 or newer, then run:
+Install Rust 1.97.1 or newer, then run:
 
 ```sh
 cargo test --workspace

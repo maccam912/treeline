@@ -28,7 +28,7 @@ impl Mesh {
         };
         self.positions.len() == self.normals.len()
             && (self.colors.is_empty() || self.positions.len() == self.colors.len())
-            && self.indices.len() % 3 == 0
+            && self.indices.len().is_multiple_of(3)
             && self.indices.iter().all(|&index| index < vertex_count)
     }
 }

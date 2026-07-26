@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::num::NonZeroUsize;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, PoisonError, RwLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Condvar, Mutex};
@@ -465,10 +465,7 @@ where
     pub fn try_next(&mut self) -> Option<GeneratedTerrainMesh> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            match self.ready.try_recv() {
-                Ok(mesh) => Some(mesh),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-            }
+            self.ready.try_recv().ok()
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -581,6 +578,7 @@ where
 
 /// Validated near-terrain residency radii measured in chunks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)]
 pub struct ChunkStreamingConfig {
     load_radius: u64,
     retain_radius: u64,
