@@ -460,6 +460,7 @@ dependencies = [
  "treeline-mesher",
  "treeline-renderer",
  "treeline-terrain",
+ "treeline-world",
  "wgpu",
  "winit",
 ]
@@ -1933,6 +1934,8 @@ name = "treeline-world"
 version = "0.1.0"
 dependencies = [
  "treeline-coordinates",
+ "treeline-geography",
+ "treeline-hydrology",
  "treeline-mesher",
  "treeline-terrain",
  "treeline-voxel",

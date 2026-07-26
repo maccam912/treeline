@@ -9,6 +9,8 @@ authors.workspace = true
 
 [dependencies]
 treeline-coordinates.workspace = true
+treeline-geography.workspace = true
+treeline-hydrology.workspace = true
 treeline-mesher.workspace = true
 treeline-terrain.workspace = true
 treeline-voxel.workspace = true

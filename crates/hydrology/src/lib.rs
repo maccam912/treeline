@@ -10,6 +10,7 @@ use treeline_geography::{
 
 const SECONDS_PER_YEAR: f64 = 31_556_952.0;
 const MIN_CHANNEL_CATCHMENT_CELLS: u64 = 8;
+pub const MAX_RIVER_INFLUENCE_METERS: f64 = 900.0;
 
 /// A directed segment in a generated river graph.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,6 +28,66 @@ impl RiverSegment {
     pub fn descends_or_is_level(self) -> bool {
         self.source.y >= self.mouth.y
     }
+
+    /// Evaluates the valley carved by this segment at a horizontal position.
+    ///
+    /// Channel and valley scale grow continuously with catchment and discharge
+    /// rather than selecting a river preset. The square roots are deliberately
+    /// specified `f64` operations and therefore part of the generation
+    /// contract.
+    pub fn terrain_influence(self, x: f64, z: f64) -> Option<RiverTerrainInfluence> {
+        if !x.is_finite() || !z.is_finite() {
+            return None;
+        }
+        let segment_x = self.mouth.x - self.source.x;
+        let segment_z = self.mouth.z - self.source.z;
+        let length_squared = segment_x.mul_add(segment_x, segment_z * segment_z);
+        if length_squared <= 0.0 {
+            return None;
+        }
+        let offset_x = x - self.source.x;
+        let offset_z = z - self.source.z;
+        let along =
+            ((offset_x.mul_add(segment_x, offset_z * segment_z)) / length_squared).clamp(0.0, 1.0);
+        let nearest_x = self.source.x + (segment_x * along);
+        let nearest_z = self.source.z + (segment_z * along);
+        let distance_meters = (x - nearest_x).hypot(z - nearest_z);
+        let catchment_scale = self.drainage_area_square_kilometers.sqrt();
+        let discharge_scale = self.discharge_cubic_meters_per_second.sqrt();
+        let valley_half_width_meters =
+            (96.0 + (catchment_scale * 18.0)).clamp(160.0, MAX_RIVER_INFLUENCE_METERS);
+        if distance_meters > valley_half_width_meters {
+            return None;
+        }
+        let channel_half_width_meters = (2.0 + (discharge_scale * 2.5)).clamp(2.0, 30.0);
+        let incision_depth_meters =
+            (16.0 + (catchment_scale * 0.12) + (discharge_scale * 0.5)).clamp(16.0, 48.0);
+        let centerline_elevation_meters = self.source.y + ((self.mouth.y - self.source.y) * along);
+        let normalized = 1.0 - (distance_meters / valley_half_width_meters);
+        let blend = normalized * normalized * (3.0 - (2.0 * normalized));
+
+        Some(RiverTerrainInfluence {
+            segment: self,
+            distance_meters,
+            centerline_elevation_meters,
+            channel_half_width_meters,
+            valley_half_width_meters,
+            incision_depth_meters,
+            blend,
+        })
+    }
+}
+
+/// Explainable terrain-shaping values contributed by one river segment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RiverTerrainInfluence {
+    pub segment: RiverSegment,
+    pub distance_meters: f64,
+    pub centerline_elevation_meters: f64,
+    pub channel_half_width_meters: f64,
+    pub valley_half_width_meters: f64,
+    pub incision_depth_meters: f64,
+    pub blend: f64,
 }
 
 /// River channels derived from one deterministic regional drainage artifact.
@@ -203,6 +264,30 @@ mod tests {
             discharge_cubic_meters_per_second: 2.0,
         };
         assert!(!river.descends_or_is_level());
+    }
+
+    #[test]
+    fn river_terrain_influence_is_centered_and_bounded() {
+        let river = RiverSegment {
+            source_cell: DrainageCellIndex::new(0, 0),
+            mouth_cell: DrainageCellIndex::new(1, 0),
+            source: WorldPosition::new(0.0, 100.0, 0.0),
+            mouth: WorldPosition::new(2_000.0, 80.0, 0.0),
+            drainage_area_square_kilometers: 128.0,
+            discharge_cubic_meters_per_second: 8.0,
+        };
+        let center = river
+            .terrain_influence(1_000.0, 0.0)
+            .expect("centerline influence");
+        assert!(center.distance_meters.abs() < f64::EPSILON);
+        assert!((center.centerline_elevation_meters - 90.0).abs() < f64::EPSILON);
+        assert!((center.blend - 1.0).abs() < f64::EPSILON);
+        assert!(center.channel_half_width_meters < center.valley_half_width_meters);
+        assert!(
+            river
+                .terrain_influence(1_000.0, MAX_RIVER_INFLUENCE_METERS + 1.0)
+                .is_none()
+        );
     }
 
     #[test]

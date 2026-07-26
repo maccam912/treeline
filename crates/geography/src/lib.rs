@@ -18,6 +18,7 @@ const DOMAIN_DRAINAGE_BASIN: u64 = 0x4452_4149_4e42_4153;
 const MACRO_CELL_EDGE_METERS: f64 = 64_000.0;
 pub const DRAINAGE_CELL_EDGE_METERS: f64 = 2_000.0;
 pub const WATERSHED_REGION_CELLS: usize = 64;
+const WATERSHED_REGION_CELLS_I64: i64 = 64;
 pub const WATERSHED_REGION_EDGE_METERS: f64 = 128_000.0;
 
 /// Coherent environmental parameters sampled at a horizontal world position.
@@ -121,6 +122,11 @@ impl DrainageCellIndex {
         Self { x, z }
     }
 
+    pub fn containing(x: f64, z: f64) -> Option<Self> {
+        CellIndex::containing(x, z, 0, DRAINAGE_CELL_EDGE_METERS)
+            .map(|cell| Self::new(cell.x, cell.z))
+    }
+
     pub fn center(self) -> [f64; 2] {
         [
             (index_as_f64(self.x) + 0.5) * DRAINAGE_CELL_EDGE_METERS,
@@ -144,6 +150,13 @@ impl WatershedRegionIndex {
     pub fn containing(x: f64, z: f64) -> Option<Self> {
         CellIndex::containing(x, z, 0, WATERSHED_REGION_EDGE_METERS)
             .map(|cell| Self::new(cell.x, cell.z))
+    }
+
+    pub fn containing_cell(cell: DrainageCellIndex) -> Self {
+        Self::new(
+            cell.x.div_euclid(WATERSHED_REGION_CELLS_I64),
+            cell.z.div_euclid(WATERSHED_REGION_CELLS_I64),
+        )
     }
 
     pub fn origin(self) -> [f64; 2] {
@@ -766,6 +779,20 @@ mod tests {
         let mut reverse = reverse_positions.map(|(x, z)| terrain.sample(x, z).expect("finite"));
         reverse.reverse();
         assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn drainage_cells_and_regions_share_negative_half_open_boundaries() {
+        let cell = DrainageCellIndex::containing(-0.01, -128_000.0).expect("drainage cell");
+        assert_eq!(cell, DrainageCellIndex::new(-1, -64));
+        assert_eq!(
+            WatershedRegionIndex::containing_cell(cell),
+            WatershedRegionIndex::new(-1, -1)
+        );
+        assert_eq!(
+            WatershedRegionIndex::containing(0.0, 128_000.0),
+            Some(WatershedRegionIndex::new(0, 1))
+        );
     }
 
     #[test]

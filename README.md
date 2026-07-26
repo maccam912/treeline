@@ -30,6 +30,8 @@ test-backed foundations described in the design. The prototype provides:
   levels, cross-region drainage exits, and flow accumulation;
 - deterministic rainfall-fed regional river networks with discharge and
   catchment area;
+- cached river-driven valley and channel incision shared by near and distant
+  terrain representations;
 - an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
   terrain/watershed/flow/river views, and parameter inspection;
 - hydrology and cave graph invariants;
@@ -38,8 +40,9 @@ test-backed foundations described in the design. The prototype provides:
 
 The terrain toy now has an unbounded movement path through deterministic
 near-to-mid terrain chunks backed by a cheaper mountain-scale vista
-representation. Macro terrain was introduced with generator version 2; worlds
-using version 1 retain the original rolling-hill contract.
+representation. Macro terrain was introduced with generator version 2, and
+river-shaped terrain with version 3; older world identities retain their
+previous terrain contracts.
 Vegetation, survival, and networking have not been added yet.
 
 ## Getting started

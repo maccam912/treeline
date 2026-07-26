@@ -4,15 +4,145 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::num::NonZeroUsize;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 
-use treeline_coordinates::WorldPosition;
+use treeline_coordinates::{WorldIdentity, WorldPosition};
+use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
+use treeline_hydrology::{RiverNetwork, RiverTerrainInfluence};
 use treeline_mesher::{
     Mesh, MeshingError, SurfaceCutout, SurfaceGridSpec, surface_grid, transvoxel_chunk,
 };
-use treeline_terrain::{DensityField, SurfaceField};
+use treeline_terrain::{DensityField, Material, SurfaceField, TerrainSample, WildernessTerrain};
 use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
+
+/// Generator version that first makes regional rivers shape terrain.
+pub const RIVER_TERRAIN_GENERATOR_VERSION: u32 = 3;
+
+/// Pristine terrain composed with cached deterministic regional artifacts.
+///
+/// Watershed generation is much more expensive than a density sample, so all
+/// clones share an immutable river-network cache. Cache contents affect only
+/// performance: every entry is a pure function of world identity and region.
+#[derive(Clone, Debug)]
+pub struct GeneratedWorldTerrain {
+    base: WildernessTerrain,
+    river_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<RiverNetwork>>>>,
+}
+
+impl GeneratedWorldTerrain {
+    pub fn new(world: WorldIdentity) -> Self {
+        Self {
+            base: WildernessTerrain::new(world),
+            river_networks: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
+    pub const fn world(&self) -> WorldIdentity {
+        self.base.world
+    }
+
+    /// Returns the strongest nearby river contribution, if terrain carving is
+    /// enabled by this world's generation version.
+    pub fn river_influence_at(&self, x: f64, z: f64) -> Option<RiverTerrainInfluence> {
+        if self.world().generator_version < RIVER_TERRAIN_GENERATOR_VERSION {
+            return None;
+        }
+        let containing = DrainageCellIndex::containing(x, z)?;
+        let mut strongest = None;
+        for z_offset in -1_i64..=1 {
+            for x_offset in -1_i64..=1 {
+                let source = DrainageCellIndex::new(
+                    containing.x.checked_add(x_offset)?,
+                    containing.z.checked_add(z_offset)?,
+                );
+                let region = WatershedRegionIndex::containing_cell(source);
+                let network = self.river_network(region)?;
+                let Some(influence) = network
+                    .segment_from(source)
+                    .and_then(|segment| segment.terrain_influence(x, z))
+                else {
+                    continue;
+                };
+                let carve_strength = influence.blend * influence.incision_depth_meters;
+                if strongest.is_none_or(|current: RiverTerrainInfluence| {
+                    let current_strength = current.blend * current.incision_depth_meters;
+                    carve_strength > current_strength
+                        || (carve_strength.to_bits() == current_strength.to_bits()
+                            && influence.segment.source_cell < current.segment.source_cell)
+                }) {
+                    strongest = Some(influence);
+                }
+            }
+        }
+        strongest
+    }
+
+    fn river_network(&self, region: WatershedRegionIndex) -> Option<Arc<RiverNetwork>> {
+        if let Some(network) = self
+            .river_networks
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&region)
+            .cloned()
+        {
+            return Some(network);
+        }
+
+        let mut cache = self
+            .river_networks
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(network) = cache.get(&region) {
+            return Some(Arc::clone(network));
+        }
+        let generated = Arc::new(RiverNetwork::generate(self.world(), region)?);
+        Some(
+            cache
+                .entry(region)
+                .or_insert_with(|| Arc::clone(&generated))
+                .clone(),
+        )
+    }
+
+    fn carved_height(&self, x: f64, z: f64) -> Option<(f64, Option<RiverTerrainInfluence>)> {
+        let base_height = self.base.height_at(x, z)?;
+        let influence = self.river_influence_at(x, z);
+        let height = influence.map_or(base_height, |river| {
+            let channel_bed = river.centerline_elevation_meters - river.incision_depth_meters;
+            let target = base_height.min(channel_bed);
+            base_height + ((target - base_height) * river.blend)
+        });
+        Some((height, influence))
+    }
+}
+
+impl DensityField for GeneratedWorldTerrain {
+    fn sample(&self, position: WorldPosition) -> TerrainSample {
+        let Some((surface_height, river)) = self.carved_height(position.x, position.z) else {
+            return TerrainSample::new(f64::INFINITY, Material::Air);
+        };
+        let density = position.y - surface_height;
+        let material = if density > 0.0 {
+            Material::Air
+        } else if river.is_some_and(|influence| {
+            influence.distance_meters <= influence.channel_half_width_meters && density > -1.0
+        }) {
+            Material::Sand
+        } else if density > -1.5 {
+            Material::Soil
+        } else {
+            Material::Rock
+        };
+        TerrainSample::new(density, material)
+    }
+}
+
+impl SurfaceField for GeneratedWorldTerrain {
+    fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
+        self.carved_height(x, z).map(|(height, _)| height)
+    }
+}
 
 /// Lifecycle of one region in an effectively infinite world.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -652,8 +782,82 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use treeline_coordinates::WorldIdentity;
+    use treeline_coordinates::{WorldIdentity, stable_hash};
+    use treeline_hydrology::RiverNetwork;
     use treeline_terrain::RollingHills;
+
+    #[test]
+    fn version_three_rivers_lower_the_shared_near_and_far_surface() {
+        let world = WorldIdentity::new(0x5eed, RIVER_TERRAIN_GENERATOR_VERSION, 0);
+        let network =
+            RiverNetwork::generate(world, WatershedRegionIndex::new(0, 0)).expect("river network");
+        let segment = network.segments().first().expect("river segment");
+        let x = (segment.source.x + segment.mouth.x) * 0.5;
+        let z = (segment.source.z + segment.mouth.z) * 0.5;
+        let base = WildernessTerrain::new(world)
+            .height_at(x, z)
+            .expect("base surface");
+        let terrain = GeneratedWorldTerrain::new(world);
+        let carved = terrain.surface_height(x, z).expect("carved surface");
+
+        assert!(terrain.river_influence_at(x, z).is_some());
+        assert!(carved < base);
+        assert!(
+            terrain
+                .sample(WorldPosition::new(x, carved, z))
+                .density
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn version_two_worlds_retain_the_unincised_terrain_contract() {
+        let world = WorldIdentity::new(0x5eed, RIVER_TERRAIN_GENERATOR_VERSION - 1, 0);
+        let base = WildernessTerrain::new(world);
+        let terrain = GeneratedWorldTerrain::new(world);
+        for [x, z] in [[-12_000.0, 8_000.0], [0.0, 0.0], [31_000.0, -9_000.0]] {
+            assert_eq!(terrain.surface_height(x, z), base.height_at(x, z));
+        }
+        assert!(
+            terrain
+                .river_networks
+                .read()
+                .expect("cache lock")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn river_shaped_terrain_has_a_golden_fingerprint() {
+        let world = WorldIdentity::new(0x5eed, RIVER_TERRAIN_GENERATOR_VERSION, 0);
+        let network =
+            RiverNetwork::generate(world, WatershedRegionIndex::new(-1, 1)).expect("river network");
+        let terrain = GeneratedWorldTerrain::new(world);
+        let words = network
+            .segments()
+            .iter()
+            .step_by(19)
+            .flat_map(|segment| {
+                let x = (segment.source.x + segment.mouth.x) * 0.5;
+                let z = (segment.source.z + segment.mouth.z) * 0.5;
+                [
+                    u64::from_le_bytes(segment.source_cell.x.to_le_bytes()),
+                    u64::from_le_bytes(segment.source_cell.z.to_le_bytes()),
+                    terrain
+                        .surface_height(x, z)
+                        .expect("river-shaped surface")
+                        .to_bits(),
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_hash(&words),
+            6_285_394_433_838_367_765,
+            "changing this value changes river-shaped terrain"
+        );
+    }
 
     #[test]
     fn active_regions_freeze_but_do_not_become_ungenerated() {

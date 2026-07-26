@@ -6,12 +6,12 @@ use std::time::Instant;
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
-use treeline_terrain::WildernessTerrain;
+use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
 use treeline_world::{
     ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig, FarTerrainMeshSpec, FarTerrainStreamer,
-    FarTerrainStreamingConfig, FarTileIndex, GenerationPriority, NearTerrainCutout,
-    TerrainMeshQueue, TerrainMeshSpec,
+    FarTerrainStreamingConfig, FarTileIndex, GeneratedWorldTerrain, GenerationPriority,
+    NearTerrainCutout, TerrainMeshQueue, TerrainMeshSpec,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -20,7 +20,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 2, 0);
+const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 3, 0);
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
@@ -150,10 +150,10 @@ struct Game {
     far_terrain_tiles: BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
     requested_chunks: BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far_tiles: BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
-    terrain_jobs: TerrainMeshQueue<WildernessTerrain>,
+    terrain_jobs: TerrainMeshQueue<GeneratedWorldTerrain>,
     chunk_streamer: ChunkStreamer,
     far_terrain_streamer: FarTerrainStreamer,
-    terrain: WildernessTerrain,
+    terrain: GeneratedWorldTerrain,
     camera: Camera,
     input: InputState,
     cursor_captured: bool,
@@ -204,7 +204,7 @@ impl Game {
         };
         surface.configure(&device, &surface_config);
 
-        let terrain = WildernessTerrain::new(WORLD);
+        let terrain = GeneratedWorldTerrain::new(WORLD);
         let renderer = TerrainRenderer::new(
             &device,
             surface_config.format,
@@ -217,11 +217,11 @@ impl Game {
         let mut far_terrain_tiles = BTreeMap::new();
         let mut requested_chunks = BTreeMap::new();
         let mut requested_far_tiles = BTreeMap::new();
-        let mut terrain_jobs = TerrainMeshQueue::new(terrain);
+        let mut terrain_jobs = TerrainMeshQueue::new(terrain.clone());
 
         let start_x = 0.0;
         let start_z = 70.0;
-        let start_y = surface_height(terrain, start_x, start_z) + EYE_HEIGHT;
+        let start_y = surface_height(&terrain, start_x, start_z) + EYE_HEIGHT;
         let camera = Camera::new(Vec3::new(start_x, start_y, start_z));
         schedule_terrain(
             chunk_streamer,
@@ -295,7 +295,7 @@ impl Game {
         let now = Instant::now();
         let delta_seconds = (now - self.previous_frame).as_secs_f32().min(0.1);
         self.previous_frame = now;
-        self.camera.walk(&self.input, self.terrain, delta_seconds);
+        self.camera.walk(&self.input, &self.terrain, delta_seconds);
         if let Err(error) = update_terrain(
             &self.device,
             &self.renderer,
@@ -382,7 +382,7 @@ impl Camera {
         self.pitch = (self.pitch - (f64_as_f32(delta_y) * SENSITIVITY)).clamp(-1.5, 1.5);
     }
 
-    fn walk(&mut self, input: &InputState, terrain: WildernessTerrain, delta_seconds: f32) {
+    fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f32) {
         let forward = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
         let right = forward.cross(Vec3::Y);
         let movement = (forward * input.forward_axis()) + (right * input.right_axis());
@@ -456,9 +456,9 @@ impl InputState {
     }
 }
 
-fn surface_height(terrain: WildernessTerrain, x: f32, z: f32) -> f32 {
+fn surface_height(terrain: &impl SurfaceField, x: f32, z: f32) -> f32 {
     let height = terrain
-        .height_at(f64::from(x), f64::from(z))
+        .surface_height(f64::from(x), f64::from(z))
         .expect("finite player positions must have terrain");
     f64_as_f32(height)
 }
@@ -474,7 +474,7 @@ fn update_terrain(
     far_tiles: &mut BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
     requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
-    jobs: &mut TerrainMeshQueue<WildernessTerrain>,
+    jobs: &mut TerrainMeshQueue<GeneratedWorldTerrain>,
 ) -> Result<(), Box<dyn Error>> {
     while let Some(generated) = jobs.try_next() {
         match generated.spec {
@@ -528,7 +528,7 @@ fn schedule_terrain(
     far_tiles: &mut BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
     requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
-    jobs: &mut TerrainMeshQueue<WildernessTerrain>,
+    jobs: &mut TerrainMeshQueue<GeneratedWorldTerrain>,
 ) -> Result<(), Box<dyn Error>> {
     let mut tracked_chunks = chunks
         .iter()
