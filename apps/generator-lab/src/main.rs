@@ -8,7 +8,8 @@ use treeline_geography::{DrainageCell, RegionalProfile, WatershedRegion, Watersh
 use treeline_hydrology::{RiverNetwork, RiverSegment};
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
-use treeline_terrain::WildernessTerrain;
+use treeline_terrain::{SurfaceField, WildernessTerrain};
+use treeline_world::GeneratedWorldTerrain;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -16,7 +17,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const GENERATOR_VERSION: u32 = 2;
+const GENERATOR_VERSION: u32 = 3;
 const GRID_ROWS: usize = 128;
 const MIN_SPAN_METERS: f64 = 1_000.0;
 const MAX_SPAN_METERS: f64 = 1_000_000.0;
@@ -383,9 +384,14 @@ impl GeneratorLab {
         let [x, z] = self.cursor_world_position();
         let world = WorldIdentity::new(self.seed, GENERATOR_VERSION, 0);
         let terrain = WildernessTerrain::new(world);
+        let generated_terrain = GeneratedWorldTerrain::new(world);
         let Some((macro_sample, surface_height)) = terrain.inspect(x, z) else {
             return;
         };
+        let carved_surface_height = generated_terrain
+            .surface_height(x, z)
+            .unwrap_or(surface_height);
+        let river_influence = generated_terrain.river_influence_at(x, z);
         let Some(profile) = RegionalProfile::sample(world, x, z) else {
             return;
         };
@@ -422,11 +428,11 @@ impl GeneratorLab {
             },
         );
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {surface_height:.0} m | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | ridge +{:.0} m | {drainage_summary}",
             macro_sample.mountain_uplift_meters
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nsurface height: {surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\ncarved surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}"
         );
         self.update_title(Some(&summary));
     }
@@ -478,7 +484,7 @@ fn generate_mesh(
         return generate_drainage_mesh(seed, center, span_meters, width, height, mode);
     }
     let (columns, spacing) = grid_dimensions(span_meters, width, height);
-    let field = WildernessTerrain::new(WorldIdentity::new(seed, GENERATOR_VERSION, 0));
+    let field = GeneratedWorldTerrain::new(WorldIdentity::new(seed, GENERATOR_VERSION, 0));
     Ok(surface_grid(
         &field,
         SurfaceGridSpec::new(

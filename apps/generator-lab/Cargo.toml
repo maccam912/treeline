@@ -17,6 +17,7 @@ treeline-hydrology.workspace = true
 treeline-mesher.workspace = true
 treeline-renderer.workspace = true
 treeline-terrain.workspace = true
+treeline-world.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
