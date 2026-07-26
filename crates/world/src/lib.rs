@@ -13,7 +13,7 @@ use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
-use treeline_hydrology::{RiverNetwork, RiverTerrainInfluence};
+use treeline_hydrology::{Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence};
 use treeline_mesher::{
     Mesh, MeshingError, SurfaceCutout, SurfaceGridSpec, surface_grid, transvoxel_chunk,
 };
@@ -22,6 +22,16 @@ use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
 
 /// Generator version that first makes regional rivers shape terrain.
 pub const RIVER_TERRAIN_GENERATOR_VERSION: u32 = 3;
+/// Generator version that first exposes filled drainage basins as lakes.
+pub const LAKE_GENERATOR_VERSION: u32 = 4;
+
+/// Equilibrium lake water at one horizontal world position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LakeSurfaceSample {
+    pub lake: Lake,
+    pub terrain_elevation_meters: f64,
+    pub water_depth_meters: f64,
+}
 
 /// Pristine terrain composed with cached deterministic regional artifacts.
 ///
@@ -32,6 +42,7 @@ pub const RIVER_TERRAIN_GENERATOR_VERSION: u32 = 3;
 pub struct GeneratedWorldTerrain {
     base: WildernessTerrain,
     river_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<RiverNetwork>>>>,
+    lake_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<LakeNetwork>>>>,
 }
 
 impl GeneratedWorldTerrain {
@@ -39,6 +50,7 @@ impl GeneratedWorldTerrain {
         Self {
             base: WildernessTerrain::new(world),
             river_networks: Arc::new(RwLock::new(BTreeMap::new())),
+            lake_networks: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -109,6 +121,77 @@ impl GeneratedWorldTerrain {
         )
     }
 
+    /// Returns equilibrium lake water above the generated terrain, if present.
+    pub fn lake_surface_at(&self, x: f64, z: f64) -> Option<LakeSurfaceSample> {
+        if self.world().generator_version < LAKE_GENERATOR_VERSION {
+            return None;
+        }
+        let cell = DrainageCellIndex::containing(x, z)?;
+        let network = self.lake_network(WatershedRegionIndex::containing_cell(cell))?;
+        let lake = network.lake_for_cell(cell)?;
+        let terrain_elevation_meters = self.carved_height(x, z)?.0;
+        let water_depth_meters = lake.water_depth_at(terrain_elevation_meters)?;
+        (water_depth_meters > 0.0).then_some(LakeSurfaceSample {
+            lake,
+            terrain_elevation_meters,
+            water_depth_meters,
+        })
+    }
+
+    fn lake_network(&self, region: WatershedRegionIndex) -> Option<Arc<LakeNetwork>> {
+        if let Some(network) = self
+            .lake_networks
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&region)
+            .cloned()
+        {
+            return Some(network);
+        }
+
+        let mut cache = self
+            .lake_networks
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(network) = cache.get(&region) {
+            return Some(Arc::clone(network));
+        }
+        let generated = Arc::new(LakeNetwork::generate(self.world(), region)?);
+        Some(
+            cache
+                .entry(region)
+                .or_insert_with(|| Arc::clone(&generated))
+                .clone(),
+        )
+    }
+
+    /// Builds the lake surface aligned with one near or far terrain mesh.
+    ///
+    /// Lake water remains a separate render surface; it never changes the
+    /// signed terrain density or the far-terrain height contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MeshingError`] when the requested LOD is unsupported, the
+    /// surface grid is invalid, or the generated mesh exceeds index capacity.
+    pub fn lake_surface_mesh(&self, spec: TerrainMeshSpec) -> Result<Mesh, MeshingError> {
+        let grid = match spec {
+            TerrainMeshSpec::Far(spec) => spec.surface_grid(),
+            TerrainMeshSpec::Near(spec) => {
+                let subdivisions =
+                    ChunkIndex::subdivisions(spec.lod).ok_or(MeshingError::UnsupportedLod)?;
+                let origin = spec.chunk.sample_origin();
+                SurfaceGridSpec::new(
+                    origin.x,
+                    origin.z,
+                    [subdivisions; 2],
+                    ChunkIndex::edge_meters() / usize_as_f64(subdivisions),
+                )
+            }
+        };
+        lake_surface_grid(self, grid)
+    }
+
     fn carved_height(&self, x: f64, z: f64) -> Option<(f64, Option<RiverTerrainInfluence>)> {
         let base_height = self.base.height_at(x, z)?;
         let influence = self.river_influence_at(x, z);
@@ -146,6 +229,75 @@ impl SurfaceField for GeneratedWorldTerrain {
     fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
         self.carved_height(x, z).map(|(height, _)| height)
     }
+}
+
+fn lake_surface_grid(
+    terrain: &GeneratedWorldTerrain,
+    spec: SurfaceGridSpec,
+) -> Result<Mesh, MeshingError> {
+    const WATER_RENDER_OFFSET_METERS: f64 = 0.05;
+    const WATER_COLOR: [f32; 4] = [0.04, 0.34, 0.58, 1.0];
+
+    if spec.cell_counts.contains(&0)
+        || !spec.origin_x.is_finite()
+        || !spec.origin_z.is_finite()
+        || !spec.spacing_meters.is_finite()
+        || spec.spacing_meters <= 0.0
+    {
+        return Err(MeshingError::InvalidGrid);
+    }
+
+    let [cells_x, cells_z] = spec.cell_counts;
+    let mut mesh = Mesh::default();
+    for z in 0..cells_z {
+        let min_z = spec.origin_z + (usize_as_f64(z) * spec.spacing_meters);
+        let max_z = min_z + spec.spacing_meters;
+        for x in 0..cells_x {
+            let min_x = spec.origin_x + (usize_as_f64(x) * spec.spacing_meters);
+            let max_x = min_x + spec.spacing_meters;
+            if spec
+                .cutout
+                .is_some_and(|cutout| cutout.contains_cell(min_x, max_x, min_z, max_z))
+            {
+                continue;
+            }
+            let center_x = (min_x + max_x) * 0.5;
+            let center_z = (min_z + max_z) * 0.5;
+            let Some(water) = terrain.lake_surface_at(center_x, center_z) else {
+                continue;
+            };
+            let surface = water.lake.surface_elevation_meters + WATER_RENDER_OFFSET_METERS;
+            let vertex_offset =
+                u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
+            mesh.positions.extend([
+                [f64_as_f32(min_x), f64_as_f32(surface), f64_as_f32(min_z)],
+                [f64_as_f32(min_x), f64_as_f32(surface), f64_as_f32(max_z)],
+                [f64_as_f32(max_x), f64_as_f32(surface), f64_as_f32(min_z)],
+                [f64_as_f32(max_x), f64_as_f32(surface), f64_as_f32(max_z)],
+            ]);
+            mesh.normals.extend([[0.0, 1.0, 0.0]; 4]);
+            mesh.colors.extend([WATER_COLOR; 4]);
+            mesh.indices.extend([
+                vertex_offset,
+                vertex_offset
+                    .checked_add(1)
+                    .ok_or(MeshingError::TooManyVertices)?,
+                vertex_offset
+                    .checked_add(2)
+                    .ok_or(MeshingError::TooManyVertices)?,
+                vertex_offset
+                    .checked_add(2)
+                    .ok_or(MeshingError::TooManyVertices)?,
+                vertex_offset
+                    .checked_add(1)
+                    .ok_or(MeshingError::TooManyVertices)?,
+                vertex_offset
+                    .checked_add(3)
+                    .ok_or(MeshingError::TooManyVertices)?,
+            ]);
+        }
+    }
+    Ok(mesh)
 }
 
 /// Lifecycle of one region in an effectively infinite world.
@@ -857,12 +1009,18 @@ fn usize_as_f64(value: usize) -> f64 {
     value as f64
 }
 
+#[allow(clippy::cast_possible_truncation)]
+fn f64_as_f32(value: f64) -> f32 {
+    value as f32
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
     use treeline_coordinates::{WorldIdentity, stable_hash};
+    use treeline_geography::WatershedRegion;
     use treeline_hydrology::RiverNetwork;
     use treeline_terrain::RollingHills;
 
@@ -937,6 +1095,73 @@ mod tests {
             6_285_394_433_838_367_765,
             "changing this value changes river-shaped terrain"
         );
+    }
+
+    #[test]
+    fn version_four_exposes_level_lake_water_without_changing_terrain_density() {
+        let world = WorldIdentity::new(0x5eed, LAKE_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let (x, z, water) = generated_lake_point(&terrain);
+
+        assert!(water.water_depth_meters > 0.0);
+        assert_eq!(
+            water.water_depth_meters.to_bits(),
+            (water.lake.surface_elevation_meters - water.terrain_elevation_meters).to_bits()
+        );
+        assert!(
+            terrain
+                .sample(WorldPosition::new(x, water.terrain_elevation_meters, z))
+                .density
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            terrain
+                .sample(WorldPosition::new(
+                    x,
+                    water.lake.surface_elevation_meters,
+                    z
+                ))
+                .density
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn version_three_worlds_do_not_expose_lakes() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, LAKE_GENERATOR_VERSION - 1, 0));
+
+        assert!(terrain.lake_surface_at(-31_000.0, 17_000.0).is_none());
+        assert!(terrain.lake_networks.read().expect("cache lock").is_empty());
+    }
+
+    #[test]
+    fn near_lake_mesh_is_level_aligned_and_deterministic() {
+        let world = WorldIdentity::new(0x5eed, LAKE_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let (x, z, water) = generated_lake_point(&terrain);
+        let chunk = ChunkIndex::containing(WorldPosition::new(x, 0.0, z)).expect("lake chunk");
+        let spec = TerrainMeshSpec::Near(ChunkMeshSpec {
+            chunk,
+            lod: ChunkIndex::NEAR_LOD,
+            transition_faces: TransitionFaces::none(),
+        });
+        let first = terrain.lake_surface_mesh(spec).expect("lake mesh");
+        let second = terrain.lake_surface_mesh(spec).expect("lake mesh again");
+
+        assert_eq!(first, second);
+        assert!(first.is_well_formed());
+        assert!(!first.indices.is_empty());
+        assert!(
+            first
+                .colors
+                .iter()
+                .all(|color| color[3].to_bits() == 1.0_f32.to_bits())
+        );
+        assert!(first.positions.iter().all(|position| {
+            (f64::from(position[1]) - water.lake.surface_elevation_meters - 0.05).abs() < 0.001
+        }));
     }
 
     #[test]
@@ -1201,5 +1426,24 @@ mod tests {
 
     fn specs_by_chunk(specs: Vec<ChunkMeshSpec>) -> BTreeMap<ChunkIndex, ChunkMeshSpec> {
         specs.into_iter().map(|spec| (spec.chunk, spec)).collect()
+    }
+
+    fn generated_lake_point(terrain: &GeneratedWorldTerrain) -> (f64, f64, LakeSurfaceSample) {
+        for region_z in -2..=2 {
+            for region_x in -2..=2 {
+                let region = WatershedRegion::generate(
+                    terrain.world(),
+                    WatershedRegionIndex::new(region_x, region_z),
+                )
+                .expect("watershed");
+                for cell in region.cells().iter().filter(|cell| cell.basin.is_some()) {
+                    let [x, z] = cell.index.center();
+                    if let Some(water) = terrain.lake_surface_at(x, z) {
+                        return (x, z, water);
+                    }
+                }
+            }
+        }
+        panic!("test world should contain a visible generated lake");
     }
 }

@@ -60,7 +60,8 @@ impl SurfaceCutout {
         }
     }
 
-    fn contains_cell(self, min_x: f64, max_x: f64, min_z: f64, max_z: f64) -> bool {
+    /// Returns whether an aligned surface cell is fully inside this cutout.
+    pub fn contains_cell(self, min_x: f64, max_x: f64, min_z: f64, max_z: f64) -> bool {
         min_x >= self.min_x && max_x <= self.max_x && min_z >= self.min_z && max_z <= self.max_z
     }
 }

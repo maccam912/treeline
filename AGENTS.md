@@ -73,6 +73,8 @@ utilities crate.
 
 ## Working conventions
 
+- Work directly on `main`; do not create feature branches unless the user
+  explicitly asks for one.
 - Build only machinery required by this game. Do not add a generic scene graph,
   scripting runtime, editor framework, plugin system, or reusable game engine.
 - Prefer functional sampling APIs such as `terrain.sample(position)` and
@@ -116,4 +118,3 @@ output compact.
 A change is done when it is scoped to a design pillar, respects crate
 boundaries, includes relevant invariant tests, passes formatting/lint/test/docs,
 and explains any intentional generator-version or persistence impact.
-

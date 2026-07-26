@@ -5,7 +5,7 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_geography::{DrainageCell, RegionalProfile, WatershedRegion, WatershedRegionIndex};
-use treeline_hydrology::{RiverNetwork, RiverSegment};
+use treeline_hydrology::{LakeNetwork, RiverNetwork, RiverSegment};
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::{SurfaceField, WildernessTerrain};
@@ -17,7 +17,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const GENERATOR_VERSION: u32 = 3;
+const GENERATOR_VERSION: u32 = 4;
 const GRID_ROWS: usize = 128;
 const MIN_SPAN_METERS: f64 = 1_000.0;
 const MAX_SPAN_METERS: f64 = 1_000_000.0;
@@ -30,6 +30,7 @@ enum ViewMode {
     Watersheds,
     FlowAccumulation,
     Rivers,
+    Lakes,
 }
 
 impl ViewMode {
@@ -39,6 +40,7 @@ impl ViewMode {
             Self::Watersheds => "watersheds",
             Self::FlowAccumulation => "flow accumulation",
             Self::Rivers => "rivers",
+            Self::Lakes => "lakes",
         }
     }
 }
@@ -313,6 +315,10 @@ impl GeneratorLab {
                 self.mode = ViewMode::Rivers;
                 true
             }
+            KeyCode::Digit5 => {
+                self.mode = ViewMode::Lakes;
+                true
+            }
             _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
@@ -401,12 +407,19 @@ impl GeneratorLab {
             .as_ref()
             .and_then(|region| region.cell_at(x, z).copied());
         let river_network = watershed.as_ref().and_then(RiverNetwork::from_watershed);
+        let lake_network = watershed.as_ref().and_then(LakeNetwork::from_watershed);
         let river = drainage.and_then(|cell| {
             river_network
                 .as_ref()
                 .and_then(|network| network.segment_from(cell.index))
                 .copied()
         });
+        let lake = drainage.and_then(|cell| {
+            lake_network
+                .as_ref()
+                .and_then(|network| network.lake_for_cell(cell.index))
+        });
+        let lake_surface = generated_terrain.lake_surface_at(x, z);
         let drainage_summary = drainage.map_or_else(
             || "drainage unavailable".to_owned(),
             |cell| {
@@ -417,13 +430,20 @@ impl GeneratorLab {
                         segment.drainage_area_square_kilometers
                     )
                 });
+                let lake_summary = lake.map_or_else(String::new, |lake| {
+                    format!(
+                        " | lake {:x} at {:.1} m",
+                        lake.id, lake.surface_elevation_meters
+                    )
+                });
                 format!(
-                    "flow {} cells | outlet ({}, {}){}{}",
+                    "flow {} cells | outlet ({}, {}){}{}{}",
                     cell.flow_accumulation_cells,
                     cell.watershed_outlet.x,
                     cell.watershed_outlet.z,
                     if cell.basin.is_some() { " | basin" } else { "" },
-                    river_summary
+                    river_summary,
+                    lake_summary
                 )
             },
         );
@@ -432,14 +452,14 @@ impl GeneratorLab {
             macro_sample.mountain_uplift_meters
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\ncarved surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\ncarved surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
         );
         self.update_title(Some(&summary));
     }
 
     fn update_title(&self, inspection: Option<&str>) {
         let base = format!(
-            "Treeline Generator Lab — {} | seed {:x} | center ({:.1}, {:.1}) km | span {:.0} km | 1 terrain · 2 watersheds · 3 flow · 4 rivers · WASD pan · +/- zoom · R seed · click inspect",
+            "Treeline Generator Lab — {} | seed {:x} | center ({:.1}, {:.1}) km | span {:.0} km | 1 terrain · 2 watersheds · 3 flow · 4 rivers · 5 lakes · WASD pan · +/- zoom · R seed · click inspect",
             self.mode.label(),
             self.seed,
             self.center[0] / 1_000.0,
@@ -626,6 +646,20 @@ fn drainage_color(
                 1.0,
             ]
         }),
+        ViewMode::Lakes => {
+            let depth = f64_as_f32((cell.filled_elevation_meters - cell.elevation_meters).max(0.0));
+            if cell.basin.is_some() {
+                let strength = (depth / 80.0).clamp(0.0, 1.0);
+                [
+                    lerp_f32(0.08, 0.01, strength),
+                    lerp_f32(0.52, 0.20, strength),
+                    lerp_f32(0.76, 0.48, strength),
+                    1.0,
+                ]
+            } else {
+                [0.24, 0.21, 0.15, 1.0]
+            }
+        }
     }
 }
 
