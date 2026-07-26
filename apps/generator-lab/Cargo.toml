@@ -9,6 +9,9 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
 glam.workspace = true
 pollster.workspace = true
 treeline-coordinates.workspace = true
