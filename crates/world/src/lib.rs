@@ -1,9 +1,17 @@
 //! Streaming-world lifecycle and deterministic terrain-LOD planning.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
+use std::num::NonZeroUsize;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::WorldPosition;
+use treeline_mesher::{
+    Mesh, MeshingError, SurfaceCutout, SurfaceGridSpec, surface_grid, transvoxel_chunk,
+};
+use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
 
 /// Lifecycle of one region in an effectively infinite world.
@@ -36,6 +44,177 @@ pub enum GenerationPriority {
     NearTerrain,
     Vegetation,
     SurfaceDetail,
+}
+
+/// Complete inputs needed to regenerate either terrain representation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TerrainMeshSpec {
+    Far(FarTerrainMeshSpec),
+    Near(ChunkMeshSpec),
+}
+
+/// Completed output from one asynchronous terrain-mesh job.
+#[derive(Debug)]
+pub struct GeneratedTerrainMesh {
+    pub spec: TerrainMeshSpec,
+    pub mesh: Result<Mesh, MeshingError>,
+}
+
+/// Terrain worker queue ordered by visible generation priority.
+///
+/// Jobs already being generated are allowed to finish. Pending jobs always
+/// start in priority order, with submission order breaking ties. Completion
+/// order is deliberately not observable by generation itself: every mesh is a
+/// pure function of its field and [`ChunkMeshSpec`].
+#[derive(Debug)]
+pub struct TerrainMeshQueue<F> {
+    shared: Arc<QueueState<F>>,
+    ready: Receiver<GeneratedTerrainMesh>,
+    workers: Vec<JoinHandle<()>>,
+    next_sequence: u64,
+}
+
+impl<F> TerrainMeshQueue<F>
+where
+    F: DensityField + SurfaceField + Send + Sync + 'static,
+{
+    /// Starts workers while reserving one available hardware thread for the
+    /// window, rendering, and simulation work.
+    pub fn new(field: F) -> Self {
+        let available = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+        let worker_count =
+            NonZeroUsize::new(available.get().saturating_sub(1)).unwrap_or(NonZeroUsize::MIN);
+        Self::with_worker_count(field, worker_count)
+    }
+
+    /// Starts an explicit non-zero number of terrain workers.
+    pub fn with_worker_count(field: F, worker_count: NonZeroUsize) -> Self {
+        let shared = Arc::new(QueueState {
+            field,
+            pending: Mutex::new(PendingJobs::default()),
+            wake_workers: Condvar::new(),
+        });
+        let (ready_sender, ready) = mpsc::channel();
+        let workers = (0..worker_count.get())
+            .map(|_| {
+                let shared = Arc::clone(&shared);
+                let ready_sender = ready_sender.clone();
+                thread::spawn(move || terrain_worker(&shared, &ready_sender))
+            })
+            .collect();
+
+        Self {
+            shared,
+            ready,
+            workers,
+            next_sequence: 0,
+        }
+    }
+
+    /// Adds a deterministic chunk request without blocking for generation.
+    pub fn enqueue(&mut self, priority: GenerationPriority, spec: TerrainMeshSpec) {
+        let job = QueuedTerrainMesh {
+            priority,
+            sequence: self.next_sequence,
+            spec,
+        };
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.shared
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .jobs
+            .push(Reverse(job));
+        self.shared.wake_workers.notify_one();
+    }
+
+    /// Returns one completed mesh without waiting for a worker.
+    pub fn try_next(&self) -> Option<GeneratedTerrainMesh> {
+        match self.ready.try_recv() {
+            Ok(mesh) => Some(mesh),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        }
+    }
+}
+
+impl<F> Drop for TerrainMeshQueue<F> {
+    fn drop(&mut self) {
+        {
+            let mut pending = self
+                .shared
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            pending.closed = true;
+            pending.jobs.clear();
+        }
+        self.shared.wake_workers.notify_all();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QueueState<F> {
+    field: F,
+    pending: Mutex<PendingJobs>,
+    wake_workers: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct PendingJobs {
+    jobs: BinaryHeap<Reverse<QueuedTerrainMesh>>,
+    closed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct QueuedTerrainMesh {
+    priority: GenerationPriority,
+    sequence: u64,
+    spec: TerrainMeshSpec,
+}
+
+fn terrain_worker<F>(shared: &QueueState<F>, ready: &Sender<GeneratedTerrainMesh>)
+where
+    F: DensityField + SurfaceField,
+{
+    loop {
+        let job = {
+            let mut pending = shared
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            while pending.jobs.is_empty() && !pending.closed {
+                pending = shared
+                    .wake_workers
+                    .wait(pending)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            if pending.closed {
+                return;
+            }
+            let Some(Reverse(job)) = pending.jobs.pop() else {
+                continue;
+            };
+            job
+        };
+        let mesh = match job.spec {
+            TerrainMeshSpec::Far(spec) => far_terrain_mesh(&shared.field, spec),
+            TerrainMeshSpec::Near(spec) => {
+                transvoxel_chunk(&shared.field, spec.chunk, spec.lod, spec.transition_faces)
+            }
+        };
+        if ready
+            .send(GeneratedTerrainMesh {
+                spec: job.spec,
+                mesh,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
 }
 
 /// Validated near-terrain residency radii measured in chunks.
@@ -98,6 +277,237 @@ pub struct ChunkMeshSpec {
     pub transition_faces: TransitionFaces,
 }
 
+/// Stable identity of one surface-only far-terrain tile.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FarTileIndex {
+    pub x: i64,
+    pub z: i64,
+}
+
+impl FarTileIndex {
+    /// A far tile spans sixteen near chunks, or 512 meters.
+    pub const CHUNKS_PER_EDGE: i64 = 16;
+    /// Surface samples stay on the coarsest voxel lattice at representation
+    /// boundaries while avoiding all vertical density samples.
+    pub const CELLS_PER_EDGE: usize = 64;
+
+    pub const fn new(x: i64, z: i64) -> Self {
+        Self { x, z }
+    }
+
+    pub fn edge_meters() -> f64 {
+        ChunkIndex::edge_meters() * i64_as_f64(Self::CHUNKS_PER_EDGE)
+    }
+
+    pub fn containing(position: WorldPosition) -> Option<Self> {
+        let chunk = ChunkIndex::containing(position)?;
+        Some(Self::new(
+            chunk.x.div_euclid(Self::CHUNKS_PER_EDGE),
+            chunk.z.div_euclid(Self::CHUNKS_PER_EDGE),
+        ))
+    }
+
+    pub fn chebyshev_distance(self, other: Self) -> u64 {
+        self.x.abs_diff(other.x).max(self.z.abs_diff(other.z))
+    }
+
+    fn origin(self) -> (f64, f64) {
+        let edge = Self::edge_meters();
+        (i64_as_f64(self.x) * edge, i64_as_f64(self.z) * edge)
+    }
+
+    fn intersects(self, cutout: NearTerrainCutout) -> bool {
+        let (tile_min_x, tile_min_z) = self.origin();
+        let tile_max_x = tile_min_x + Self::edge_meters();
+        let tile_max_z = tile_min_z + Self::edge_meters();
+        let bounds = cutout.world_bounds();
+        tile_min_x < bounds.max_x
+            && tile_max_x > bounds.min_x
+            && tile_min_z < bounds.max_z
+            && tile_max_z > bounds.min_z
+    }
+}
+
+/// Half-open chunk rectangle covered by a complete near-terrain residency set.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NearTerrainCutout {
+    pub min: ChunkIndex,
+    pub max_exclusive: ChunkIndex,
+}
+
+impl NearTerrainCutout {
+    pub const fn new(min: ChunkIndex, max_exclusive: ChunkIndex) -> Option<Self> {
+        if min.x >= max_exclusive.x || min.z >= max_exclusive.z {
+            return None;
+        }
+        Some(Self { min, max_exclusive })
+    }
+
+    pub fn around(center: ChunkIndex, radius: u64) -> Option<Self> {
+        let radius = i64::try_from(radius).ok()?;
+        Some(Self {
+            min: ChunkIndex::new(center.x.checked_sub(radius)?, center.z.checked_sub(radius)?),
+            max_exclusive: ChunkIndex::new(
+                center.x.checked_add(radius)?.checked_add(1)?,
+                center.z.checked_add(radius)?.checked_add(1)?,
+            ),
+        })
+    }
+
+    fn world_bounds(self) -> SurfaceCutout {
+        let edge = ChunkIndex::edge_meters();
+        SurfaceCutout::new(
+            i64_as_f64(self.min.x) * edge,
+            i64_as_f64(self.max_exclusive.x) * edge,
+            i64_as_f64(self.min.z) * edge,
+            i64_as_f64(self.max_exclusive.z) * edge,
+        )
+    }
+}
+
+/// Complete deterministic inputs for one coarse, surface-only terrain tile.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FarTerrainMeshSpec {
+    pub tile: FarTileIndex,
+    pub near_cutout: Option<NearTerrainCutout>,
+}
+
+impl FarTerrainMeshSpec {
+    fn surface_grid(self) -> SurfaceGridSpec {
+        let (origin_x, origin_z) = self.tile.origin();
+        let mut grid = SurfaceGridSpec::new(
+            origin_x,
+            origin_z,
+            [FarTileIndex::CELLS_PER_EDGE; 2],
+            FarTileIndex::edge_meters() / usize_as_f64(FarTileIndex::CELLS_PER_EDGE),
+        );
+        if let Some(cutout) = self.near_cutout {
+            grid = grid.with_cutout(cutout.world_bounds());
+        }
+        grid
+    }
+}
+
+fn far_terrain_mesh(
+    field: &impl SurfaceField,
+    spec: FarTerrainMeshSpec,
+) -> Result<Mesh, MeshingError> {
+    surface_grid(field, spec.surface_grid())
+}
+
+/// Validated far-terrain residency radii measured in 512-meter tiles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FarTerrainStreamingConfig {
+    load_radius: u64,
+    retain_radius: u64,
+}
+
+impl FarTerrainStreamingConfig {
+    pub const fn new(load_radius: u64, retain_radius: u64) -> Option<Self> {
+        if retain_radius < load_radius {
+            return None;
+        }
+        Some(Self {
+            load_radius,
+            retain_radius,
+        })
+    }
+
+    pub const fn load_radius(self) -> u64 {
+        self.load_radius
+    }
+}
+
+impl Default for FarTerrainStreamingConfig {
+    fn default() -> Self {
+        Self::new(4, 5).expect("the default far-terrain radii are valid")
+    }
+}
+
+/// Deterministic changes needed to reconcile coarse surface tiles.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FarTerrainStreamingPlan {
+    pub center: FarTileIndex,
+    pub load: Vec<FarTerrainMeshSpec>,
+    pub unload: Vec<FarTileIndex>,
+}
+
+/// Plans surface-only terrain independently of voxel chunk residency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FarTerrainStreamer {
+    config: FarTerrainStreamingConfig,
+}
+
+impl FarTerrainStreamer {
+    pub const fn new(config: FarTerrainStreamingConfig) -> Self {
+        Self { config }
+    }
+
+    pub const fn config(self) -> FarTerrainStreamingConfig {
+        self.config
+    }
+
+    /// Plans horizon tiles first so a broad landscape appears quickly.
+    pub fn plan(
+        self,
+        player_position: WorldPosition,
+        loaded: &BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
+        near_cutout: Option<NearTerrainCutout>,
+    ) -> Option<FarTerrainStreamingPlan> {
+        let center = FarTileIndex::containing(player_position)?;
+        let load_radius = i64::try_from(self.config.load_radius).ok()?;
+        let mut desired = BTreeMap::new();
+
+        for z_offset in -load_radius..=load_radius {
+            for x_offset in -load_radius..=load_radius {
+                let tile = FarTileIndex::new(
+                    center.x.checked_add(x_offset)?,
+                    center.z.checked_add(z_offset)?,
+                );
+                desired.insert(tile, far_spec(tile, near_cutout));
+            }
+        }
+        for &tile in loaded.keys() {
+            if tile.chebyshev_distance(center) <= self.config.retain_radius {
+                desired
+                    .entry(tile)
+                    .or_insert_with(|| far_spec(tile, near_cutout));
+            }
+        }
+
+        let mut load = desired
+            .values()
+            .copied()
+            .filter(|spec| loaded.get(&spec.tile) != Some(spec))
+            .collect::<Vec<_>>();
+        load.sort_by_key(|spec| {
+            (
+                Reverse(spec.tile.chebyshev_distance(center)),
+                spec.tile.z,
+                spec.tile.x,
+            )
+        });
+        let unload = loaded
+            .keys()
+            .copied()
+            .filter(|tile| !desired.contains_key(tile))
+            .collect();
+
+        Some(FarTerrainStreamingPlan {
+            center,
+            load,
+            unload,
+        })
+    }
+}
+
+fn far_spec(tile: FarTileIndex, near_cutout: Option<NearTerrainCutout>) -> FarTerrainMeshSpec {
+    FarTerrainMeshSpec {
+        tile,
+        near_cutout: near_cutout.filter(|cutout| tile.intersects(*cutout)),
+    }
+}
+
 /// Deterministic changes needed to reconcile loaded chunks with player position.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChunkStreamingPlan {
@@ -115,6 +525,10 @@ pub struct ChunkStreamer {
 impl ChunkStreamer {
     pub const fn new(config: ChunkStreamingConfig) -> Self {
         Self { config }
+    }
+
+    pub const fn config(self) -> ChunkStreamingConfig {
+        self.config
     }
 
     /// Plans coarse loads first and unloads in stable coordinate order.
@@ -223,9 +637,23 @@ fn transition_faces(
     transitions
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn i64_as_f64(value: i64) -> f64 {
+    value as f64
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn usize_as_f64(value: usize) -> f64 {
+    value as f64
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use treeline_coordinates::WorldIdentity;
+    use treeline_terrain::RollingHills;
 
     #[test]
     fn active_regions_freeze_but_do_not_become_ungenerated() {
@@ -236,6 +664,131 @@ mod tests {
     #[test]
     fn horizon_jobs_sort_before_surface_detail() {
         assert!(GenerationPriority::Horizon < GenerationPriority::SurfaceDetail);
+    }
+
+    #[test]
+    fn queued_mesh_matches_direct_deterministic_generation() {
+        let terrain = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
+        let spec = ChunkMeshSpec {
+            chunk: ChunkIndex::new(-3, 2),
+            lod: ChunkIndex::MAX_LOD,
+            transition_faces: TransitionFaces::none(),
+        };
+        let expected = transvoxel_chunk(&terrain, spec.chunk, spec.lod, spec.transition_faces)
+            .expect("direct mesh");
+        let mut queue = TerrainMeshQueue::with_worker_count(terrain, NonZeroUsize::MIN);
+        queue.enqueue(GenerationPriority::NearTerrain, TerrainMeshSpec::Near(spec));
+        let generated = queue
+            .ready
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker completes the mesh");
+
+        assert_eq!(generated.spec, TerrainMeshSpec::Near(spec));
+        assert_eq!(generated.mesh.expect("queued mesh"), expected);
+    }
+
+    #[test]
+    fn queued_far_mesh_matches_direct_surface_generation() {
+        let terrain = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
+        let spec = FarTerrainMeshSpec {
+            tile: FarTileIndex::new(-1, 2),
+            near_cutout: None,
+        };
+        let expected = far_terrain_mesh(&terrain, spec).expect("direct far mesh");
+        let mut queue = TerrainMeshQueue::with_worker_count(terrain, NonZeroUsize::MIN);
+        queue.enqueue(GenerationPriority::FarTerrain, TerrainMeshSpec::Far(spec));
+        let generated = queue
+            .ready
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker completes the far mesh");
+
+        assert_eq!(generated.spec, TerrainMeshSpec::Far(spec));
+        assert_eq!(generated.mesh.expect("queued far mesh"), expected);
+    }
+
+    #[test]
+    fn pending_jobs_order_horizon_before_near_terrain() {
+        let spec = ChunkMeshSpec {
+            chunk: ChunkIndex::new(0, 0),
+            lod: ChunkIndex::MAX_LOD,
+            transition_faces: TransitionFaces::none(),
+        };
+        let mut pending = BinaryHeap::new();
+        pending.push(Reverse(QueuedTerrainMesh {
+            priority: GenerationPriority::NearTerrain,
+            sequence: 0,
+            spec: TerrainMeshSpec::Near(spec),
+        }));
+        pending.push(Reverse(QueuedTerrainMesh {
+            priority: GenerationPriority::Horizon,
+            sequence: 1,
+            spec: TerrainMeshSpec::Near(spec),
+        }));
+
+        assert_eq!(
+            pending.pop().expect("queued horizon job").0.priority,
+            GenerationPriority::Horizon
+        );
+    }
+
+    #[test]
+    fn far_tiles_handle_negative_boundaries_and_load_horizon_first() {
+        let streamer = FarTerrainStreamer::new(FarTerrainStreamingConfig::new(2, 3).unwrap());
+        let plan = streamer
+            .plan(
+                WorldPosition::new(-0.01, 0.0, -0.01),
+                &BTreeMap::new(),
+                None,
+            )
+            .expect("finite position");
+
+        assert_eq!(plan.center, FarTileIndex::new(-1, -1));
+        assert_eq!(plan.load.len(), 25);
+        assert_eq!(plan.load[0].tile.chebyshev_distance(plan.center), 2);
+        assert_eq!(
+            plan.load.last().expect("center tile").tile,
+            FarTileIndex::new(-1, -1)
+        );
+    }
+
+    #[test]
+    fn complete_near_bounds_cut_only_intersecting_far_tiles() {
+        let streamer = FarTerrainStreamer::new(FarTerrainStreamingConfig::new(1, 1).unwrap());
+        let cutout = NearTerrainCutout::around(ChunkIndex::new(0, 0), 4).expect("valid bounds");
+        let plan = streamer
+            .plan(
+                WorldPosition::new(0.0, 0.0, 0.0),
+                &BTreeMap::new(),
+                Some(cutout),
+            )
+            .expect("finite position");
+
+        assert_eq!(
+            plan.load
+                .iter()
+                .filter(|spec| spec.near_cutout.is_some())
+                .map(|spec| spec.tile)
+                .collect::<Vec<_>>(),
+            vec![
+                FarTileIndex::new(-1, -1),
+                FarTileIndex::new(0, -1),
+                FarTileIndex::new(-1, 0),
+                FarTileIndex::new(0, 0),
+            ]
+        );
+        assert!(
+            plan.load
+                .iter()
+                .filter(|spec| spec.near_cutout.is_some())
+                .all(|spec| far_terrain_mesh(
+                    &RollingHills::new(WorldIdentity::new(0x5eed, 1, 0)),
+                    *spec
+                )
+                .expect("cut mesh")
+                .indices
+                .len()
+                    < FarTileIndex::CELLS_PER_EDGE * FarTileIndex::CELLS_PER_EDGE * 6)
+        );
     }
 
     #[test]

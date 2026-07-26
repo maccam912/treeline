@@ -8,7 +8,7 @@ use transvoxel::prelude::{
     Block, FieldCaching, GenericMeshBuilder, TransitionSide, extract_from_field,
 };
 use treeline_coordinates::WorldPosition;
-use treeline_terrain::DensityField;
+use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
 
 /// Renderer-neutral indexed triangle mesh.
@@ -38,6 +38,63 @@ pub struct GridSpec {
     pub spacing_meters: f64,
 }
 
+/// Horizontal rectangle whose cells are omitted from a surface mesh.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceCutout {
+    pub min_x: f64,
+    pub max_x: f64,
+    pub min_z: f64,
+    pub max_z: f64,
+}
+
+impl SurfaceCutout {
+    pub const fn new(min_x: f64, max_x: f64, min_z: f64, max_z: f64) -> Self {
+        Self {
+            min_x,
+            max_x,
+            min_z,
+            max_z,
+        }
+    }
+
+    fn contains_cell(self, min_x: f64, max_x: f64, min_z: f64, max_z: f64) -> bool {
+        min_x >= self.min_x && max_x <= self.max_x && min_z >= self.min_z && max_z <= self.max_z
+    }
+}
+
+/// Regular height-sample lattice used by the dedicated far representation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceGridSpec {
+    pub origin_x: f64,
+    pub origin_z: f64,
+    pub cell_counts: [usize; 2],
+    pub spacing_meters: f64,
+    pub cutout: Option<SurfaceCutout>,
+}
+
+impl SurfaceGridSpec {
+    pub const fn new(
+        origin_x: f64,
+        origin_z: f64,
+        cell_counts: [usize; 2],
+        spacing_meters: f64,
+    ) -> Self {
+        Self {
+            origin_x,
+            origin_z,
+            cell_counts,
+            spacing_meters,
+            cutout: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_cutout(mut self, cutout: SurfaceCutout) -> Self {
+        self.cutout = Some(cutout);
+        self
+    }
+}
+
 impl GridSpec {
     pub const fn new(
         origin: WorldPosition,
@@ -56,6 +113,7 @@ impl GridSpec {
 pub enum MeshingError {
     InvalidGrid,
     GridTooLarge,
+    MissingSurface,
     TooManyVertices,
     UnsupportedLod,
 }
@@ -65,10 +123,113 @@ impl Display for MeshingError {
         match self {
             Self::InvalidGrid => formatter.write_str("the sample grid is invalid"),
             Self::GridTooLarge => formatter.write_str("the sample grid is too large"),
+            Self::MissingSurface => formatter.write_str("the terrain has no surface at a sample"),
             Self::TooManyVertices => formatter.write_str("the mesh exceeds u32 index capacity"),
             Self::UnsupportedLod => formatter.write_str("the chunk LOD is not supported"),
         }
     }
+}
+
+/// Triangulates a deterministic surface-height field without sampling a volume.
+///
+/// Vertex normals use central differences beyond the tile boundary, so
+/// adjacent tiles share both positions and normals. Optional cutouts omit only
+/// whole aligned cells and are used when near voxel terrain is resident.
+///
+/// # Errors
+///
+/// Returns [`MeshingError`] when the grid is invalid or too large, a surface
+/// sample is unavailable, or the mesh exceeds `u32` index capacity.
+pub fn surface_grid(
+    field: &impl SurfaceField,
+    spec: SurfaceGridSpec,
+) -> Result<Mesh, MeshingError> {
+    validate_surface_grid(spec)?;
+    let [cells_x, cells_z] = spec.cell_counts;
+    let count_x = cells_x.checked_add(1).ok_or(MeshingError::GridTooLarge)?;
+    let count_z = cells_z.checked_add(1).ok_or(MeshingError::GridTooLarge)?;
+    let vertex_count = count_x
+        .checked_mul(count_z)
+        .ok_or(MeshingError::GridTooLarge)?;
+    if u32::try_from(vertex_count).is_err() {
+        return Err(MeshingError::TooManyVertices);
+    }
+
+    let mut positions = Vec::with_capacity(vertex_count);
+    let mut normals = Vec::with_capacity(vertex_count);
+    for z in 0..count_z {
+        let world_z = spec.origin_z + (index_as_f64(z) * spec.spacing_meters);
+        for x in 0..count_x {
+            let world_x = spec.origin_x + (index_as_f64(x) * spec.spacing_meters);
+            let height = field
+                .surface_height(world_x, world_z)
+                .ok_or(MeshingError::MissingSurface)?;
+            let low_x = field
+                .surface_height(world_x - spec.spacing_meters, world_z)
+                .ok_or(MeshingError::MissingSurface)?;
+            let high_x = field
+                .surface_height(world_x + spec.spacing_meters, world_z)
+                .ok_or(MeshingError::MissingSurface)?;
+            let low_z = field
+                .surface_height(world_x, world_z - spec.spacing_meters)
+                .ok_or(MeshingError::MissingSurface)?;
+            let high_z = field
+                .surface_height(world_x, world_z + spec.spacing_meters)
+                .ok_or(MeshingError::MissingSurface)?;
+            let normal = normalize([
+                f64_as_f32(low_x - high_x),
+                f64_as_f32(2.0 * spec.spacing_meters),
+                f64_as_f32(low_z - high_z),
+            ]);
+            positions.push([f64_as_f32(world_x), f64_as_f32(height), f64_as_f32(world_z)]);
+            normals.push(normal);
+        }
+    }
+
+    let index_capacity = cells_x
+        .checked_mul(cells_z)
+        .and_then(|cells| cells.checked_mul(6))
+        .ok_or(MeshingError::GridTooLarge)?;
+    let mut indices = Vec::with_capacity(index_capacity);
+    for z in 0..cells_z {
+        let min_z = spec.origin_z + (index_as_f64(z) * spec.spacing_meters);
+        let max_z = min_z + spec.spacing_meters;
+        for x in 0..cells_x {
+            let min_x = spec.origin_x + (index_as_f64(x) * spec.spacing_meters);
+            let max_x = min_x + spec.spacing_meters;
+            if spec
+                .cutout
+                .is_some_and(|cutout| cutout.contains_cell(min_x, max_x, min_z, max_z))
+            {
+                continue;
+            }
+            let top_left = z
+                .checked_mul(count_x)
+                .and_then(|row| row.checked_add(x))
+                .ok_or(MeshingError::GridTooLarge)?;
+            let bottom_left = top_left
+                .checked_add(count_x)
+                .ok_or(MeshingError::GridTooLarge)?;
+            let top_right = top_left.checked_add(1).ok_or(MeshingError::GridTooLarge)?;
+            let bottom_right = bottom_left
+                .checked_add(1)
+                .ok_or(MeshingError::GridTooLarge)?;
+            indices.extend([
+                u32::try_from(top_left).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(bottom_left).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(top_right).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(top_right).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(bottom_left).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(bottom_right).map_err(|_| MeshingError::TooManyVertices)?,
+            ]);
+        }
+    }
+
+    Ok(Mesh {
+        positions,
+        normals,
+        indices,
+    })
 }
 
 impl Error for MeshingError {}
@@ -262,6 +423,37 @@ fn validate_grid(spec: GridSpec) -> Result<(), MeshingError> {
     Ok(())
 }
 
+fn validate_surface_grid(spec: SurfaceGridSpec) -> Result<(), MeshingError> {
+    let cutout_is_valid = spec.cutout.is_none_or(|cutout| {
+        cutout.min_x.is_finite()
+            && cutout.max_x.is_finite()
+            && cutout.min_z.is_finite()
+            && cutout.max_z.is_finite()
+            && cutout.min_x <= cutout.max_x
+            && cutout.min_z <= cutout.max_z
+    });
+    if spec.cell_counts.contains(&0)
+        || !spec.spacing_meters.is_finite()
+        || spec.spacing_meters <= 0.0
+        || !spec.origin_x.is_finite()
+        || !spec.origin_z.is_finite()
+        || !cutout_is_valid
+    {
+        return Err(MeshingError::InvalidGrid);
+    }
+    Ok(())
+}
+
+fn normalize(vector: [f32; 3]) -> [f32; 3] {
+    let length = vector[0]
+        .mul_add(
+            vector[0],
+            vector[1].mul_add(vector[1], vector[2] * vector[2]),
+        )
+        .sqrt();
+    [vector[0] / length, vector[1] / length, vector[2] / length]
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn index_as_f64(index: usize) -> f64 {
     index as f64
@@ -321,6 +513,52 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.is_well_formed());
         assert!(!first.indices.is_empty());
+    }
+
+    #[test]
+    fn surface_grid_is_repeatable_and_faces_upward() {
+        let field = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
+        let spec = SurfaceGridSpec::new(-64.0, 128.0, [8, 8], 8.0);
+        let first = surface_grid(&field, spec).expect("valid surface grid");
+        let second = surface_grid(&field, spec).expect("valid surface grid");
+
+        assert_eq!(first, second);
+        assert!(first.is_well_formed());
+        assert_eq!(first.indices.len(), 8 * 8 * 6);
+        assert!(first.normals.iter().all(|normal| normal[1] > 0.0));
+    }
+
+    #[test]
+    fn adjacent_surface_tiles_share_positions_and_normals() {
+        let field = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
+        let left = surface_grid(&field, SurfaceGridSpec::new(-64.0, 0.0, [8, 8], 8.0))
+            .expect("left surface");
+        let right = surface_grid(&field, SurfaceGridSpec::new(0.0, 0.0, [8, 8], 8.0))
+            .expect("right surface");
+
+        assert_eq!(
+            surface_boundary_vertices(&left, 0.0),
+            surface_boundary_vertices(&right, 0.0)
+        );
+    }
+
+    #[test]
+    fn aligned_surface_cutout_omits_only_covered_cells() {
+        let field = GroundPlane {
+            surface_height: 0.0,
+            material: Material::Soil,
+        };
+        let full = surface_grid(&field, SurfaceGridSpec::new(0.0, 0.0, [4, 4], 8.0))
+            .expect("full surface");
+        let cut = surface_grid(
+            &field,
+            SurfaceGridSpec::new(0.0, 0.0, [4, 4], 8.0)
+                .with_cutout(SurfaceCutout::new(8.0, 24.0, 8.0, 24.0)),
+        )
+        .expect("cut surface");
+
+        assert_eq!(full.indices.len() - cut.indices.len(), 4 * 6);
+        assert!(cut.is_well_formed());
     }
 
     #[test]
@@ -448,6 +686,24 @@ mod tests {
             .iter()
             .filter(|position| (position[0] - boundary_x).abs() < 0.000_1)
             .map(|position| (position[1].to_bits(), position[2].to_bits()))
+            .collect()
+    }
+
+    fn surface_boundary_vertices(mesh: &Mesh, boundary_x: f32) -> BTreeSet<[u32; 6]> {
+        mesh.positions
+            .iter()
+            .zip(&mesh.normals)
+            .filter(|(position, _)| (position[0] - boundary_x).abs() < f32::EPSILON)
+            .map(|(position, normal)| {
+                [
+                    position[0].to_bits(),
+                    position[1].to_bits(),
+                    position[2].to_bits(),
+                    normal[0].to_bits(),
+                    normal[1].to_bits(),
+                    normal[2].to_bits(),
+                ]
+            })
             .collect()
     }
 

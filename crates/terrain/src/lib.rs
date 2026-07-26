@@ -38,6 +38,15 @@ pub trait DensityField {
     fn sample(&self, position: WorldPosition) -> TerrainSample;
 }
 
+/// A terrain source with a single-valued surface suitable for distant meshes.
+///
+/// Near terrain remains a volumetric [`DensityField`]. Implementing this trait
+/// opts a field into the cheaper far representation where caves and overhangs
+/// are intentionally not evaluated.
+pub trait SurfaceField {
+    fn surface_height(&self, x: f64, z: f64) -> Option<f64>;
+}
+
 /// A horizontal ground plane useful for tests and the first terrain prototype.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroundPlane {
@@ -48,6 +57,16 @@ pub struct GroundPlane {
 impl DensityField for GroundPlane {
     fn sample(&self, position: WorldPosition) -> TerrainSample {
         TerrainSample::new(position.y - self.surface_height, self.material)
+    }
+}
+
+impl SurfaceField for GroundPlane {
+    fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
+        if x.is_finite() && z.is_finite() {
+            Some(self.surface_height)
+        } else {
+            None
+        }
     }
 }
 
@@ -88,6 +107,12 @@ impl DensityField for RollingHills {
             Material::Rock
         };
         TerrainSample::new(density, material)
+    }
+}
+
+impl SurfaceField for RollingHills {
+    fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
+        self.height_at(x, z)
     }
 }
 
@@ -240,6 +265,19 @@ mod tests {
             !hills
                 .sample(WorldPosition::new(f64::INFINITY, 0.0, 0.0))
                 .is_solid()
+        );
+    }
+
+    #[test]
+    fn far_surface_contract_matches_the_volumetric_zero_surface() {
+        let hills = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
+        let height = hills.surface_height(-96.0, 144.0).expect("finite surface");
+        assert_eq!(
+            hills
+                .sample(WorldPosition::new(-96.0, height, 144.0))
+                .density
+                .to_bits(),
+            0.0_f64.to_bits()
         );
     }
 }

@@ -21,14 +21,16 @@ test-backed foundations described in the design. The prototype provides:
 - mouse-look, walking, sprinting, and terrain-following movement;
 - deterministic 32 m terrain chunks streamed around the moving player;
 - distance-selected 2 m, 4 m, and 8 m terrain LODs with Transvoxel seams;
+- surface-only far-terrain tiles extending the visible landscape beyond 2 km;
+- prioritized asynchronous terrain meshing outside the window thread;
 - continuous deterministic regional fields;
 - hydrology and cave graph invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
 
 The terrain toy now has an unbounded movement path through deterministic
-near-to-mid terrain chunks. Dedicated far terrain, asynchronous job scheduling,
-vegetation, survival, and networking have not been added yet.
+near-to-mid terrain chunks backed by a cheaper coarse vista representation.
+Vegetation, survival, and networking have not been added yet.
 
 ## Getting started
 
