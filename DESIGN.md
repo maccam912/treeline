@@ -2210,10 +2210,10 @@ The world generator is the game.
       continentality, elevation cooling, orographic precipitation, rain
       shadows, explicit seasons, and deterministic snowpack feed river
       discharge and erosion.
-- [ ] **NEXT / PARTIAL** — Soil. Erosion already exposes deterministic soil
-      depth and surface material, but soil composition, moisture, acidity, and
-      ecology-facing suitability remain.
-- [ ] Forest distribution
+- [x] Soil. Deterministic soil texture and composition, depth, surface moisture,
+      acidity, organic matter, and ecology-facing species suitability derive
+      from geology, erosion, and climate.
+- [ ] **NEXT** — Forest distribution
 - [ ] Procedural trees
 - [ ] Surface rocks
 - [ ] Ground vegetation
