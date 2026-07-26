@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
-use treeline_geography::{DrainageCell, RegionalProfile, WatershedRegion, WatershedRegionIndex};
+use treeline_geography::{
+    Climate, ClimateSample, DrainageCell, RegionalProfile, WatershedRegion, WatershedRegionIndex,
+};
 use treeline_hydrology::{LakeNetwork, RiverNetwork, RiverSegment};
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::{SurfaceField, WildernessTerrain};
-use treeline_world::{GeneratedWorldTerrain, WorldErosionSample};
+use treeline_world::{CURRENT_GENERATOR_VERSION, GeneratedWorldTerrain, WorldErosionSample};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -17,7 +19,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const GENERATOR_VERSION: u32 = 5;
+const GENERATOR_VERSION: u32 = CURRENT_GENERATOR_VERSION;
 const GRID_ROWS: usize = 128;
 const MIN_SPAN_METERS: f64 = 1_000.0;
 const MAX_SPAN_METERS: f64 = 1_000_000.0;
@@ -32,6 +34,8 @@ enum ViewMode {
     Rivers,
     Lakes,
     Erosion,
+    Temperature,
+    Precipitation,
 }
 
 impl ViewMode {
@@ -43,6 +47,8 @@ impl ViewMode {
             Self::Rivers => "rivers",
             Self::Lakes => "lakes",
             Self::Erosion => "erosion",
+            Self::Temperature => "temperature",
+            Self::Precipitation => "precipitation",
         }
     }
 }
@@ -325,6 +331,14 @@ impl GeneratorLab {
                 self.mode = ViewMode::Erosion;
                 true
             }
+            KeyCode::Digit7 => {
+                self.mode = ViewMode::Temperature;
+                true
+            }
+            KeyCode::Digit8 => {
+                self.mode = ViewMode::Precipitation;
+                true
+            }
             _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
@@ -406,6 +420,9 @@ impl GeneratorLab {
         let Some(profile) = RegionalProfile::sample(world, x, z) else {
             return;
         };
+        let Some(climate) = Climate::new(world).sample(x, z) else {
+            return;
+        };
         let watershed = WatershedRegionIndex::containing(x, z)
             .and_then(|index| WatershedRegion::generate(world, index));
         let drainage = watershed
@@ -453,18 +470,20 @@ impl GeneratorLab {
             },
         );
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | ridge +{:.0} m | {drainage_summary}",
-            macro_sample.mountain_uplift_meters
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {:.1} °C | {:.0} mm/yr | ridge +{:.0} m | {drainage_summary}",
+            climate.mean_temperature_celsius,
+            climate.annual_precipitation_millimeters,
+            macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nclimate: {climate:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
         );
         self.update_title(Some(&summary));
     }
 
     fn update_title(&self, inspection: Option<&str>) {
         let base = format!(
-            "Treeline Generator Lab — {} | seed {:x} | center ({:.1}, {:.1}) km | span {:.0} km | 1 terrain · 2 watersheds · 3 flow · 4 rivers · 5 lakes · 6 erosion · WASD pan · +/- zoom · R seed · click inspect",
+            "Treeline Generator Lab — {} | seed {:x} | center ({:.1}, {:.1}) km | span {:.0} km | 1 terrain · 2 watersheds · 3 flow · 4 rivers · 5 lakes · 6 erosion · 7 temperature · 8 precipitation · WASD pan · +/- zoom · R seed · click inspect",
             self.mode.label(),
             self.seed,
             self.center[0] / 1_000.0,
@@ -540,6 +559,7 @@ fn generate_drainage_mesh(
     let origin_z = center[1] - (span_meters * 0.5);
     let world = WorldIdentity::new(seed, GENERATOR_VERSION, 0);
     let generated_terrain = (mode == ViewMode::Erosion).then(|| GeneratedWorldTerrain::new(world));
+    let climate = Climate::new(world);
     let mut regions = BTreeMap::new();
     let mut river_networks = BTreeMap::new();
     let mut positions = Vec::with_capacity(count_x * count_z);
@@ -549,6 +569,15 @@ fn generate_drainage_mesh(
         let world_z = origin_z + (usize_as_f64(z) * spacing);
         for x in 0..count_x {
             let world_x = origin_x + (usize_as_f64(x) * spacing);
+            positions.push([f64_as_f32(world_x), 0.0, f64_as_f32(world_z)]);
+            normals.push([0.0, 1.0, 0.0]);
+            if matches!(mode, ViewMode::Temperature | ViewMode::Precipitation) {
+                let sample = climate
+                    .sample(world_x, world_z)
+                    .ok_or_else(|| std::io::Error::other("failed to sample climate"))?;
+                colors.push(climate_color(sample, mode));
+                continue;
+            }
             let region_index = WatershedRegionIndex::containing(world_x, world_z)
                 .ok_or_else(|| std::io::Error::other("invalid drainage coordinate"))?;
             if let std::collections::btree_map::Entry::Vacant(entry) = regions.entry(region_index) {
@@ -568,8 +597,6 @@ fn generate_drainage_mesh(
             let erosion = generated_terrain
                 .as_ref()
                 .and_then(|terrain| terrain.erosion_at(world_x, world_z));
-            positions.push([f64_as_f32(world_x), 0.0, f64_as_f32(world_z)]);
-            normals.push([0.0, 1.0, 0.0]);
             colors.push(drainage_color(world, *cell, river, erosion.as_ref(), mode));
         }
     }
@@ -691,6 +718,34 @@ fn drainage_color(
                 1.0,
             ]
         }),
+        ViewMode::Temperature | ViewMode::Precipitation => [1.0, 0.0, 1.0, 1.0],
+    }
+}
+
+fn climate_color(sample: ClimateSample, mode: ViewMode) -> [f32; 4] {
+    match mode {
+        ViewMode::Temperature => {
+            let warmth =
+                f64_as_f32((sample.mean_temperature_celsius + 20.0) / 55.0).clamp(0.0, 1.0);
+            let temperate = 1.0 - ((warmth - 0.5).abs() * 2.0);
+            [
+                lerp_f32(0.08, 0.92, warmth),
+                0.18 + (temperate * 0.62),
+                lerp_f32(0.92, 0.08, warmth),
+                1.0,
+            ]
+        }
+        ViewMode::Precipitation => {
+            let moisture =
+                f64_as_f32(sample.annual_precipitation_millimeters / 3_000.0).clamp(0.0, 1.0);
+            [
+                lerp_f32(0.62, 0.04, moisture),
+                lerp_f32(0.34, 0.64, moisture),
+                lerp_f32(0.10, 0.92, moisture),
+                1.0,
+            ]
+        }
+        _ => [1.0, 0.0, 1.0, 1.0],
     }
 }
 

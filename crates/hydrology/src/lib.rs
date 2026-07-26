@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition};
 use treeline_geography::{
-    DRAINAGE_CELL_EDGE_METERS, DrainageCellIndex, MacroElevation, RegionalProfile, WatershedRegion,
-    WatershedRegionIndex,
+    Climate, DRAINAGE_CELL_EDGE_METERS, DrainageCellIndex, MacroElevation,
+    OROGRAPHIC_CLIMATE_GENERATOR_VERSION, RegionalProfile, WatershedRegion, WatershedRegionIndex,
 };
 
 const SECONDS_PER_YEAR: f64 = 31_556_952.0;
@@ -210,14 +210,22 @@ impl GullyNetwork {
             let bend_y = (source_y + mouth_y) * 0.5;
 
             let profile = RegionalProfile::sample(watershed.world, source_x, source_z)?;
+            let precipitation =
+                if watershed.world.generator_version >= OROGRAPHIC_CLIMATE_GENERATOR_VERSION {
+                    Climate::new(watershed.world)
+                        .sample(source_x, source_z)?
+                        .precipitation_fraction()
+                } else {
+                    profile.precipitation
+                };
             let softness = 1.0 - profile.rock_hardness;
             let erodibility = (0.2 + (softness * 0.8))
                 * (0.25 + (profile.erosion_age * 0.75))
-                * (0.3 + (profile.precipitation * 0.7));
+                * (0.3 + (precipitation * 0.7));
             let catchment_scale = u64_as_f64(cell.flow_accumulation_cells).sqrt();
             let gradient = ((source_y - mouth_y) / length).clamp(0.0, 1.0);
             let half_width_meters = ((28.0 + (catchment_scale * 12.0))
-                * (0.7 + (profile.precipitation * 0.6)))
+                * (0.7 + (precipitation * 0.6)))
                 .clamp(24.0, MAX_GULLY_INFLUENCE_METERS);
             let incision_depth_meters = ((1.0 + (catchment_scale * 2.4))
                 * (0.35 + (erodibility * 0.65))
@@ -490,9 +498,20 @@ impl LakeNetwork {
 
 fn local_runoff(world: WorldIdentity, cell: DrainageCellIndex) -> Option<f64> {
     let [x, z] = cell.center();
-    let profile = RegionalProfile::sample(world, x, z)?;
-    let annual_precipitation_meters = 0.25 + (profile.precipitation * 2.75);
-    let runoff_fraction = (0.75 - (profile.mean_temperature * 0.5)).clamp(0.15, 0.75);
+    let (annual_precipitation_meters, runoff_fraction) =
+        if world.generator_version >= OROGRAPHIC_CLIMATE_GENERATOR_VERSION {
+            let climate = Climate::new(world).sample(x, z)?;
+            (
+                climate.annual_precipitation_millimeters / 1_000.0,
+                (0.72 - (climate.warmth_fraction() * 0.42)).clamp(0.15, 0.75),
+            )
+        } else {
+            let profile = RegionalProfile::sample(world, x, z)?;
+            (
+                0.25 + (profile.precipitation * 2.75),
+                (0.75 - (profile.mean_temperature * 0.5)).clamp(0.15, 0.75),
+            )
+        };
     let cell_area_square_meters = DRAINAGE_CELL_EDGE_METERS * DRAINAGE_CELL_EDGE_METERS;
     Some(annual_precipitation_meters * cell_area_square_meters * runoff_fraction / SECONDS_PER_YEAR)
 }
@@ -541,6 +560,8 @@ mod tests {
     use treeline_coordinates::stable_hash;
 
     const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 2, 0);
+    const CLIMATE_WORLD: WorldIdentity =
+        WorldIdentity::new(0x5eed, OROGRAPHIC_CLIMATE_GENERATOR_VERSION, 0);
 
     #[test]
     fn river_direction_rejects_uphill_segments() {
@@ -553,6 +574,25 @@ mod tests {
             discharge_cubic_meters_per_second: 2.0,
         };
         assert!(!river.descends_or_is_level());
+    }
+
+    #[test]
+    fn local_runoff_uses_orographic_climate_in_version_six() {
+        let cell = DrainageCellIndex::new(-17, 23);
+        let [x, z] = cell.center();
+        let climate = Climate::new(CLIMATE_WORLD)
+            .sample(x, z)
+            .expect("finite climate");
+        let expected = (climate.annual_precipitation_millimeters / 1_000.0)
+            * DRAINAGE_CELL_EDGE_METERS
+            * DRAINAGE_CELL_EDGE_METERS
+            * (0.72 - (climate.warmth_fraction() * 0.42)).clamp(0.15, 0.75)
+            / SECONDS_PER_YEAR;
+
+        assert_eq!(
+            local_runoff(CLIMATE_WORLD, cell).expect("runoff").to_bits(),
+            expected.to_bits()
+        );
     }
 
     #[test]
@@ -756,6 +796,30 @@ mod tests {
             stable_hash(&words),
             13_240_554_273_518_066_894,
             "changing this value changes generated regional rivers"
+        );
+    }
+
+    #[test]
+    fn climate_fed_river_network_has_a_golden_fingerprint() {
+        let network = RiverNetwork::generate(CLIMATE_WORLD, WatershedRegionIndex::new(-1, 2))
+            .expect("network");
+        let words = network
+            .segments()
+            .iter()
+            .step_by(17)
+            .flat_map(|segment| {
+                [
+                    u64::from_le_bytes(segment.source_cell.x.to_le_bytes()),
+                    u64::from_le_bytes(segment.source_cell.z.to_le_bytes()),
+                    segment.discharge_cubic_meters_per_second.to_bits(),
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_hash(&words),
+            10_915_097_629_159_196_840,
+            "changing this value changes climate-fed regional rivers"
         );
     }
 

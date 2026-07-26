@@ -35,10 +35,13 @@ test-backed foundations described in the design. The prototype provides:
 - versioned multi-scale erosion: regional mountain weathering and sediment
   plains, drainage-graph gullies, and slope/geology-driven rock, scree, soil,
   and micro-relief;
+- explainable orographic climate with prevailing winds, elevation cooling,
+  windward precipitation, lee-side rain shadows, and climate-fed runoff;
 - deterministic lakes derived from filled drainage basins, with level water
   surfaces, stable identities, spill outlets, and near/far rendering;
 - an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
-  terrain/watershed/flow/river/lake/erosion views, and parameter inspection;
+  terrain/watershed/flow/river/lake/erosion/temperature/precipitation views,
+  and parameter inspection;
 - hydrology and cave graph invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
@@ -49,7 +52,8 @@ representation. Macro terrain was introduced with generator version 2, and
 river-shaped terrain with version 3; older world identities retain their
 previous terrain contracts. Filled drainage basins become rendered lakes with
 generator version 4. Multi-scale erosion is enabled by generator version 5.
-Vegetation, survival, and networking have not been added yet.
+Orographic climate begins with generator version 6. Vegetation, survival, and
+networking have not been added yet.
 
 ## Getting started
 
@@ -68,9 +72,10 @@ cargo run -p generator-lab
 ```
 
 In Generator Lab, use WASD or the arrow keys to pan, `+`/`-` or the mouse wheel
-to zoom, `R` to advance the seed, `1`/`2`/`3`/`4`/`5`/`6` to view terrain,
-watersheds, flow accumulation, rivers, lakes, or erosion, left-click to inspect
-a location, and right-click to teleport the view.
+to zoom, `R` to advance the seed, and `1` through `8` to view terrain,
+watersheds, flow accumulation, rivers, lakes, erosion, temperature, or
+precipitation. Left-click to inspect a location, and right-click to teleport
+the view.
 
 Run the playable terrain toy with:
 

@@ -13,9 +13,10 @@ use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
 use treeline_world::{
-    ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig, FarTerrainMeshSpec, FarTerrainStreamer,
-    FarTerrainStreamingConfig, FarTileIndex, GeneratedWorldTerrain, GenerationPriority,
-    NearTerrainCutout, TerrainMeshQueue, TerrainMeshSpec,
+    CURRENT_GENERATOR_VERSION, ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig,
+    FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig, FarTileIndex,
+    GeneratedWorldTerrain, GenerationPriority, NearTerrainCutout, TerrainMeshQueue,
+    TerrainMeshSpec,
 };
 use web_time::Instant;
 use winit::application::ApplicationHandler;
@@ -29,7 +30,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 use winit::window::{Window, WindowId};
 
-const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 5, 0);
+const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;

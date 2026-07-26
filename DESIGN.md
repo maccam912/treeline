@@ -2182,7 +2182,7 @@ This is the first major success criterion.
 
 ## Phase 2 — Geography
 
-**Phase status: In progress**
+**Phase status: Complete**
 
 - [x] Macro terrain
 - [x] Elongated mountain systems
@@ -2190,9 +2190,9 @@ This is the first major success criterion.
 - [x] Deterministic regional watersheds
 - [x] Rainfall-fed river networks
 - [x] Filled-basin lakes with level surfaces and outlets
-- [ ] **NEXT / PARTIAL** — multi-scale erosion. River-driven valley and
-      channel incision plus an erosion-age field exist; general macro, meso,
-      and micro erosion do not.
+- [x] Multi-scale erosion: regional mountain weathering and sediment
+      deposition, drainage-graph gullies, and slope/geology-driven rock,
+      scree, soil depth, and micro-relief.
 
 No gameplay.
 
@@ -2204,11 +2204,12 @@ The world generator is the game.
 
 ## Phase 3 — Ecosystems
 
-**Phase status: Not started; climate has an early foundation**
+**Phase status: In progress**
 
-- [ ] **PARTIAL** — climate. Spatially correlated precipitation and
-      temperature fields feed river discharge, but elevation, continentality,
-      wind, rain shadows, seasons, and snowpack are not modeled.
+- [ ] **NEXT / PARTIAL** — climate. Spatially correlated prevailing winds,
+      elevation cooling, orographic precipitation, and rain shadows now feed
+      river discharge and erosion. Continentality, latitude-like structure,
+      seasons, and snowpack remain.
 - [ ] Soil
 - [ ] Forest distribution
 - [ ] Procedural trees
