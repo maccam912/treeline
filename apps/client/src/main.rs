@@ -166,10 +166,10 @@ impl ApplicationHandler for TreelineApp {
         let Some(game) = self.game.as_mut() else {
             return;
         };
-        if game.cursor_captured {
-            if let DeviceEvent::MouseMotion { delta } = event {
-                game.camera.look(delta.0, delta.1);
-            }
+        if game.cursor_captured
+            && let DeviceEvent::MouseMotion { delta } = event
+        {
+            game.camera.look(delta.0, delta.1);
         }
     }
 
