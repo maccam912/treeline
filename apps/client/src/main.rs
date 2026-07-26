@@ -7,7 +7,7 @@ use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::SurfaceField;
@@ -20,7 +20,9 @@ use treeline_world::{
 use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, Touch, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 #[cfg(not(target_arch = "wasm32"))]
@@ -146,6 +148,7 @@ impl ApplicationHandler for TreelineApp {
                 button: MouseButton::Left,
                 ..
             } => game.set_cursor_captured(true),
+            WindowEvent::Touch(touch) => game.handle_touch(touch),
             WindowEvent::Focused(false) => {
                 game.set_cursor_captured(false);
                 game.input.clear();
@@ -353,10 +356,29 @@ impl Game {
         }
     }
 
+    fn handle_touch(&mut self, touch: Touch) {
+        let size = self.window.inner_size();
+        let position = Vec2::new(f64_as_f32(touch.location.x), f64_as_f32(touch.location.y));
+        let stick_radius = f64_as_f32(64.0 * self.window.scale_factor());
+
+        match touch.phase {
+            TouchPhase::Started => {
+                self.input
+                    .sticks
+                    .begin(touch.id, position, u32_as_f32(size.width));
+            }
+            TouchPhase::Moved => self.input.sticks.update(touch.id, position),
+            TouchPhase::Ended | TouchPhase::Cancelled => self.input.sticks.end(touch.id),
+        }
+        self.input.sticks.set_radius(stick_radius);
+    }
+
     fn update(&mut self) {
         let now = Instant::now();
         let delta_seconds = (now - self.previous_frame).as_secs_f32().min(0.1);
         self.previous_frame = now;
+        self.camera
+            .look_with_stick(self.input.look_axis(), delta_seconds);
         self.camera.walk(&self.input, &self.terrain, delta_seconds);
         if let Err(error) = update_terrain(
             &self.device,
@@ -444,6 +466,13 @@ impl Camera {
         self.pitch = (self.pitch - (f64_as_f32(delta_y) * SENSITIVITY)).clamp(-1.5, 1.5);
     }
 
+    fn look_with_stick(&mut self, axis: Vec2, delta_seconds: f32) {
+        const HORIZONTAL_SPEED: f32 = 2.4;
+        const VERTICAL_SPEED: f32 = 1.8;
+        self.yaw += axis.x * HORIZONTAL_SPEED * delta_seconds;
+        self.pitch = (self.pitch + (axis.y * VERTICAL_SPEED * delta_seconds)).clamp(-1.5, 1.5);
+    }
+
     fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f32) {
         let forward = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
         let right = forward.cross(Vec3::Y);
@@ -454,7 +483,8 @@ impl Camera {
             } else {
                 WALK_SPEED
             };
-            self.position += movement.normalize() * speed * delta_seconds;
+            let intensity = movement.length().min(1.0);
+            self.position += movement.normalize() * intensity * speed * delta_seconds;
         }
         self.position.y = surface_height(terrain, self.position.x, self.position.z) + EYE_HEIGHT;
     }
@@ -478,6 +508,7 @@ impl Camera {
 #[derive(Default)]
 struct InputState {
     pressed: HashSet<KeyCode>,
+    sticks: VirtualSticks,
 }
 
 impl InputState {
@@ -490,23 +521,31 @@ impl InputState {
     }
 
     fn forward_axis(&self) -> f32 {
-        f32::from(u8::from(
+        (f32::from(u8::from(
             self.is_down(KeyCode::KeyW) || self.is_down(KeyCode::ArrowUp),
         )) - f32::from(u8::from(
             self.is_down(KeyCode::KeyS) || self.is_down(KeyCode::ArrowDown),
-        ))
+        )) + self.sticks.movement_axis().y)
+            .clamp(-1.0, 1.0)
     }
 
     fn right_axis(&self) -> f32 {
-        f32::from(u8::from(
+        (f32::from(u8::from(
             self.is_down(KeyCode::KeyD) || self.is_down(KeyCode::ArrowRight),
         )) - f32::from(u8::from(
             self.is_down(KeyCode::KeyA) || self.is_down(KeyCode::ArrowLeft),
-        ))
+        )) + self.sticks.movement_axis().x)
+            .clamp(-1.0, 1.0)
+    }
+
+    fn look_axis(&self) -> Vec2 {
+        self.sticks.look_axis()
     }
 
     fn sprint(&self) -> bool {
-        self.is_down(KeyCode::ShiftLeft) || self.is_down(KeyCode::ShiftRight)
+        self.is_down(KeyCode::ShiftLeft)
+            || self.is_down(KeyCode::ShiftRight)
+            || self.sticks.movement_axis().length() > 0.85
     }
 
     fn is_down(&self, code: KeyCode) -> bool {
@@ -515,6 +554,99 @@ impl InputState {
 
     fn clear(&mut self) {
         self.pressed.clear();
+        self.sticks.clear();
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StickTouch {
+    id: u64,
+    origin: Vec2,
+    current: Vec2,
+}
+
+impl StickTouch {
+    const fn new(id: u64, position: Vec2) -> Self {
+        Self {
+            id,
+            origin: position,
+            current: position,
+        }
+    }
+
+    fn axis(self, radius: f32) -> Vec2 {
+        let offset = Vec2::new(
+            self.current.x - self.origin.x,
+            self.origin.y - self.current.y,
+        ) / radius.max(1.0);
+        offset.clamp_length_max(1.0)
+    }
+}
+
+#[derive(Debug)]
+struct VirtualSticks {
+    movement: Option<StickTouch>,
+    look: Option<StickTouch>,
+    radius: f32,
+}
+
+impl Default for VirtualSticks {
+    fn default() -> Self {
+        Self {
+            movement: None,
+            look: None,
+            radius: 64.0,
+        }
+    }
+}
+
+impl VirtualSticks {
+    fn begin(&mut self, id: u64, position: Vec2, viewport_width: f32) {
+        let target = if position.x < viewport_width * 0.5 {
+            &mut self.movement
+        } else {
+            &mut self.look
+        };
+        if target.is_none() {
+            *target = Some(StickTouch::new(id, position));
+        }
+    }
+
+    fn update(&mut self, id: u64, position: Vec2) {
+        for stick in [&mut self.movement, &mut self.look].into_iter().flatten() {
+            if stick.id == id {
+                stick.current = position;
+                break;
+            }
+        }
+    }
+
+    fn end(&mut self, id: u64) {
+        if self.movement.is_some_and(|stick| stick.id == id) {
+            self.movement = None;
+        }
+        if self.look.is_some_and(|stick| stick.id == id) {
+            self.look = None;
+        }
+    }
+
+    fn set_radius(&mut self, radius: f32) {
+        self.radius = radius.max(1.0);
+    }
+
+    fn movement_axis(&self) -> Vec2 {
+        self.movement
+            .map_or(Vec2::ZERO, |stick| stick.axis(self.radius))
+    }
+
+    fn look_axis(&self) -> Vec2 {
+        self.look
+            .map_or(Vec2::ZERO, |stick| stick.axis(self.radius))
+    }
+
+    fn clear(&mut self) {
+        self.movement = None;
+        self.look = None;
     }
 }
 
@@ -707,4 +839,35 @@ fn f64_as_f32(value: f64) -> f32 {
 #[allow(clippy::cast_precision_loss)]
 fn u32_as_f32(value: u32) -> f32 {
     value as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn twin_sticks_assign_left_to_movement_and_right_to_look() {
+        let mut sticks = VirtualSticks::default();
+        sticks.set_radius(100.0);
+        sticks.begin(1, Vec2::new(100.0, 500.0), 1_000.0);
+        sticks.begin(2, Vec2::new(900.0, 500.0), 1_000.0);
+        sticks.update(1, Vec2::new(150.0, 400.0));
+        sticks.update(2, Vec2::new(850.0, 550.0));
+
+        assert_eq!(sticks.movement_axis(), Vec2::new(0.5, 1.0).normalize());
+        assert_eq!(sticks.look_axis(), Vec2::new(-0.5, -0.5));
+    }
+
+    #[test]
+    fn releasing_a_touch_only_resets_its_stick() {
+        let mut sticks = VirtualSticks::default();
+        sticks.begin(1, Vec2::new(100.0, 500.0), 1_000.0);
+        sticks.begin(2, Vec2::new(900.0, 500.0), 1_000.0);
+        sticks.update(1, Vec2::new(130.0, 500.0));
+        sticks.update(2, Vec2::new(870.0, 500.0));
+        sticks.end(1);
+
+        assert_eq!(sticks.movement_axis(), Vec2::ZERO);
+        assert_ne!(sticks.look_axis(), Vec2::ZERO);
+    }
 }
