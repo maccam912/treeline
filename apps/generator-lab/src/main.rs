@@ -5,6 +5,7 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_geography::{DrainageCell, RegionalProfile, WatershedRegion, WatershedRegionIndex};
+use treeline_hydrology::{RiverNetwork, RiverSegment};
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::WildernessTerrain;
@@ -27,6 +28,7 @@ enum ViewMode {
     Terrain,
     Watersheds,
     FlowAccumulation,
+    Rivers,
 }
 
 impl ViewMode {
@@ -35,6 +37,7 @@ impl ViewMode {
             Self::Terrain => "terrain",
             Self::Watersheds => "watersheds",
             Self::FlowAccumulation => "flow accumulation",
+            Self::Rivers => "rivers",
         }
     }
 }
@@ -305,6 +308,10 @@ impl GeneratorLab {
                 self.mode = ViewMode::FlowAccumulation;
                 true
             }
+            KeyCode::Digit4 => {
+                self.mode = ViewMode::Rivers;
+                true
+            }
             _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
@@ -382,18 +389,35 @@ impl GeneratorLab {
         let Some(profile) = RegionalProfile::sample(world, x, z) else {
             return;
         };
-        let drainage = WatershedRegionIndex::containing(x, z)
-            .and_then(|index| WatershedRegion::generate(world, index))
+        let watershed = WatershedRegionIndex::containing(x, z)
+            .and_then(|index| WatershedRegion::generate(world, index));
+        let drainage = watershed
+            .as_ref()
             .and_then(|region| region.cell_at(x, z).copied());
+        let river_network = watershed.as_ref().and_then(RiverNetwork::from_watershed);
+        let river = drainage.and_then(|cell| {
+            river_network
+                .as_ref()
+                .and_then(|network| network.segment_from(cell.index))
+                .copied()
+        });
         let drainage_summary = drainage.map_or_else(
             || "drainage unavailable".to_owned(),
             |cell| {
+                let river_summary = river.map_or_else(String::new, |segment| {
+                    format!(
+                        " | river {:.2} m³/s | {:.0} km²",
+                        segment.discharge_cubic_meters_per_second,
+                        segment.drainage_area_square_kilometers
+                    )
+                });
                 format!(
-                    "flow {} cells | outlet ({}, {}){}",
+                    "flow {} cells | outlet ({}, {}){}{}",
                     cell.flow_accumulation_cells,
                     cell.watershed_outlet.x,
                     cell.watershed_outlet.z,
-                    if cell.basin.is_some() { " | basin" } else { "" }
+                    if cell.basin.is_some() { " | basin" } else { "" },
+                    river_summary
                 )
             },
         );
@@ -402,14 +426,14 @@ impl GeneratorLab {
             macro_sample.mountain_uplift_meters
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nsurface height: {surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\ndrainage cell: {drainage:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nsurface height: {surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}"
         );
         self.update_title(Some(&summary));
     }
 
     fn update_title(&self, inspection: Option<&str>) {
         let base = format!(
-            "Treeline Generator Lab — {} | seed {:x} | center ({:.1}, {:.1}) km | span {:.0} km | 1 terrain · 2 watersheds · 3 flow · WASD pan · +/- zoom · R seed · click inspect",
+            "Treeline Generator Lab — {} | seed {:x} | center ({:.1}, {:.1}) km | span {:.0} km | 1 terrain · 2 watersheds · 3 flow · 4 rivers · WASD pan · +/- zoom · R seed · click inspect",
             self.mode.label(),
             self.seed,
             self.center[0] / 1_000.0,
@@ -485,6 +509,7 @@ fn generate_drainage_mesh(
     let origin_z = center[1] - (span_meters * 0.5);
     let world = WorldIdentity::new(seed, GENERATOR_VERSION, 0);
     let mut regions = BTreeMap::new();
+    let mut river_networks = BTreeMap::new();
     let mut positions = Vec::with_capacity(count_x * count_z);
     let mut normals = Vec::with_capacity(count_x * count_z);
     let mut colors = Vec::with_capacity(count_x * count_z);
@@ -497,14 +522,20 @@ fn generate_drainage_mesh(
             if let std::collections::btree_map::Entry::Vacant(entry) = regions.entry(region_index) {
                 let region = WatershedRegion::generate(world, region_index)
                     .ok_or_else(|| std::io::Error::other("failed to generate watershed region"))?;
+                let rivers = RiverNetwork::from_watershed(&region)
+                    .ok_or_else(|| std::io::Error::other("failed to generate river network"))?;
                 entry.insert(region);
+                river_networks.insert(region_index, rivers);
             }
             let cell = regions[&region_index]
                 .cell_at(world_x, world_z)
                 .ok_or_else(|| std::io::Error::other("missing drainage cell"))?;
+            let river = river_networks[&region_index]
+                .segment_from(cell.index)
+                .copied();
             positions.push([f64_as_f32(world_x), 0.0, f64_as_f32(world_z)]);
             normals.push([0.0, 1.0, 0.0]);
-            colors.push(drainage_color(world, *cell, mode));
+            colors.push(drainage_color(world, *cell, river, mode));
         }
     }
 
@@ -545,7 +576,12 @@ fn grid_dimensions(span_meters: f64, width: u32, height: u32) -> (usize, f64) {
     (columns, spacing)
 }
 
-fn drainage_color(world: WorldIdentity, cell: DrainageCell, mode: ViewMode) -> [f32; 4] {
+fn drainage_color(
+    world: WorldIdentity,
+    cell: DrainageCell,
+    river: Option<RiverSegment>,
+    mode: ViewMode,
+) -> [f32; 4] {
     match mode {
         ViewMode::Terrain => [1.0, 1.0, 1.0, 0.0],
         ViewMode::Watersheds => {
@@ -573,6 +609,17 @@ fn drainage_color(world: WorldIdentity, cell: DrainageCell, mode: ViewMode) -> [
                 1.0,
             ]
         }
+        ViewMode::Rivers => river.map_or([0.24, 0.21, 0.15, 1.0], |segment| {
+            let strength = ((f64_as_f32(segment.discharge_cubic_meters_per_second).log2() + 4.0)
+                / 10.0)
+                .clamp(0.0, 1.0);
+            [
+                lerp_f32(0.08, 0.02, strength),
+                lerp_f32(0.42, 0.72, strength),
+                lerp_f32(0.72, 1.0, strength),
+                1.0,
+            ]
+        }),
     }
 }
 
