@@ -11,6 +11,7 @@ authors = ["Treeline Contributors"]
 
 [workspace.dependencies]
 bytemuck = { version = "1.23.2", features = ["derive"] }
+console_error_panic_hook = "0.1"
 glam = "0.30.5"
 mcubes = "0.1.7"
 pollster = "0.4.0"
@@ -31,6 +32,7 @@ treeline-world = { path = "crates/world" }
 wgpu = "24.0.5"
 winit = "0.30.12"
 wasm-bindgen-futures = "0.4"
+web-time = "1.1"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
