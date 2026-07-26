@@ -266,16 +266,16 @@ impl Game {
             surface_config.width,
             surface_config.height,
         );
-        let chunk_streamer = ChunkStreamer::new(ChunkStreamingConfig::default());
-        let far_terrain_streamer = FarTerrainStreamer::new(FarTerrainStreamingConfig::default());
+        let chunk_streamer = ChunkStreamer::new(chunk_streaming_config());
+        let far_terrain_streamer = FarTerrainStreamer::new(far_terrain_streaming_config());
         let mut terrain_chunks = BTreeMap::new();
         let mut far_terrain_tiles = BTreeMap::new();
         let mut requested_chunks = BTreeMap::new();
         let mut requested_far_tiles = BTreeMap::new();
         let mut terrain_jobs = TerrainMeshQueue::new(terrain.clone());
 
-        let start_x = 0.0;
-        let start_z = 70.0;
+        let start_x = 16.0;
+        let start_z = 80.0;
         let start_y = surface_height(&terrain, start_x, start_z) + EYE_HEIGHT;
         let camera = Camera::new(Vec3::new(start_x, start_y, start_z));
         schedule_terrain(
@@ -424,7 +424,7 @@ impl Camera {
         Self {
             position,
             yaw: -std::f32::consts::FRAC_PI_2,
-            pitch: -0.08,
+            pitch: 0.0,
         }
     }
 
@@ -525,6 +525,22 @@ fn surface_height(terrain: &impl SurfaceField, x: f32, z: f32) -> f32 {
     f64_as_f32(height)
 }
 
+fn chunk_streaming_config() -> ChunkStreamingConfig {
+    if cfg!(target_arch = "wasm32") {
+        ChunkStreamingConfig::new(2, 3).expect("the browser streaming radii are valid")
+    } else {
+        ChunkStreamingConfig::default()
+    }
+}
+
+fn far_terrain_streaming_config() -> FarTerrainStreamingConfig {
+    if cfg!(target_arch = "wasm32") {
+        FarTerrainStreamingConfig::new(4, 5).expect("the browser streaming radii are valid")
+    } else {
+        FarTerrainStreamingConfig::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_terrain(
     device: &wgpu::Device,
@@ -613,11 +629,8 @@ fn schedule_terrain(
         requested.insert(spec.chunk, *spec);
     }
 
-    let near_cutout = if chunk_plan.load.is_empty() && requested.is_empty() {
-        NearTerrainCutout::around(chunk_plan.center, chunk_streamer.config().load_radius())
-    } else {
-        None
-    };
+    let near_cutout =
+        NearTerrainCutout::around(chunk_plan.center, chunk_streamer.config().load_radius());
     let mut tracked_far = far_tiles
         .iter()
         .map(|(&tile, resident)| (tile, resident.spec))
@@ -630,6 +643,16 @@ fn schedule_terrain(
         far_tiles.remove(tile);
         requested_far.remove(tile);
     }
+    if let Some(spec) = chunk_plan
+        .load
+        .iter()
+        .find(|spec| spec.chunk == chunk_plan.center)
+    {
+        jobs.enqueue(
+            GenerationPriority::PlayerTerrain,
+            TerrainMeshSpec::Near(*spec),
+        );
+    }
     for spec in &far_plan.load {
         requested_far.insert(spec.tile, *spec);
         let priority = if spec.tile.chebyshev_distance(far_plan.center)
@@ -641,7 +664,11 @@ fn schedule_terrain(
         };
         jobs.enqueue(priority, TerrainMeshSpec::Far(*spec));
     }
-    for spec in &chunk_plan.load {
+    for spec in chunk_plan
+        .load
+        .iter()
+        .filter(|spec| spec.chunk != chunk_plan.center)
+    {
         jobs.enqueue(
             GenerationPriority::NearTerrain,
             TerrainMeshSpec::Near(*spec),
