@@ -29,7 +29,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 use winit::window::{Window, WindowId};
 
-const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 4, 0);
+const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 5, 0);
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;

@@ -2131,23 +2131,31 @@ That fits the game extremely well.
 
 # 60. Initial Development Roadmap
 
+## Implementation Status
+
+This roadmap is also the implementation tracker. Update it when a feature lands
+end to end or when its status materially changes.
+
+- [x] Implemented and usable in the current prototype
+- [ ] Not implemented
+- [ ] **PARTIAL** — a foundation exists, but the design goal is not yet met
+- [ ] **NEXT** — the next planned implementation milestone
+
 ## Phase 0 — Terrain Toy
+
+**Phase status: Complete**
 
 Goal:
 
 > Stand on a hill and want to walk toward another hill.
 
-Implement:
-
-```text
-wgpu
-camera
-SDF
-Marching Cubes
-basic procedural height
-Mac
-Web
-```
+- [x] `wgpu` renderer
+- [x] Camera
+- [x] Signed density field
+- [x] Marching Cubes
+- [x] Basic procedural height
+- [x] Native macOS client
+- [x] Web client
 
 Nothing else.
 
@@ -2155,16 +2163,14 @@ Nothing else.
 
 ## Phase 1 — Infinite Landscape
 
-Add:
+**Phase status: Complete**
 
-```text
-chunk streaming
-Transvoxel
-LOD
-far terrain
-job scheduling
-deterministic seeds
-```
+- [x] Chunk streaming
+- [x] Transvoxel terrain seams
+- [x] Distance-selected terrain LOD
+- [x] Surface-only far terrain extending beyond 20 km
+- [x] Prioritized asynchronous terrain jobs
+- [x] Deterministic world identity and seeds
 
 Target:
 
@@ -2176,17 +2182,17 @@ This is the first major success criterion.
 
 ## Phase 2 — Geography
 
-Implement:
+**Phase status: In progress**
 
-```text
-macro terrain
-mountain chains
-basins
-watersheds
-river networks
-lakes
-erosion
-```
+- [x] Macro terrain
+- [x] Elongated mountain systems
+- [x] Drainage basins and spill levels
+- [x] Deterministic regional watersheds
+- [x] Rainfall-fed river networks
+- [x] Filled-basin lakes with level surfaces and outlets
+- [ ] **NEXT / PARTIAL** — multi-scale erosion. River-driven valley and
+      channel incision plus an erosion-age field exist; general macro, meso,
+      and micro erosion do not.
 
 No gameplay.
 
@@ -2198,19 +2204,19 @@ The world generator is the game.
 
 ## Phase 3 — Ecosystems
 
-Add:
+**Phase status: Not started; climate has an early foundation**
 
-```text
-climate
-soil
-forest distribution
-procedural trees
-rocks
-ground vegetation
-snow
-wetlands
-reefs
-```
+- [ ] **PARTIAL** — climate. Spatially correlated precipitation and
+      temperature fields feed river discharge, but elevation, continentality,
+      wind, rain shadows, seasons, and snowpack are not modeled.
+- [ ] Soil
+- [ ] Forest distribution
+- [ ] Procedural trees
+- [ ] Surface rocks
+- [ ] Ground vegetation
+- [ ] Snow
+- [ ] Wetlands
+- [ ] Reefs
 
 Target:
 
@@ -2220,16 +2226,16 @@ Target:
 
 ## Phase 4 — Caves
 
-Build:
+**Phase status: Not started; cave topology types have an early foundation**
 
-```text
-geological cave families
-cave graphs
-underground rivers
-entrances
-sinkholes
-shafts
-```
+- [ ] Geological cave families
+- [ ] **PARTIAL** — cave graphs. Node, edge, and topology validation types
+      exist, but deterministic geological graph generation does not.
+- [ ] Underground rivers
+- [ ] Generated entrances
+- [ ] Sinkholes
+- [ ] Shafts
+- [ ] Cave-graph subtraction from terrain density
 
 Connect subterranean systems to surface geology and hydrology.
 
@@ -2237,22 +2243,22 @@ Connect subterranean systems to surface geology and hydrology.
 
 ## Phase 5 — Expedition Gameplay
 
-Add:
+**Phase status: Not started; basic traversal exists**
 
-```text
-walking
-climbing
-swimming
-temperature
-weather
-food
-water
-sleep
-injury
-camping
-inventory
-navigation
-```
+- [x] Basic walking and sprinting over terrain
+- [ ] Climbing
+- [ ] Swimming
+- [ ] Temperature simulation
+- [ ] Weather
+- [ ] Food
+- [ ] Water needs
+- [ ] Sleep
+- [ ] Injury
+- [ ] Camping
+- [ ] Inventory
+- [ ] Navigation
+- [ ] **PARTIAL** — independent survival-pressure settings exist, but the
+      corresponding simulation systems do not.
 
 Still minimal wildlife.
 
@@ -2260,17 +2266,19 @@ Still minimal wildlife.
 
 ## Phase 6 — Multiplayer
 
+**Phase status: Not started; protocol contracts have an early foundation**
+
 Add Iroh networking.
 
 Because worldgen and simulation were already separated:
 
-```text
-host simulation
-client simulation
-protocol
-replication
-world modifications
-```
+- [ ] Iroh transport and connection management
+- [ ] Host-authoritative simulation
+- [ ] Client simulation
+- [ ] **PARTIAL** — versioned protocol. Initial join, movement, welcome, and
+      version-rejection message contracts exist without a live transport.
+- [ ] Replication
+- [ ] Persistent world-modification synchronization
 
 rather than rewriting single-player architecture.
 
@@ -2278,17 +2286,19 @@ rather than rewriting single-player architecture.
 
 ## Phase 7 — Living Water
 
+**Phase status: Not started; equilibrium hydrology exists**
+
 Implement active-region water simulation.
 
 Start with:
 
-```text
-river response
-lake filling
-player dams
-waterfalls
-flooding
-```
+- [ ] River response to local terrain changes
+- [ ] Dynamic lake filling and spill
+- [ ] Player dams
+- [ ] Waterfalls
+- [ ] Flooding
+- [ ] **PARTIAL** — frozen-water summary types and deterministic equilibrium
+      lakes exist, but no active local water simulation runs.
 
 Do not attempt general fluid mechanics first.
 
@@ -2296,17 +2306,15 @@ Do not attempt general fluid mechanics first.
 
 ## Phase 8 — Discovery
 
-Add:
+**Phase status: Not started**
 
-```text
-maps
-photography
-field notes
-feature discovery
-route sharing
-first-discovery records
-multiplayer expeditions
-```
+- [ ] Maps
+- [ ] Photography
+- [ ] Field notes
+- [ ] Feature discovery
+- [ ] Route sharing
+- [ ] First-discovery records
+- [ ] Multiplayer expeditions
 
 This becomes the long-term player motivation.
 
@@ -2408,4 +2416,3 @@ And because every stage is derived deterministically from the world seed:
 **that entire journey belongs to this world and no other.**
 
 That should be the project.
-
