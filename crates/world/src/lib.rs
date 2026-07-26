@@ -285,11 +285,11 @@ pub struct FarTileIndex {
 }
 
 impl FarTileIndex {
-    /// A far tile spans sixteen near chunks, or 512 meters.
-    pub const CHUNKS_PER_EDGE: i64 = 16;
-    /// Surface samples stay on the coarsest voxel lattice at representation
-    /// boundaries while avoiding all vertical density samples.
-    pub const CELLS_PER_EDGE: usize = 64;
+    /// A far tile spans sixty-four near chunks, or 2,048 meters.
+    pub const CHUNKS_PER_EDGE: i64 = 64;
+    /// Sixty-four-meter surface samples retain mountain silhouettes while
+    /// avoiding volumetric work at vista distance.
+    pub const CELLS_PER_EDGE: usize = 32;
 
     pub const fn new(x: i64, z: i64) -> Self {
         Self { x, z }
@@ -395,7 +395,7 @@ fn far_terrain_mesh(
     surface_grid(field, spec.surface_grid())
 }
 
-/// Validated far-terrain residency radii measured in 512-meter tiles.
+/// Validated far-terrain residency radii measured in 2,048-meter tiles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FarTerrainStreamingConfig {
     load_radius: u64,
@@ -420,7 +420,7 @@ impl FarTerrainStreamingConfig {
 
 impl Default for FarTerrainStreamingConfig {
     fn default() -> Self {
-        Self::new(4, 5).expect("the default far-terrain radii are valid")
+        Self::new(10, 11).expect("the default far-terrain radii are valid")
     }
 }
 

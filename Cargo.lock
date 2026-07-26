@@ -452,9 +452,15 @@ dependencies = [
 name = "generator-lab"
 version = "0.1.0"
 dependencies = [
+ "glam",
+ "pollster",
  "treeline-coordinates",
  "treeline-geography",
+ "treeline-mesher",
+ "treeline-renderer",
  "treeline-terrain",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -1909,6 +1915,7 @@ name = "treeline-terrain"
 version = "0.1.0"
 dependencies = [
  "treeline-coordinates",
+ "treeline-geography",
 ]
 
 [[package]]

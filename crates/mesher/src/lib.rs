@@ -16,6 +16,8 @@ use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// Optional RGBA vertex colors. Alpha blends from terrain shading to color.
+    pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
@@ -25,6 +27,7 @@ impl Mesh {
             return false;
         };
         self.positions.len() == self.normals.len()
+            && (self.colors.is_empty() || self.positions.len() == self.colors.len())
             && self.indices.len() % 3 == 0
             && self.indices.iter().all(|&index| index < vertex_count)
     }
@@ -228,6 +231,7 @@ pub fn surface_grid(
     Ok(Mesh {
         positions,
         normals,
+        colors: Vec::new(),
         indices,
     })
 }
@@ -302,6 +306,7 @@ pub fn marching_cubes(field: &impl DensityField, spec: GridSpec) -> Result<Mesh,
     Ok(Mesh {
         positions,
         normals,
+        colors: Vec::new(),
         indices,
     })
 }
@@ -337,22 +342,18 @@ pub fn marching_cubes_chunk(
 /// voxel range, or [`MeshingError::TooManyVertices`] if indices do not fit the
 /// renderer's `u32` format.
 pub fn transvoxel_chunk(
-    field: &impl DensityField,
+    field: &(impl DensityField + SurfaceField),
     chunk: ChunkIndex,
     lod: LodLevel,
     transition_faces: TransitionFaces,
 ) -> Result<Mesh, MeshingError> {
     let subdivisions = ChunkIndex::subdivisions(lod).ok_or(MeshingError::UnsupportedLod)?;
-    let origin = chunk.sample_origin();
-    let block = Block::new(
-        [
-            f64_as_f32(origin.x),
-            f64_as_f32(origin.y),
-            f64_as_f32(origin.z),
-        ],
-        f64_as_f32(ChunkIndex::edge_meters()),
-        subdivisions,
-    );
+    let horizontal_origin = chunk.sample_origin();
+    let edge_meters = ChunkIndex::edge_meters();
+    let (minimum_height, maximum_height) =
+        chunk_surface_bounds(field, horizontal_origin, edge_meters, subdivisions)?;
+    let minimum_layer = vertical_layer(minimum_height, edge_meters)?;
+    let maximum_layer = vertical_layer(maximum_height, edge_meters)?;
     let mut sides = TransitionSide::none();
     if transition_faces.contains(ChunkFace::LowX) {
         sides |= TransitionSide::LowX;
@@ -377,37 +378,96 @@ pub fn transvoxel_chunk(
                 .density,
         )
     };
-    let extracted = extract_from_field(
-        &density,
-        FieldCaching::CacheNothing,
-        block,
-        sides,
-        0.0,
-        GenericMeshBuilder::new(),
-    )
-    .build();
+    let mut mesh = Mesh::default();
+    for layer in minimum_layer..=maximum_layer {
+        let origin_y = ChunkIndex::MIN_Y_METERS + (i64_as_f64(layer) * edge_meters);
+        let block = Block::new(
+            [
+                f64_as_f32(horizontal_origin.x),
+                f64_as_f32(origin_y),
+                f64_as_f32(horizontal_origin.z),
+            ],
+            f64_as_f32(edge_meters),
+            subdivisions,
+        );
+        let extracted = extract_from_field(
+            &density,
+            FieldCaching::CacheNothing,
+            block,
+            sides,
+            0.0,
+            GenericMeshBuilder::new(),
+        )
+        .build();
+        append_transvoxel_mesh(&mut mesh, extracted)?;
+    }
+    Ok(mesh)
+}
 
-    let positions = extracted
-        .positions
-        .chunks_exact(3)
-        .map(|position| [position[0], position[1], position[2]])
-        .collect();
-    let normals = extracted
-        .normals
-        .chunks_exact(3)
-        .map(|normal| [normal[0], normal[1], normal[2]])
-        .collect();
-    let indices = extracted
-        .triangle_indices
-        .into_iter()
-        .map(|index| u32::try_from(index).map_err(|_| MeshingError::TooManyVertices))
-        .collect::<Result<Vec<_>, _>>()?;
+fn chunk_surface_bounds(
+    field: &impl SurfaceField,
+    origin: WorldPosition,
+    edge_meters: f64,
+    subdivisions: usize,
+) -> Result<(f64, f64), MeshingError> {
+    let spacing = edge_meters / index_as_f64(subdivisions);
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for z in 0..=subdivisions {
+        for x in 0..=subdivisions {
+            let height = field
+                .surface_height(
+                    origin.x + (index_as_f64(x) * spacing),
+                    origin.z + (index_as_f64(z) * spacing),
+                )
+                .ok_or(MeshingError::MissingSurface)?;
+            minimum = minimum.min(height);
+            maximum = maximum.max(height);
+        }
+    }
+    Ok((minimum, maximum))
+}
 
-    Ok(Mesh {
-        positions,
-        normals,
-        indices,
-    })
+fn vertical_layer(height: f64, edge_meters: f64) -> Result<i64, MeshingError> {
+    let layer = ((height - ChunkIndex::MIN_Y_METERS) / edge_meters).floor();
+    if !layer.is_finite() || layer < i64_as_f64(i64::MIN) || layer >= i64_as_f64(i64::MAX) {
+        return Err(MeshingError::InvalidGrid);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(layer as i64)
+}
+
+fn append_transvoxel_mesh(
+    mesh: &mut Mesh,
+    extracted: transvoxel::structs::generic_mesh::Mesh<f32>,
+) -> Result<(), MeshingError> {
+    let vertex_offset =
+        u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
+    mesh.positions.extend(
+        extracted
+            .positions
+            .chunks_exact(3)
+            .map(|position| [position[0], position[1], position[2]]),
+    );
+    mesh.normals.extend(
+        extracted
+            .normals
+            .chunks_exact(3)
+            .map(|normal| [normal[0], normal[1], normal[2]]),
+    );
+    mesh.indices.extend(
+        extracted
+            .triangle_indices
+            .into_iter()
+            .map(|index| {
+                u32::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(vertex_offset))
+                    .ok_or(MeshingError::TooManyVertices)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(())
 }
 
 fn validate_grid(spec: GridSpec) -> Result<(), MeshingError> {
@@ -459,6 +519,11 @@ fn index_as_f64(index: usize) -> f64 {
     index as f64
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn i64_as_f64(value: i64) -> f64 {
+    value as f64
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn f64_as_f32(value: f64) -> f32 {
     value as f32
@@ -477,6 +542,7 @@ mod tests {
         let mesh = Mesh {
             positions: vec![[0.0; 3]],
             normals: vec![[0.0, 1.0, 0.0]],
+            colors: Vec::new(),
             indices: vec![0, 0],
         };
         assert!(!mesh.is_well_formed());
@@ -638,6 +704,28 @@ mod tests {
         assert!(coarse.is_well_formed());
         assert!(!fine.indices.is_empty());
         assert!(coarse.indices.len() < fine.indices.len());
+    }
+
+    #[test]
+    fn transvoxel_follows_surfaces_above_the_original_terrain_slab() {
+        let field = GroundPlane {
+            surface_height: 1_001.25,
+            material: Material::Rock,
+        };
+        let mesh = transvoxel_chunk(
+            &field,
+            ChunkIndex::new(-2, 3),
+            ChunkIndex::NEAR_LOD,
+            TransitionFaces::none(),
+        )
+        .expect("high terrain chunk");
+
+        assert!(!mesh.indices.is_empty());
+        assert!(
+            mesh.positions
+                .iter()
+                .all(|position| (position[1] - 1_001.25).abs() < 0.001)
+        );
     }
 
     #[test]

@@ -36,11 +36,12 @@ pub fn terrain_tier(distance_meters: f64) -> TerrainRenderTier {
 struct TerrainVertex {
     position: [f32; 3],
     normal: [f32; 3],
+    color: [f32; 4],
 }
 
 impl TerrainVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -195,7 +196,16 @@ impl TerrainRenderer {
             .positions
             .iter()
             .zip(&mesh.normals)
-            .map(|(&position, &normal)| TerrainVertex { position, normal })
+            .enumerate()
+            .map(|(index, (&position, &normal))| TerrainVertex {
+                position,
+                normal,
+                color: mesh
+                    .colors
+                    .get(index)
+                    .copied()
+                    .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+            })
             .collect::<Vec<_>>();
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("terrain vertices"),
