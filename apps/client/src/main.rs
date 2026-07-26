@@ -29,7 +29,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 use winit::window::{Window, WindowId};
 
-const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 3, 0);
+const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 4, 0);
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
@@ -391,6 +391,7 @@ impl Game {
             &mut self.requested_chunks,
             &mut self.requested_far_tiles,
             &mut self.terrain_jobs,
+            &self.terrain,
         ) {
             eprintln!("terrain chunk streaming failed: {error}");
         }
@@ -417,7 +418,17 @@ impl Game {
             self.far_terrain_tiles
                 .values()
                 .map(|resident| &resident.mesh)
-                .chain(self.terrain_chunks.values().map(|resident| &resident.mesh)),
+                .chain(self.terrain_chunks.values().map(|resident| &resident.mesh))
+                .chain(
+                    self.far_terrain_tiles
+                        .values()
+                        .filter_map(|resident| resident.lake_mesh.as_ref()),
+                )
+                .chain(
+                    self.terrain_chunks
+                        .values()
+                        .filter_map(|resident| resident.lake_mesh.as_ref()),
+                ),
         );
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -428,11 +439,13 @@ impl Game {
 struct ResidentTerrainChunk {
     spec: ChunkMeshSpec,
     mesh: TerrainMesh,
+    lake_mesh: Option<TerrainMesh>,
 }
 
 struct ResidentFarTerrainTile {
     spec: FarTerrainMeshSpec,
     mesh: TerrainMesh,
+    lake_mesh: Option<TerrainMesh>,
 }
 
 struct Camera {
@@ -685,6 +698,7 @@ fn update_terrain(
     requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
     jobs: &mut TerrainMeshQueue<GeneratedWorldTerrain>,
+    terrain: &GeneratedWorldTerrain,
 ) -> Result<(), Box<dyn Error>> {
     while let Some(generated) = jobs.try_next() {
         match generated.spec {
@@ -693,11 +707,15 @@ fn update_terrain(
                     continue;
                 }
                 requested.remove(&spec.chunk);
+                let lake_mesh = terrain.lake_surface_mesh(TerrainMeshSpec::Near(spec))?;
                 chunks.insert(
                     spec.chunk,
                     ResidentTerrainChunk {
                         spec,
                         mesh: renderer.upload_mesh(device, &generated.mesh?)?,
+                        lake_mesh: (!lake_mesh.indices.is_empty())
+                            .then(|| renderer.upload_mesh(device, &lake_mesh))
+                            .transpose()?,
                     },
                 );
             }
@@ -706,11 +724,15 @@ fn update_terrain(
                     continue;
                 }
                 requested_far.remove(&spec.tile);
+                let lake_mesh = terrain.lake_surface_mesh(TerrainMeshSpec::Far(spec))?;
                 far_tiles.insert(
                     spec.tile,
                     ResidentFarTerrainTile {
                         spec,
                         mesh: renderer.upload_mesh(device, &generated.mesh?)?,
+                        lake_mesh: (!lake_mesh.indices.is_empty())
+                            .then(|| renderer.upload_mesh(device, &lake_mesh))
+                            .transpose()?,
                     },
                 );
             }

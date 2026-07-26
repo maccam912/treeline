@@ -204,6 +204,98 @@ impl RiverNetwork {
     }
 }
 
+/// One deterministic lake occupying a filled drainage depression.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lake {
+    pub id: u64,
+    pub bottom: DrainageCellIndex,
+    pub bottom_elevation_meters: f64,
+    pub surface_elevation_meters: f64,
+    pub outlet: DrainageCellIndex,
+    pub cell_count: u64,
+}
+
+impl Lake {
+    /// Returns the equilibrium water depth above a terrain elevation.
+    pub fn water_depth_at(self, terrain_elevation_meters: f64) -> Option<f64> {
+        terrain_elevation_meters
+            .is_finite()
+            .then_some((self.surface_elevation_meters - terrain_elevation_meters).max(0.0))
+    }
+}
+
+/// Lakes derived from one deterministic regional drainage artifact.
+///
+/// Priority-Flood already identifies every depression cell and its shared
+/// spill elevation. This artifact turns those basin labels into queryable
+/// lakes without simulating water or depending on region visitation order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LakeNetwork {
+    pub world: WorldIdentity,
+    pub region: WatershedRegionIndex,
+    lakes: Vec<Lake>,
+    lake_by_cell: BTreeMap<DrainageCellIndex, usize>,
+}
+
+impl LakeNetwork {
+    pub fn generate(world: WorldIdentity, region: WatershedRegionIndex) -> Option<Self> {
+        let watershed = WatershedRegion::generate(world, region)?;
+        Self::from_watershed(&watershed)
+    }
+
+    pub fn from_watershed(watershed: &WatershedRegion) -> Option<Self> {
+        let lakes = watershed
+            .basins()
+            .iter()
+            .map(|basin| Lake {
+                id: basin.id,
+                bottom: basin.bottom,
+                bottom_elevation_meters: basin.bottom_elevation_meters,
+                surface_elevation_meters: basin.spill_elevation_meters,
+                outlet: basin.outlet,
+                cell_count: basin.cell_count,
+            })
+            .collect::<Vec<_>>();
+        let lake_slots = lakes
+            .iter()
+            .enumerate()
+            .map(|(slot, lake)| (lake.id, slot))
+            .collect::<BTreeMap<_, _>>();
+        let lake_by_cell = watershed
+            .cells()
+            .iter()
+            .filter_map(|cell| {
+                let lake_id = cell.basin?;
+                Some((cell.index, *lake_slots.get(&lake_id)?))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let assigned_cell_count = lakes
+            .iter()
+            .try_fold(0_u64, |total, lake| total.checked_add(lake.cell_count))?;
+        if usize::try_from(assigned_cell_count).ok()? != lake_by_cell.len() {
+            return None;
+        }
+
+        Some(Self {
+            world: watershed.world,
+            region: watershed.index,
+            lakes,
+            lake_by_cell,
+        })
+    }
+
+    pub fn lakes(&self) -> &[Lake] {
+        &self.lakes
+    }
+
+    pub fn lake_for_cell(&self, cell: DrainageCellIndex) -> Option<Lake> {
+        self.lake_by_cell
+            .get(&cell)
+            .and_then(|&slot| self.lakes.get(slot))
+            .copied()
+    }
+}
+
 fn local_runoff(world: WorldIdentity, cell: DrainageCellIndex) -> Option<f64> {
     let [x, z] = cell.center();
     let profile = RegionalProfile::sample(world, x, z)?;
@@ -298,6 +390,75 @@ mod tests {
         };
         let depth = basin.water_depth_at_spill().expect("valid basin");
         assert!((depth - 12.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn generated_lakes_are_level_and_match_their_spill_outlets() {
+        let region = WatershedRegionIndex::new(-1, 0);
+        let watershed = WatershedRegion::generate(WORLD, region).expect("watershed");
+        let network = LakeNetwork::from_watershed(&watershed).expect("lake network");
+
+        assert!(!network.lakes().is_empty());
+        for lake in network.lakes() {
+            assert!(lake.surface_elevation_meters >= lake.bottom_elevation_meters);
+            assert!(lake.cell_count > 0);
+            assert!(
+                watershed
+                    .cells()
+                    .iter()
+                    .filter(|cell| cell.basin == Some(lake.id))
+                    .all(|cell| network.lake_for_cell(cell.index) == Some(*lake))
+            );
+            assert_eq!(
+                watershed
+                    .basins()
+                    .iter()
+                    .find(|basin| basin.id == lake.id)
+                    .map(|basin| (basin.spill_elevation_meters, basin.outlet)),
+                Some((lake.surface_elevation_meters, lake.outlet))
+            );
+        }
+    }
+
+    #[test]
+    fn lake_generation_handles_negative_coordinates_and_is_order_independent() {
+        let first_index = WatershedRegionIndex::new(-2, -1);
+        let second_index = WatershedRegionIndex::new(-1, -1);
+        let first = LakeNetwork::generate(WORLD, first_index).expect("first");
+        let second = LakeNetwork::generate(WORLD, second_index).expect("second");
+        let second_again = LakeNetwork::generate(WORLD, second_index).expect("second again");
+        let first_again = LakeNetwork::generate(WORLD, first_index).expect("first again");
+
+        assert_eq!(first, first_again);
+        assert_eq!(second, second_again);
+    }
+
+    #[test]
+    fn lake_network_has_a_golden_fingerprint() {
+        let network =
+            LakeNetwork::generate(WORLD, WatershedRegionIndex::new(-1, 2)).expect("network");
+        let words = network
+            .lakes()
+            .iter()
+            .flat_map(|lake| {
+                [
+                    lake.id,
+                    u64::from_le_bytes(lake.bottom.x.to_le_bytes()),
+                    u64::from_le_bytes(lake.bottom.z.to_le_bytes()),
+                    lake.bottom_elevation_meters.to_bits(),
+                    lake.surface_elevation_meters.to_bits(),
+                    u64::from_le_bytes(lake.outlet.x.to_le_bytes()),
+                    u64::from_le_bytes(lake.outlet.z.to_le_bytes()),
+                    lake.cell_count,
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_hash(&words),
+            12_959_953_739_099_618_601,
+            "changing this value changes generated regional lakes"
+        );
     }
 
     #[test]
