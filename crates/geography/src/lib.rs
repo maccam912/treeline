@@ -14,12 +14,20 @@ const DOMAIN_KARST: u64 = 0x004b_4152_5354;
 const DOMAIN_BASE_ELEVATION: u64 = 0x4241_5345_454c_4556;
 const DOMAIN_MOUNTAIN_RIDGE: u64 = 0x4d4f_554e_5441_494e;
 const DOMAIN_DRAINAGE_BASIN: u64 = 0x4452_4149_4e42_4153;
+const DOMAIN_WIND_X: u64 = 0x5749_4e44_5f58;
+const DOMAIN_WIND_Z: u64 = 0x5749_4e44_5f5a;
 
 const MACRO_CELL_EDGE_METERS: f64 = 64_000.0;
+const CLIMATE_CELL_EDGE_METERS: f64 = 100_000.0;
+const WIND_CELL_EDGE_METERS: f64 = 400_000.0;
+const OROGRAPHIC_SAMPLE_STEP_METERS: f64 = 12_000.0;
+const OROGRAPHIC_SAMPLE_COUNT: u32 = 4;
 pub const DRAINAGE_CELL_EDGE_METERS: f64 = 2_000.0;
 pub const WATERSHED_REGION_CELLS: usize = 64;
 const WATERSHED_REGION_CELLS_I64: i64 = 64;
 pub const WATERSHED_REGION_EDGE_METERS: f64 = 128_000.0;
+/// Generator version that first derives climate from elevation and prevailing wind.
+pub const OROGRAPHIC_CLIMATE_GENERATOR_VERSION: u32 = 6;
 
 /// Coherent environmental parameters sampled at a horizontal world position.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,15 +43,13 @@ pub struct RegionalProfile {
 impl RegionalProfile {
     /// Samples correlated fields whose values remain in the inclusive range 0–1.
     pub fn sample(world: WorldIdentity, x: f64, z: f64) -> Option<Self> {
-        const REGION_EDGE_METERS: f64 = 100_000.0;
-
         Some(Self {
-            uplift: value_field(world, DOMAIN_UPLIFT, x, z, REGION_EDGE_METERS)?,
-            erosion_age: value_field(world, DOMAIN_EROSION, x, z, REGION_EDGE_METERS)?,
-            rock_hardness: value_field(world, DOMAIN_ROCK, x, z, REGION_EDGE_METERS)?,
-            precipitation: value_field(world, DOMAIN_RAIN, x, z, REGION_EDGE_METERS)?,
-            mean_temperature: value_field(world, DOMAIN_TEMP, x, z, REGION_EDGE_METERS)?,
-            karst_probability: value_field(world, DOMAIN_KARST, x, z, REGION_EDGE_METERS)?,
+            uplift: value_field(world, DOMAIN_UPLIFT, x, z, CLIMATE_CELL_EDGE_METERS)?,
+            erosion_age: value_field(world, DOMAIN_EROSION, x, z, CLIMATE_CELL_EDGE_METERS)?,
+            rock_hardness: value_field(world, DOMAIN_ROCK, x, z, CLIMATE_CELL_EDGE_METERS)?,
+            precipitation: value_field(world, DOMAIN_RAIN, x, z, CLIMATE_CELL_EDGE_METERS)?,
+            mean_temperature: value_field(world, DOMAIN_TEMP, x, z, CLIMATE_CELL_EDGE_METERS)?,
+            karst_probability: value_field(world, DOMAIN_KARST, x, z, CLIMATE_CELL_EDGE_METERS)?,
         })
     }
 }
@@ -107,6 +113,104 @@ impl MacroElevation {
             mountain_uplift_meters,
             dominant_ridge,
         })
+    }
+}
+
+/// Functional climate sampler derived from regional controls and macro terrain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Climate {
+    pub world: WorldIdentity,
+}
+
+impl Climate {
+    pub const fn new(world: WorldIdentity) -> Self {
+        Self { world }
+    }
+
+    /// Samples explainable mean climate at one horizontal world position.
+    ///
+    /// Wind is a spatially correlated vector field. Four fixed-distance
+    /// upwind terrain samples establish windward lift and lee-side rain
+    /// shadow. These world-space samples make the result independent of voxel
+    /// LOD, job order, and the watershed artifact containing the point. Wind
+    /// vector normalization uses deliberately specified IEEE-754 `f64`
+    /// operations and is part of the generation contract.
+    pub fn sample(self, x: f64, z: f64) -> Option<ClimateSample> {
+        let profile = RegionalProfile::sample(self.world, x, z)?;
+        let elevation_meters = MacroElevation::new(self.world)
+            .sample(x, z)?
+            .elevation_meters;
+        let prevailing_wind = prevailing_wind(self.world, x, z)?;
+
+        let mut highest_upwind_elevation_meters = elevation_meters;
+        let mut weighted_upwind_elevation_meters = 0.0;
+        let mut total_weight = 0.0;
+        for step in 1..=OROGRAPHIC_SAMPLE_COUNT {
+            let distance = f64::from(step) * OROGRAPHIC_SAMPLE_STEP_METERS;
+            let upwind_x = x - (prevailing_wind[0] * distance);
+            let upwind_z = z - (prevailing_wind[1] * distance);
+            let upwind_elevation = MacroElevation::new(self.world)
+                .sample(upwind_x, upwind_z)?
+                .elevation_meters;
+            highest_upwind_elevation_meters = highest_upwind_elevation_meters.max(upwind_elevation);
+            let weight = f64::from(OROGRAPHIC_SAMPLE_COUNT + 1 - step);
+            weighted_upwind_elevation_meters += upwind_elevation * weight;
+            total_weight += weight;
+        }
+        let upwind_elevation_meters = weighted_upwind_elevation_meters / total_weight;
+        let orographic_lift_meters = (elevation_meters - upwind_elevation_meters).max(0.0);
+        let rain_shadow_meters = (highest_upwind_elevation_meters - elevation_meters).max(0.0);
+
+        let baseline_temperature_celsius = -6.0 + (profile.mean_temperature * 34.0);
+        let elevation_cooling_celsius = elevation_meters.max(0.0) * 0.0065;
+        let mean_temperature_celsius = baseline_temperature_celsius - elevation_cooling_celsius;
+
+        let baseline_annual_precipitation_millimeters = 250.0 + (profile.precipitation * 2_250.0);
+        let windward_gain = 0.8 * (orographic_lift_meters / 1_000.0).clamp(0.0, 1.0);
+        let rain_shadow_loss = 0.75 * (rain_shadow_meters / 1_200.0).clamp(0.0, 1.0);
+        let precipitation_multiplier = (1.0 + windward_gain - rain_shadow_loss).clamp(0.2, 1.8);
+        let annual_precipitation_millimeters =
+            baseline_annual_precipitation_millimeters * precipitation_multiplier;
+
+        Some(ClimateSample {
+            elevation_meters,
+            prevailing_wind,
+            upwind_elevation_meters,
+            highest_upwind_elevation_meters,
+            orographic_lift_meters,
+            rain_shadow_meters,
+            baseline_temperature_celsius,
+            elevation_cooling_celsius,
+            mean_temperature_celsius,
+            baseline_annual_precipitation_millimeters,
+            annual_precipitation_millimeters,
+        })
+    }
+}
+
+/// Explainable climate contributors at one horizontal world position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClimateSample {
+    pub elevation_meters: f64,
+    pub prevailing_wind: [f64; 2],
+    pub upwind_elevation_meters: f64,
+    pub highest_upwind_elevation_meters: f64,
+    pub orographic_lift_meters: f64,
+    pub rain_shadow_meters: f64,
+    pub baseline_temperature_celsius: f64,
+    pub elevation_cooling_celsius: f64,
+    pub mean_temperature_celsius: f64,
+    pub baseline_annual_precipitation_millimeters: f64,
+    pub annual_precipitation_millimeters: f64,
+}
+
+impl ClimateSample {
+    pub fn precipitation_fraction(self) -> f64 {
+        ((self.annual_precipitation_millimeters - 250.0) / 2_250.0).clamp(0.0, 1.0)
+    }
+
+    pub fn warmth_fraction(self) -> f64 {
+        ((self.mean_temperature_celsius + 20.0) / 55.0).clamp(0.0, 1.0)
     }
 }
 
@@ -606,6 +710,16 @@ fn hash_fraction(key: u64, lane: u64) -> f64 {
     hash53_as_f64(mixed >> 11) / 9_007_199_254_740_991.0
 }
 
+fn prevailing_wind(world: WorldIdentity, x: f64, z: f64) -> Option<[f64; 2]> {
+    let wind_x = (value_field(world, DOMAIN_WIND_X, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
+    let wind_z = (value_field(world, DOMAIN_WIND_Z, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
+    let length = wind_x.hypot(wind_z);
+    if length <= 0.000_001 {
+        return Some([1.0, 0.0]);
+    }
+    Some([wind_x / length, wind_z / length])
+}
+
 fn value_field(world: WorldIdentity, domain: u64, x: f64, z: f64, edge: f64) -> Option<f64> {
     let cell = CellIndex::containing(x, z, 0, edge)?;
     let local_x = (x / edge) - index_as_f64(cell.x);
@@ -687,6 +801,116 @@ mod tests {
     #[test]
     fn invalid_positions_do_not_generate_profiles() {
         assert!(RegionalProfile::sample(WORLD, f64::INFINITY, 0.0).is_none());
+    }
+
+    #[test]
+    fn climate_is_deterministic_and_explainable() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            OROGRAPHIC_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let first = climate.sample(-73_125.0, 19_875.0).expect("finite climate");
+        let second = climate.sample(-73_125.0, 19_875.0).expect("same climate");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.mean_temperature_celsius.to_bits(),
+            (first.baseline_temperature_celsius - first.elevation_cooling_celsius).to_bits()
+        );
+        let precipitation_multiplier = first.annual_precipitation_millimeters
+            / first.baseline_annual_precipitation_millimeters;
+        assert!((0.2..=1.8).contains(&precipitation_multiplier));
+        assert!((first.prevailing_wind[0].hypot(first.prevailing_wind[1]) - 1.0).abs() < 1.0e-12);
+        assert!((0.0..=1.0).contains(&first.precipitation_fraction()));
+        assert!((0.0..=1.0).contains(&first.warmth_fraction()));
+    }
+
+    #[test]
+    fn climate_has_continuous_negative_coordinate_boundaries() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            OROGRAPHIC_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let left = climate
+            .sample(-CLIMATE_CELL_EDGE_METERS - 0.01, -12_000.0)
+            .expect("left climate");
+        let right = climate
+            .sample(-CLIMATE_CELL_EDGE_METERS + 0.01, -12_000.0)
+            .expect("right climate");
+
+        assert!((left.mean_temperature_celsius - right.mean_temperature_celsius).abs() < 0.1);
+        assert!(
+            (left.annual_precipitation_millimeters - right.annual_precipitation_millimeters).abs()
+                < 1.0
+        );
+    }
+
+    #[test]
+    fn mountains_create_windward_lift_and_rain_shadows() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            OROGRAPHIC_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let mut maximum_lift = 0.0_f64;
+        let mut maximum_shadow = 0.0_f64;
+        for z in -12..=12 {
+            for x in -12..=12 {
+                let sample = climate
+                    .sample(f64::from(x) * 8_000.0, f64::from(z) * 8_000.0)
+                    .expect("finite climate");
+                maximum_lift = maximum_lift.max(sample.orographic_lift_meters);
+                maximum_shadow = maximum_shadow.max(sample.rain_shadow_meters);
+                if sample.orographic_lift_meters > 0.0 {
+                    assert!(
+                        sample.annual_precipitation_millimeters
+                            >= sample.baseline_annual_precipitation_millimeters
+                                * (1.0
+                                    - (0.75
+                                        * (sample.rain_shadow_meters / 1_200.0).clamp(0.0, 1.0)))
+                    );
+                }
+            }
+        }
+
+        assert!(maximum_lift > 200.0, "{maximum_lift}");
+        assert!(maximum_shadow > 200.0, "{maximum_shadow}");
+    }
+
+    #[test]
+    fn climate_has_a_golden_fingerprint() {
+        let climate = Climate::new(WorldIdentity::new(
+            0x5eed,
+            OROGRAPHIC_CLIMATE_GENERATOR_VERSION,
+            0,
+        ));
+        let samples = [
+            (-91_000.0, -37_000.0),
+            (-64_000.0, 64_000.0),
+            (-1.0, 1.0),
+            (28_000.0, -52_000.0),
+            (117_000.0, 83_000.0),
+        ];
+        let fingerprint = stable_hash(
+            &samples
+                .into_iter()
+                .flat_map(|(x, z)| {
+                    let sample = climate.sample(x, z).expect("finite");
+                    [
+                        sample.mean_temperature_celsius.to_bits(),
+                        sample.annual_precipitation_millimeters.to_bits(),
+                        sample.prevailing_wind[0].to_bits(),
+                        sample.prevailing_wind[1].to_bits(),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            fingerprint, 3_353_464_691_744_025_732,
+            "changing this value changes generated orographic climate"
+        );
     }
 
     #[test]

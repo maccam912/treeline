@@ -113,8 +113,25 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 When shell access includes RTK, prefix shell commands with `rtk` to keep command
 output compact.
 
+## Roadmap tracking
+
+When implementation work materially changes the status of a roadmap item,
+update the implementation tracker in `DESIGN.md` as part of the same change.
+Before finishing, review the affected phase and:
+
+- mark features complete only when they have landed end to end and are usable;
+- use `PARTIAL` for foundations that do not yet meet the full design goal, and
+  state what remains;
+- remove stale `NEXT` or `PARTIAL` labels from completed work; and
+- move `NEXT` to the actual next planned milestone and update the phase status
+  when appropriate.
+
+Do not leave `DESIGN.md` claiming that implemented work is still missing, or
+claim completion when only types, contracts, or other foundations exist.
+
 ## Definition of done
 
 A change is done when it is scoped to a design pillar, respects crate
 boundaries, includes relevant invariant tests, passes formatting/lint/test/docs,
-and explains any intentional generator-version or persistence impact.
+keeps the `DESIGN.md` implementation tracker current, and explains any
+intentional generator-version or persistence impact.

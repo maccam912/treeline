@@ -2,7 +2,10 @@
 
 use treeline_coordinates::WorldPosition;
 use treeline_coordinates::{CellIndex, WorldIdentity};
-use treeline_geography::{MacroElevation, MacroTerrainSample, RegionalProfile};
+use treeline_geography::{
+    Climate, MacroElevation, MacroTerrainSample, OROGRAPHIC_CLIMATE_GENERATOR_VERSION,
+    RegionalProfile,
+};
 
 const DOMAIN_ROLLING_HILLS: u64 = 0x524f_4c4c_494e_4753;
 const DOMAIN_WILDERNESS_DETAIL: u64 = 0x5749_4c44_4445_544c;
@@ -184,6 +187,14 @@ impl WildernessTerrain {
     pub fn erosion_at(self, x: f64, z: f64) -> Option<ErosionSurfaceSample> {
         let (macro_sample, base_height_meters) = self.inspect(x, z)?;
         let profile = RegionalProfile::sample(self.world, x, z)?;
+        let precipitation = if self.world.generator_version >= OROGRAPHIC_CLIMATE_GENERATOR_VERSION
+        {
+            Climate::new(self.world)
+                .sample(x, z)?
+                .precipitation_fraction()
+        } else {
+            profile.precipitation
+        };
         let left = self.height_at(x - EROSION_SLOPE_SAMPLE_RADIUS_METERS, z)?;
         let right = self.height_at(x + EROSION_SLOPE_SAMPLE_RADIUS_METERS, z)?;
         let down = self.height_at(x, z - EROSION_SLOPE_SAMPLE_RADIUS_METERS)?;
@@ -201,7 +212,7 @@ impl WildernessTerrain {
         let lowland = 1.0 - (macro_sample.elevation_meters.max(0.0) / 600.0).clamp(0.0, 1.0);
         let sediment_deposition_meters = 18.0
             * profile.erosion_age
-            * profile.precipitation
+            * precipitation
             * (0.25 + (softness * 0.75))
             * flatness
             * lowland;
