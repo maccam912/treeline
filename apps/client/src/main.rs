@@ -3,6 +3,11 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
+
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
@@ -25,6 +30,7 @@ const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -33,20 +39,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() -> Result<(), Box<dyn Error>> {
+    use winit::platform::web::EventLoopExtWebSys;
+
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.spawn_app(TreelineApp::default());
+    Ok(())
+}
+
 #[derive(Default)]
 struct TreelineApp {
     game: Option<Game>,
+    initialization_started: bool,
+    #[cfg(target_arch = "wasm32")]
+    pending_game: Rc<RefCell<Option<Result<Game, String>>>>,
 }
 
 impl ApplicationHandler for TreelineApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.game.is_some() {
+        if self.game.is_some() || self.initialization_started {
             return;
         }
+        self.initialization_started = true;
 
         let attributes = Window::default_attributes()
             .with_title("Treeline — Infinite Landscape")
             .with_inner_size(LogicalSize::new(1280, 720));
+        #[cfg(target_arch = "wasm32")]
+        let attributes = {
+            use winit::platform::web::WindowAttributesExtWebSys;
+
+            attributes.with_append(true)
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -56,12 +82,22 @@ impl ApplicationHandler for TreelineApp {
             }
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
         match pollster::block_on(Game::new(window)) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
                 eprintln!("failed to start Treeline: {error}");
                 event_loop.exit();
             }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let pending_game = Rc::clone(&self.pending_game);
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = Game::new(window).await.map_err(|error| error.to_string());
+                *pending_game.borrow_mut() = Some(result);
+            });
         }
     }
 
@@ -131,7 +167,23 @@ impl ApplicationHandler for TreelineApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = event_loop;
+
+        #[cfg(target_arch = "wasm32")]
+        if self.game.is_none() {
+            if let Some(result) = self.pending_game.borrow_mut().take() {
+                match result {
+                    Ok(game) => self.game = Some(game),
+                    Err(error) => {
+                        eprintln!("failed to start Treeline: {error}");
+                        event_loop.exit();
+                    }
+                }
+            }
+        }
+
         if let Some(game) = &self.game {
             game.window.request_redraw();
         }

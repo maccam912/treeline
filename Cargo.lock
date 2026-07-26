@@ -242,6 +242,7 @@ dependencies = [
  "treeline-terrain",
  "treeline-voxel",
  "treeline-world",
+ "wasm-bindgen-futures",
  "wgpu",
  "winit",
 ]

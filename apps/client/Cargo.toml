@@ -19,5 +19,8 @@ treeline-world.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures.workspace = true
+
 [lints]
 workspace = true

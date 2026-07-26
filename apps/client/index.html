@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta
+      name="description"
+      content="Explore Treeline's deterministic wilderness terrain in your browser."
+    />
+    <base data-trunk-public-url />
+    <title>Treeline — Infinite Landscape</title>
+    <link data-trunk rel="rust" data-bin="client" />
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #09110d;
+        color: #f2f0df;
+        font-family:
+          ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      .controls {
+        position: fixed;
+        z-index: 1;
+        left: max(1rem, env(safe-area-inset-left));
+        bottom: max(1rem, env(safe-area-inset-bottom));
+        padding: 0.65rem 0.8rem;
+        border: 1px solid rgb(242 240 223 / 18%);
+        border-radius: 0.4rem;
+        background: rgb(9 17 13 / 72%);
+        font-size: 0.78rem;
+        letter-spacing: 0.025em;
+        pointer-events: none;
+        backdrop-filter: blur(0.4rem);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls">Click to look · WASD to walk · Shift to sprint · Esc to release</div>
+    <noscript>Treeline requires JavaScript and WebAssembly.</noscript>
+  </body>
+</html>
