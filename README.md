@@ -28,8 +28,10 @@ test-backed foundations described in the design. The prototype provides:
 - continuous deterministic regional fields;
 - deterministic 128 km watershed artifacts with depression filling, basin spill
   levels, cross-region drainage exits, and flow accumulation;
+- deterministic rainfall-fed regional river networks with discharge and
+  catchment area;
 - an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
-  terrain/watershed/flow views, and parameter inspection;
+  terrain/watershed/flow/river views, and parameter inspection;
 - hydrology and cave graph invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
@@ -57,9 +59,9 @@ cargo run -p generator-lab
 ```
 
 In Generator Lab, use WASD or the arrow keys to pan, `+`/`-` or the mouse wheel
-to zoom, `R` to advance the seed, `1`/`2`/`3` to view terrain, watersheds, or
-flow accumulation, left-click to inspect a location, and right-click to
-teleport the view.
+to zoom, `R` to advance the seed, `1`/`2`/`3`/`4` to view terrain, watersheds,
+flow accumulation, or rivers, left-click to inspect a location, and right-click
+to teleport the view.
 
 Run the playable terrain toy with:
 

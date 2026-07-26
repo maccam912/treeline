@@ -456,6 +456,7 @@ dependencies = [
  "pollster",
  "treeline-coordinates",
  "treeline-geography",
+ "treeline-hydrology",
  "treeline-mesher",
  "treeline-renderer",
  "treeline-terrain",
@@ -1873,6 +1874,7 @@ name = "treeline-hydrology"
 version = "0.1.0"
 dependencies = [
  "treeline-coordinates",
+ "treeline-geography",
 ]
 
 [[package]]
