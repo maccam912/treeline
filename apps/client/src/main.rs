@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::sync::Arc;
-use std::time::Instant;
 
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
@@ -18,12 +17,15 @@ use treeline_world::{
     FarTerrainStreamingConfig, FarTileIndex, GeneratedWorldTerrain, GenerationPriority,
     NearTerrainCutout, TerrainMeshQueue, TerrainMeshSpec,
 };
+use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::window::CursorGrabMode;
+use winit::window::{Window, WindowId};
 
 const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, 3, 0);
 const EYE_HEIGHT: f32 = 1.72;
@@ -43,6 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     use winit::platform::web::EventLoopExtWebSys;
 
+    console_error_panic_hook::set_once();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.spawn_app(TreelineApp::default());
@@ -290,7 +293,7 @@ impl Game {
             camera.view_projection(surface_config.width, surface_config.height),
         );
 
-        let mut game = Self {
+        let game = Self {
             window,
             _instance: instance,
             surface,
@@ -311,7 +314,6 @@ impl Game {
             cursor_captured: false,
             previous_frame: Instant::now(),
         };
-        game.set_cursor_captured(true);
         Ok(game)
     }
 
@@ -330,17 +332,25 @@ impl Game {
     }
 
     fn set_cursor_captured(&mut self, captured: bool) {
-        let captured = if captured {
-            self.window
-                .set_cursor_grab(CursorGrabMode::Locked)
-                .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined))
-                .is_ok()
-        } else {
-            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-            false
-        };
-        self.window.set_cursor_visible(!captured);
-        self.cursor_captured = captured;
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.cursor_captured = captured;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let captured = if captured {
+                self.window
+                    .set_cursor_grab(CursorGrabMode::Locked)
+                    .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined))
+                    .is_ok()
+            } else {
+                let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                false
+            };
+            self.window.set_cursor_visible(!captured);
+            self.cursor_captured = captured;
+        }
     }
 
     fn update(&mut self) {
