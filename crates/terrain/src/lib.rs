@@ -2,8 +2,10 @@
 
 use treeline_coordinates::WorldPosition;
 use treeline_coordinates::{CellIndex, WorldIdentity};
+use treeline_geography::{MacroElevation, MacroTerrainSample};
 
 const DOMAIN_ROLLING_HILLS: u64 = 0x524f_4c4c_494e_4753;
+const DOMAIN_WILDERNESS_DETAIL: u64 = 0x5749_4c44_4445_544c;
 
 /// Broad material channels used before renderer-specific material expansion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,6 +113,60 @@ impl DensityField for RollingHills {
 }
 
 impl SurfaceField for RollingHills {
+    fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
+        self.height_at(x, z)
+    }
+}
+
+/// The first terrain field to connect macro geography to playable detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WildernessTerrain {
+    pub world: WorldIdentity,
+}
+
+impl WildernessTerrain {
+    pub const fn new(world: WorldIdentity) -> Self {
+        Self { world }
+    }
+
+    /// Returns both the explainable macro sample and the final local surface.
+    pub fn inspect(self, x: f64, z: f64) -> Option<(MacroTerrainSample, f64)> {
+        let macro_sample = MacroElevation::new(self.world).sample(x, z)?;
+        let foothills = height_layer(self.world, x, z, 420.0, DOMAIN_WILDERNESS_DETAIL)?;
+        let ground_detail = height_layer(
+            self.world,
+            x,
+            z,
+            72.0,
+            DOMAIN_WILDERNESS_DETAIL.wrapping_add(1),
+        )?;
+        let local_relief = ((foothills - 0.5) * 22.0) + ((ground_detail - 0.5) * 4.0);
+        Some((macro_sample, macro_sample.elevation_meters + local_relief))
+    }
+
+    pub fn height_at(self, x: f64, z: f64) -> Option<f64> {
+        self.inspect(x, z).map(|(_, height)| height)
+    }
+}
+
+impl DensityField for WildernessTerrain {
+    fn sample(&self, position: WorldPosition) -> TerrainSample {
+        let Some(surface_height) = self.height_at(position.x, position.z) else {
+            return TerrainSample::new(f64::INFINITY, Material::Air);
+        };
+        let density = position.y - surface_height;
+        let material = if density > 0.0 {
+            Material::Air
+        } else if density > -1.5 {
+            Material::Soil
+        } else {
+            Material::Rock
+        };
+        TerrainSample::new(density, material)
+    }
+}
+
+impl SurfaceField for WildernessTerrain {
     fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
         self.height_at(x, z)
     }
@@ -279,5 +335,29 @@ mod tests {
                 .to_bits(),
             0.0_f64.to_bits()
         );
+    }
+
+    #[test]
+    fn wilderness_surface_matches_the_density_zero() {
+        let terrain = WildernessTerrain::new(WorldIdentity::new(0x5eed, 1, 0));
+        let height = terrain.height_at(-8_000.0, 12_000.0).expect("finite");
+        assert_eq!(
+            terrain
+                .sample(WorldPosition::new(-8_000.0, height, 12_000.0))
+                .density
+                .to_bits(),
+            0.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn wilderness_inspection_exposes_macro_contributors() {
+        let terrain = WildernessTerrain::new(WorldIdentity::new(0x5eed, 1, 0));
+        let (macro_sample, height) = terrain.inspect(4_000.0, -7_000.0).expect("finite");
+        assert_eq!(
+            macro_sample.elevation_meters.to_bits(),
+            (macro_sample.base_elevation_meters + macro_sample.mountain_uplift_meters).to_bits()
+        );
+        assert!((height - macro_sample.elevation_meters).abs() <= 13.0);
     }
 }

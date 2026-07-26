@@ -9,10 +9,15 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+glam.workspace = true
+pollster.workspace = true
 treeline-coordinates.workspace = true
 treeline-geography.workspace = true
+treeline-mesher.workspace = true
+treeline-renderer.workspace = true
 treeline-terrain.workspace = true
+wgpu.workspace = true
+winit.workspace = true
 
 [lints]
 workspace = true
-

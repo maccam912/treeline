@@ -15,21 +15,29 @@ This repository now includes a small playable terrain toy alongside the
 test-backed foundations described in the design. The prototype provides:
 
 - stable world identity and coordinate hashing;
-- a deterministic rolling-hill signed-density field;
+- deterministic macro elevation and elongated mountain systems;
+- explainable terrain samples that identify base elevation and dominant uplift;
 - Marching Cubes terrain extraction;
 - a native `winit` + `wgpu` client with simple lighting;
 - mouse-look, walking, sprinting, and terrain-following movement;
 - deterministic 32 m terrain chunks streamed around the moving player;
 - distance-selected 2 m, 4 m, and 8 m terrain LODs with Transvoxel seams;
-- surface-only far-terrain tiles extending the visible landscape beyond 2 km;
+- vertically aligned near-terrain slabs that follow high mountain surfaces;
+- coarse surface-only terrain extending the visible landscape beyond 20 km;
 - prioritized asynchronous terrain meshing outside the window thread;
 - continuous deterministic regional fields;
+- deterministic 128 km watershed artifacts with depression filling, basin spill
+  levels, cross-region drainage exits, and flow accumulation;
+- an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
+  terrain/watershed/flow views, and parameter inspection;
 - hydrology and cave graph invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
 
 The terrain toy now has an unbounded movement path through deterministic
-near-to-mid terrain chunks backed by a cheaper coarse vista representation.
+near-to-mid terrain chunks backed by a cheaper mountain-scale vista
+representation. Macro terrain was introduced with generator version 2; worlds
+using version 1 retain the original rolling-hill contract.
 Vegetation, survival, and networking have not been added yet.
 
 ## Getting started
@@ -42,11 +50,16 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Run one of the scaffold applications with:
+Run the world-generation viewer with:
 
 ```sh
 cargo run -p generator-lab
 ```
+
+In Generator Lab, use WASD or the arrow keys to pan, `+`/`-` or the mouse wheel
+to zoom, `R` to advance the seed, `1`/`2`/`3` to view terrain, watersheds, or
+flow accumulation, left-click to inspect a location, and right-click to
+teleport the view.
 
 Run the playable terrain toy with:
 
