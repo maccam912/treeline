@@ -13,17 +13,23 @@ use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
-use treeline_hydrology::{Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence};
+use treeline_hydrology::{
+    GullyNetwork, GullyTerrainInfluence, Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
+};
 use treeline_mesher::{
     Mesh, MeshingError, SurfaceCutout, SurfaceGridSpec, surface_grid, transvoxel_chunk,
 };
-use treeline_terrain::{DensityField, Material, SurfaceField, TerrainSample, WildernessTerrain};
+use treeline_terrain::{
+    DensityField, ErosionSurfaceSample, Material, SurfaceField, TerrainSample, WildernessTerrain,
+};
 use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
 
 /// Generator version that first makes regional rivers shape terrain.
 pub const RIVER_TERRAIN_GENERATOR_VERSION: u32 = 3;
 /// Generator version that first exposes filled drainage basins as lakes.
 pub const LAKE_GENERATOR_VERSION: u32 = 4;
+/// Generator version that first composes macro, meso, and micro erosion.
+pub const EROSION_GENERATOR_VERSION: u32 = 5;
 
 /// Equilibrium lake water at one horizontal world position.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +37,15 @@ pub struct LakeSurfaceSample {
     pub lake: Lake,
     pub terrain_elevation_meters: f64,
     pub water_depth_meters: f64,
+}
+
+/// Explainable contributors to the versioned multi-scale erosion surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldErosionSample {
+    pub surface: ErosionSurfaceSample,
+    pub gully: Option<GullyTerrainInfluence>,
+    pub river: Option<RiverTerrainInfluence>,
+    pub final_height_meters: f64,
 }
 
 /// Pristine terrain composed with cached deterministic regional artifacts.
@@ -42,6 +57,7 @@ pub struct LakeSurfaceSample {
 pub struct GeneratedWorldTerrain {
     base: WildernessTerrain,
     river_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<RiverNetwork>>>>,
+    gully_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<GullyNetwork>>>>,
     lake_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<LakeNetwork>>>>,
 }
 
@@ -50,6 +66,7 @@ impl GeneratedWorldTerrain {
         Self {
             base: WildernessTerrain::new(world),
             river_networks: Arc::new(RwLock::new(BTreeMap::new())),
+            gully_networks: Arc::new(RwLock::new(BTreeMap::new())),
             lake_networks: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -94,6 +111,41 @@ impl GeneratedWorldTerrain {
         strongest
     }
 
+    /// Returns the strongest nearby minor-drainage contribution.
+    pub fn gully_influence_at(&self, x: f64, z: f64) -> Option<GullyTerrainInfluence> {
+        if self.world().generator_version < EROSION_GENERATOR_VERSION {
+            return None;
+        }
+        let containing = DrainageCellIndex::containing(x, z)?;
+        let mut strongest = None;
+        for z_offset in -1_i64..=1 {
+            for x_offset in -1_i64..=1 {
+                let source = DrainageCellIndex::new(
+                    containing.x.checked_add(x_offset)?,
+                    containing.z.checked_add(z_offset)?,
+                );
+                let region = WatershedRegionIndex::containing_cell(source);
+                let network = self.gully_network(region)?;
+                let Some(influence) = network
+                    .segment_from(source)
+                    .and_then(|segment| segment.terrain_influence(x, z))
+                else {
+                    continue;
+                };
+                let carve_strength = influence.blend * influence.segment.incision_depth_meters;
+                if strongest.is_none_or(|current: GullyTerrainInfluence| {
+                    let current_strength = current.blend * current.segment.incision_depth_meters;
+                    carve_strength > current_strength
+                        || (carve_strength.to_bits() == current_strength.to_bits()
+                            && influence.segment.source_cell < current.segment.source_cell)
+                }) {
+                    strongest = Some(influence);
+                }
+            }
+        }
+        strongest
+    }
+
     fn river_network(&self, region: WatershedRegionIndex) -> Option<Arc<RiverNetwork>> {
         if let Some(network) = self
             .river_networks
@@ -121,6 +173,33 @@ impl GeneratedWorldTerrain {
         )
     }
 
+    fn gully_network(&self, region: WatershedRegionIndex) -> Option<Arc<GullyNetwork>> {
+        if let Some(network) = self
+            .gully_networks
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&region)
+            .cloned()
+        {
+            return Some(network);
+        }
+
+        let mut cache = self
+            .gully_networks
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(network) = cache.get(&region) {
+            return Some(Arc::clone(network));
+        }
+        let generated = Arc::new(GullyNetwork::generate(self.world(), region)?);
+        Some(
+            cache
+                .entry(region)
+                .or_insert_with(|| Arc::clone(&generated))
+                .clone(),
+        )
+    }
+
     /// Returns equilibrium lake water above the generated terrain, if present.
     pub fn lake_surface_at(&self, x: f64, z: f64) -> Option<LakeSurfaceSample> {
         if self.world().generator_version < LAKE_GENERATOR_VERSION {
@@ -129,7 +208,7 @@ impl GeneratedWorldTerrain {
         let cell = DrainageCellIndex::containing(x, z)?;
         let network = self.lake_network(WatershedRegionIndex::containing_cell(cell))?;
         let lake = network.lake_for_cell(cell)?;
-        let terrain_elevation_meters = self.carved_height(x, z)?.0;
+        let terrain_elevation_meters = self.shaped_height(x, z)?.height;
         let water_depth_meters = lake.water_depth_at(terrain_elevation_meters)?;
         (water_depth_meters > 0.0).then_some(LakeSurfaceSample {
             lake,
@@ -192,31 +271,84 @@ impl GeneratedWorldTerrain {
         lake_surface_grid(self, grid)
     }
 
-    fn carved_height(&self, x: f64, z: f64) -> Option<(f64, Option<RiverTerrainInfluence>)> {
-        let base_height = self.base.height_at(x, z)?;
-        let influence = self.river_influence_at(x, z);
-        let height = influence.map_or(base_height, |river| {
-            let channel_bed = river.centerline_elevation_meters - river.incision_depth_meters;
-            let target = base_height.min(channel_bed);
-            base_height + ((target - base_height) * river.blend)
-        });
-        Some((height, influence))
+    /// Reports all three erosion scales at a horizontal position.
+    pub fn erosion_at(&self, x: f64, z: f64) -> Option<WorldErosionSample> {
+        if self.world().generator_version < EROSION_GENERATOR_VERSION {
+            return None;
+        }
+        let shape = self.shaped_height(x, z)?;
+        Some(WorldErosionSample {
+            surface: shape.erosion?,
+            gully: shape.gully,
+            river: shape.river,
+            final_height_meters: shape.height,
+        })
     }
+
+    fn shaped_height(&self, x: f64, z: f64) -> Option<TerrainShape> {
+        let erosion = (self.world().generator_version >= EROSION_GENERATOR_VERSION)
+            .then(|| self.base.erosion_at(x, z))
+            .flatten();
+        let base_height = erosion.map_or_else(
+            || self.base.height_at(x, z),
+            |sample| Some(sample.surface_height_meters()),
+        )?;
+        let gully = self.gully_influence_at(x, z);
+        let gully_height = gully.map_or(base_height, |influence| {
+            let channel_bed = base_height.min(influence.centerline_elevation_meters)
+                - influence.segment.incision_depth_meters;
+            base_height + ((channel_bed - base_height) * influence.blend)
+        });
+        let river = self.river_influence_at(x, z);
+        let height = river.map_or(gully_height, |river| {
+            let channel_bed = river.centerline_elevation_meters - river.incision_depth_meters;
+            let target = gully_height.min(channel_bed);
+            gully_height + ((target - gully_height) * river.blend)
+        });
+        Some(TerrainShape {
+            height,
+            erosion,
+            gully,
+            river,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TerrainShape {
+    height: f64,
+    erosion: Option<ErosionSurfaceSample>,
+    gully: Option<GullyTerrainInfluence>,
+    river: Option<RiverTerrainInfluence>,
 }
 
 impl DensityField for GeneratedWorldTerrain {
     fn sample(&self, position: WorldPosition) -> TerrainSample {
-        let Some((surface_height, river)) = self.carved_height(position.x, position.z) else {
+        let Some(shape) = self.shaped_height(position.x, position.z) else {
             return TerrainSample::new(f64::INFINITY, Material::Air);
         };
-        let density = position.y - surface_height;
+        let density = position.y - shape.height;
         let material = if density > 0.0 {
             Material::Air
-        } else if river.is_some_and(|influence| {
+        } else if shape.river.is_some_and(|influence| {
             influence.distance_meters <= influence.channel_half_width_meters && density > -1.0
         }) {
             Material::Sand
-        } else if density > -1.5 {
+        } else if shape
+            .erosion
+            .is_some_and(|erosion| erosion.scree_cover >= 0.3 && density > -1.2)
+        {
+            Material::Scree
+        } else if shape
+            .erosion
+            .is_some_and(|erosion| erosion.rock_exposure >= 0.4 && density > -1.0)
+        {
+            Material::Rock
+        } else if density
+            > -shape
+                .erosion
+                .map_or(1.5, |erosion| erosion.soil_depth_meters)
+        {
             Material::Soil
         } else {
             Material::Rock
@@ -227,7 +359,7 @@ impl DensityField for GeneratedWorldTerrain {
 
 impl SurfaceField for GeneratedWorldTerrain {
     fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
-        self.carved_height(x, z).map(|(height, _)| height)
+        self.shaped_height(x, z).map(|shape| shape.height)
     }
 }
 
@@ -1019,7 +1151,7 @@ mod tests {
     use super::*;
     use treeline_coordinates::{WorldIdentity, stable_hash};
     use treeline_geography::WatershedRegion;
-    use treeline_hydrology::RiverNetwork;
+    use treeline_hydrology::{GullyNetwork, RiverNetwork};
     use treeline_terrain::RollingHills;
 
     #[test]
@@ -1062,6 +1194,126 @@ mod tests {
                 .expect("cache lock")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn version_five_composes_macro_meso_and_micro_erosion_on_one_surface() {
+        let world = WorldIdentity::new(0x5eed, EROSION_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let (x, z, erosion) = generated_incised_gully_point(&terrain);
+        let non_fluvial_height = erosion.surface.surface_height_meters();
+
+        assert!(erosion.surface.macro_weathering_meters >= 0.0);
+        assert!(erosion.surface.sediment_deposition_meters >= 0.0);
+        assert!(erosion.gully.is_some());
+        assert!(erosion.final_height_meters < non_fluvial_height);
+        assert_eq!(
+            terrain.surface_height(x, z).expect("far surface").to_bits(),
+            erosion.final_height_meters.to_bits()
+        );
+        assert!(
+            terrain
+                .sample(WorldPosition::new(x, erosion.final_height_meters, z))
+                .density
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn version_four_worlds_retain_the_pre_erosion_contract() {
+        let world = WorldIdentity::new(0x5eed, EROSION_GENERATOR_VERSION - 1, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+
+        assert!(terrain.erosion_at(-12_000.0, 8_000.0).is_none());
+        assert!(terrain.gully_influence_at(-12_000.0, 8_000.0).is_none());
+        assert!(
+            terrain
+                .gully_networks
+                .read()
+                .expect("cache lock")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn erosion_artifact_caches_do_not_change_sampling_order_results() {
+        let world = WorldIdentity::new(0x5eed, EROSION_GENERATOR_VERSION, 0);
+        let positions = [
+            [-129_000.0, -1_000.0],
+            [-1_000.0, -129_000.0],
+            [127_000.0, 127_000.0],
+        ];
+        let forward_terrain = GeneratedWorldTerrain::new(world);
+        let forward = positions.map(|[x, z]| {
+            forward_terrain
+                .surface_height(x, z)
+                .expect("forward surface")
+        });
+        let reverse_terrain = GeneratedWorldTerrain::new(world);
+        let mut reverse_positions = positions;
+        reverse_positions.reverse();
+        let mut reverse = reverse_positions.map(|[x, z]| {
+            reverse_terrain
+                .surface_height(x, z)
+                .expect("reverse surface")
+        });
+        reverse.reverse();
+
+        assert_eq!(forward.map(f64::to_bits), reverse.map(f64::to_bits));
+    }
+
+    #[test]
+    fn multi_scale_erosion_has_a_golden_fingerprint() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, EROSION_GENERATOR_VERSION, 0));
+        let positions = [
+            [-91_125.0, -37_375.0],
+            [-64_250.0, 63_875.0],
+            [-125.0, 375.0],
+            [28_625.0, -52_375.0],
+            [117_125.0, 83_625.0],
+        ];
+        let words = positions.map(|[x, z]| {
+            terrain
+                .surface_height(x, z)
+                .expect("eroded terrain")
+                .to_bits()
+        });
+
+        assert_eq!(
+            stable_hash(&words),
+            12_925_604_737_521_515_665,
+            "changing this value changes generated multi-scale erosion"
+        );
+    }
+
+    #[test]
+    fn micro_erosion_exposes_rock_and_scree_materials() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, EROSION_GENERATOR_VERSION, 0));
+        let mut found_rock = false;
+        let mut found_scree = false;
+        for z in -8..=8 {
+            for x in -8..=8 {
+                let world_x = f64::from(x) * 8_000.0;
+                let world_z = f64::from(z) * 8_000.0;
+                let height = terrain
+                    .surface_height(world_x, world_z)
+                    .expect("eroded surface");
+                match terrain
+                    .sample(WorldPosition::new(world_x, height, world_z))
+                    .material
+                {
+                    Material::Rock => found_rock = true,
+                    Material::Scree => found_scree = true,
+                    Material::Air | Material::Bedrock | Material::Soil | Material::Sand => {}
+                }
+            }
+        }
+
+        assert!(found_rock);
+        assert!(found_scree);
     }
 
     #[test]
@@ -1443,5 +1695,30 @@ mod tests {
             }
         }
         panic!("test world should contain a visible generated lake");
+    }
+
+    fn generated_incised_gully_point(
+        terrain: &GeneratedWorldTerrain,
+    ) -> (f64, f64, WorldErosionSample) {
+        for region_z in -1..=1 {
+            for region_x in -1..=1 {
+                let network = GullyNetwork::generate(
+                    terrain.world(),
+                    WatershedRegionIndex::new(region_x, region_z),
+                )
+                .expect("gully network");
+                for segment in network.segments() {
+                    let x = segment.bend.x;
+                    let z = segment.bend.z;
+                    let Some(erosion) = terrain.erosion_at(x, z) else {
+                        continue;
+                    };
+                    if erosion.final_height_meters < erosion.surface.surface_height_meters() {
+                        return (x, z, erosion);
+                    }
+                }
+            }
+        }
+        panic!("test world should contain an incised generated gully");
     }
 }

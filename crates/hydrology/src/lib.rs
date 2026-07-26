@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use treeline_coordinates::{WorldIdentity, WorldPosition};
+use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition};
 use treeline_geography::{
     DRAINAGE_CELL_EDGE_METERS, DrainageCellIndex, MacroElevation, RegionalProfile, WatershedRegion,
     WatershedRegionIndex,
@@ -10,7 +10,9 @@ use treeline_geography::{
 
 const SECONDS_PER_YEAR: f64 = 31_556_952.0;
 const MIN_CHANNEL_CATCHMENT_CELLS: u64 = 8;
+const DOMAIN_GULLY_BEND: u64 = 0x4755_4c4c_5942_454e;
 pub const MAX_RIVER_INFLUENCE_METERS: f64 = 900.0;
+pub const MAX_GULLY_INFLUENCE_METERS: f64 = 120.0;
 
 /// A directed segment in a generated river graph.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +90,196 @@ pub struct RiverTerrainInfluence {
     pub valley_half_width_meters: f64,
     pub incision_depth_meters: f64,
     pub blend: f64,
+}
+
+/// One minor drainage path below the river-network catchment threshold.
+///
+/// Endpoints come from the same filled drainage graph as rivers. A stable,
+/// bounded midpoint offset removes the coarse grid's straight-line fingerprint
+/// without changing connectivity or downstream elevation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GullySegment {
+    pub source_cell: DrainageCellIndex,
+    pub mouth_cell: DrainageCellIndex,
+    pub source: WorldPosition,
+    pub bend: WorldPosition,
+    pub mouth: WorldPosition,
+    pub flow_accumulation_cells: u64,
+    pub half_width_meters: f64,
+    pub incision_depth_meters: f64,
+}
+
+impl GullySegment {
+    pub fn descends_or_is_level(self) -> bool {
+        self.source.y >= self.bend.y && self.bend.y >= self.mouth.y
+    }
+
+    pub fn terrain_influence(self, x: f64, z: f64) -> Option<GullyTerrainInfluence> {
+        if !x.is_finite() || !z.is_finite() {
+            return None;
+        }
+        let first = closest_on_segment(x, z, self.source, self.bend, 0.0, 0.5)?;
+        let second = closest_on_segment(x, z, self.bend, self.mouth, 0.5, 1.0)?;
+        let (distance_meters, along) = if first.0 < second.0
+            || (first.0.to_bits() == second.0.to_bits() && first.1 <= second.1)
+        {
+            first
+        } else {
+            second
+        };
+        if distance_meters > self.half_width_meters {
+            return None;
+        }
+        let centerline_elevation_meters = self.source.y + ((self.mouth.y - self.source.y) * along);
+        let normalized = 1.0 - (distance_meters / self.half_width_meters);
+        let blend = normalized * normalized * (3.0 - (2.0 * normalized));
+        Some(GullyTerrainInfluence {
+            segment: self,
+            distance_meters,
+            centerline_elevation_meters,
+            blend,
+        })
+    }
+}
+
+/// Explainable meso-scale incision from a minor drainage path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GullyTerrainInfluence {
+    pub segment: GullySegment,
+    pub distance_meters: f64,
+    pub centerline_elevation_meters: f64,
+    pub blend: f64,
+}
+
+/// Deterministic meso-scale drainage erosion for one watershed artifact.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GullyNetwork {
+    pub world: WorldIdentity,
+    pub region: WatershedRegionIndex,
+    segments: Vec<GullySegment>,
+}
+
+impl GullyNetwork {
+    pub fn generate(world: WorldIdentity, region: WatershedRegionIndex) -> Option<Self> {
+        let watershed = WatershedRegion::generate(world, region)?;
+        Self::from_watershed(&watershed)
+    }
+
+    pub fn from_watershed(watershed: &WatershedRegion) -> Option<Self> {
+        let cells = watershed.cells();
+        let slots = cells
+            .iter()
+            .enumerate()
+            .map(|(slot, cell)| (cell.index, slot))
+            .collect::<BTreeMap<_, _>>();
+        let terrain = MacroElevation::new(watershed.world);
+        let mut segments = Vec::new();
+        for cell in cells {
+            if cell.flow_accumulation_cells >= MIN_CHANNEL_CATCHMENT_CELLS || cell.basin.is_some() {
+                continue;
+            }
+            let Some(mouth_cell) = cell.flow_to else {
+                continue;
+            };
+            let [source_x, source_z] = cell.index.center();
+            let [mouth_x, mouth_z] = mouth_cell.center();
+            let source_y = cell.filled_elevation_meters;
+            let mouth_y = if let Some(&mouth_slot) = slots.get(&mouth_cell) {
+                cells[mouth_slot].filled_elevation_meters
+            } else {
+                terrain.sample(mouth_x, mouth_z)?.elevation_meters
+            };
+            if mouth_y > source_y {
+                return None;
+            }
+
+            let delta_x = mouth_x - source_x;
+            let delta_z = mouth_z - source_z;
+            let length = delta_x.hypot(delta_z);
+            if length <= 0.0 {
+                return None;
+            }
+            let key = CellIndex::new(cell.index.x, cell.index.z, 0)
+                .generation_key(watershed.world, DOMAIN_GULLY_BEND);
+            let signed_bend =
+                ((hash53_as_f64(key >> 11) / 9_007_199_254_740_991.0) - 0.5) * length * 0.28;
+            let perpendicular_x = -delta_z / length;
+            let perpendicular_z = delta_x / length;
+            let bend_x = ((source_x + mouth_x) * 0.5) + (perpendicular_x * signed_bend);
+            let bend_z = ((source_z + mouth_z) * 0.5) + (perpendicular_z * signed_bend);
+            let bend_y = (source_y + mouth_y) * 0.5;
+
+            let profile = RegionalProfile::sample(watershed.world, source_x, source_z)?;
+            let softness = 1.0 - profile.rock_hardness;
+            let erodibility = (0.2 + (softness * 0.8))
+                * (0.25 + (profile.erosion_age * 0.75))
+                * (0.3 + (profile.precipitation * 0.7));
+            let catchment_scale = u64_as_f64(cell.flow_accumulation_cells).sqrt();
+            let gradient = ((source_y - mouth_y) / length).clamp(0.0, 1.0);
+            let half_width_meters = ((28.0 + (catchment_scale * 12.0))
+                * (0.7 + (profile.precipitation * 0.6)))
+                .clamp(24.0, MAX_GULLY_INFLUENCE_METERS);
+            let incision_depth_meters = ((1.0 + (catchment_scale * 2.4))
+                * (0.35 + (erodibility * 0.65))
+                * (0.55 + ((gradient / 0.08).clamp(0.0, 1.0) * 0.75)))
+                .clamp(1.0, 14.0);
+            let segment = GullySegment {
+                source_cell: cell.index,
+                mouth_cell,
+                source: WorldPosition::new(source_x, source_y, source_z),
+                bend: WorldPosition::new(bend_x, bend_y, bend_z),
+                mouth: WorldPosition::new(mouth_x, mouth_y, mouth_z),
+                flow_accumulation_cells: cell.flow_accumulation_cells,
+                half_width_meters,
+                incision_depth_meters,
+            };
+            if !segment.descends_or_is_level() {
+                return None;
+            }
+            segments.push(segment);
+        }
+        segments.sort_by_key(|segment| segment.source_cell);
+        Some(Self {
+            world: watershed.world,
+            region: watershed.index,
+            segments,
+        })
+    }
+
+    pub fn segments(&self) -> &[GullySegment] {
+        &self.segments
+    }
+
+    pub fn segment_from(&self, source: DrainageCellIndex) -> Option<&GullySegment> {
+        self.segments
+            .binary_search_by_key(&source, |segment| segment.source_cell)
+            .ok()
+            .map(|slot| &self.segments[slot])
+    }
+}
+
+fn closest_on_segment(
+    x: f64,
+    z: f64,
+    source: WorldPosition,
+    mouth: WorldPosition,
+    along_start: f64,
+    along_end: f64,
+) -> Option<(f64, f64)> {
+    let segment_x = mouth.x - source.x;
+    let segment_z = mouth.z - source.z;
+    let length_squared = segment_x.mul_add(segment_x, segment_z * segment_z);
+    if length_squared <= 0.0 {
+        return None;
+    }
+    let local_along = (((x - source.x).mul_add(segment_x, (z - source.z) * segment_z))
+        / length_squared)
+        .clamp(0.0, 1.0);
+    let nearest_x = source.x + (segment_x * local_along);
+    let nearest_z = source.z + (segment_z * local_along);
+    let distance = (x - nearest_x).hypot(z - nearest_z);
+    let along = along_start + ((along_end - along_start) * local_along);
+    Some((distance, along))
 }
 
 /// River channels derived from one deterministic regional drainage artifact.
@@ -338,6 +530,11 @@ fn u64_as_f64(value: u64) -> f64 {
     value as f64
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn hash53_as_f64(value: u64) -> f64 {
+    value as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +575,32 @@ mod tests {
         assert!(
             river
                 .terrain_influence(1_000.0, MAX_RIVER_INFLUENCE_METERS + 1.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gully_influence_follows_its_bent_centerline_and_is_bounded() {
+        let gully = GullySegment {
+            source_cell: DrainageCellIndex::new(0, 0),
+            mouth_cell: DrainageCellIndex::new(1, 0),
+            source: WorldPosition::new(0.0, 100.0, 0.0),
+            bend: WorldPosition::new(1_000.0, 90.0, 160.0),
+            mouth: WorldPosition::new(2_000.0, 80.0, 0.0),
+            flow_accumulation_cells: 4,
+            half_width_meters: 60.0,
+            incision_depth_meters: 6.0,
+        };
+        let center = gully
+            .terrain_influence(1_000.0, 160.0)
+            .expect("bend influence");
+
+        assert!(center.distance_meters.abs() < f64::EPSILON);
+        assert!((center.centerline_elevation_meters - 90.0).abs() < f64::EPSILON);
+        assert!((center.blend - 1.0).abs() < f64::EPSILON);
+        assert!(
+            gully
+                .terrain_influence(1_000.0, 160.0 + MAX_GULLY_INFLUENCE_METERS + 1.0)
                 .is_none()
         );
     }
@@ -533,6 +756,65 @@ mod tests {
             stable_hash(&words),
             13_240_554_273_518_066_894,
             "changing this value changes generated regional rivers"
+        );
+    }
+
+    #[test]
+    fn generated_gullies_are_connected_minor_downhill_channels() {
+        let watershed =
+            WatershedRegion::generate(WORLD, WatershedRegionIndex::new(-1, 0)).expect("watershed");
+        let network = GullyNetwork::from_watershed(&watershed).expect("gully network");
+
+        assert!(!network.segments().is_empty());
+        for segment in network.segments() {
+            assert!(segment.descends_or_is_level());
+            assert!(segment.flow_accumulation_cells < MIN_CHANNEL_CATCHMENT_CELLS);
+            assert!(
+                segment.source_cell.x.abs_diff(segment.mouth_cell.x) <= 1
+                    && segment.source_cell.z.abs_diff(segment.mouth_cell.z) <= 1
+            );
+            assert!((24.0..=MAX_GULLY_INFLUENCE_METERS).contains(&segment.half_width_meters));
+            assert!((1.0..=14.0).contains(&segment.incision_depth_meters));
+        }
+    }
+
+    #[test]
+    fn gully_generation_handles_negative_coordinates_and_is_order_independent() {
+        let first_index = WatershedRegionIndex::new(-2, -1);
+        let second_index = WatershedRegionIndex::new(-1, -1);
+        let first = GullyNetwork::generate(WORLD, first_index).expect("first");
+        let second = GullyNetwork::generate(WORLD, second_index).expect("second");
+        let second_again = GullyNetwork::generate(WORLD, second_index).expect("second again");
+        let first_again = GullyNetwork::generate(WORLD, first_index).expect("first again");
+
+        assert_eq!(first, first_again);
+        assert_eq!(second, second_again);
+    }
+
+    #[test]
+    fn gully_network_has_a_golden_fingerprint() {
+        let network =
+            GullyNetwork::generate(WORLD, WatershedRegionIndex::new(-1, 2)).expect("network");
+        let words = network
+            .segments()
+            .iter()
+            .step_by(31)
+            .flat_map(|segment| {
+                [
+                    u64::from_le_bytes(segment.source_cell.x.to_le_bytes()),
+                    u64::from_le_bytes(segment.source_cell.z.to_le_bytes()),
+                    segment.bend.x.to_bits(),
+                    segment.bend.z.to_bits(),
+                    segment.half_width_meters.to_bits(),
+                    segment.incision_depth_meters.to_bits(),
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_hash(&words),
+            16_211_266_877_087_865_594,
+            "changing this value changes generated meso-scale gullies"
         );
     }
 }

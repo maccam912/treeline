@@ -2,10 +2,12 @@
 
 use treeline_coordinates::WorldPosition;
 use treeline_coordinates::{CellIndex, WorldIdentity};
-use treeline_geography::{MacroElevation, MacroTerrainSample};
+use treeline_geography::{MacroElevation, MacroTerrainSample, RegionalProfile};
 
 const DOMAIN_ROLLING_HILLS: u64 = 0x524f_4c4c_494e_4753;
 const DOMAIN_WILDERNESS_DETAIL: u64 = 0x5749_4c44_4445_544c;
+const DOMAIN_EROSION_MICRO: u64 = 0x4552_4f53_4d49_4352;
+const EROSION_SLOPE_SAMPLE_RADIUS_METERS: f64 = 256.0;
 
 /// Broad material channels used before renderer-specific material expansion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,6 +17,7 @@ pub enum Material {
     Rock,
     Soil,
     Sand,
+    Scree,
 }
 
 /// A deterministic sample of pristine terrain.
@@ -124,6 +127,32 @@ pub struct WildernessTerrain {
     pub world: WorldIdentity,
 }
 
+/// Explainable non-fluvial erosion applied to a pristine terrain surface.
+///
+/// Macro weathering rounds uplifted terrain and deposits sediment on old,
+/// low-gradient ground. Micro relief and surface composition respond to the
+/// same slope, rock, climate, and erosion-age inputs instead of choosing a
+/// terrain preset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ErosionSurfaceSample {
+    pub base_height_meters: f64,
+    pub macro_weathering_meters: f64,
+    pub sediment_deposition_meters: f64,
+    pub micro_relief_meters: f64,
+    pub slope: f64,
+    pub rock_exposure: f64,
+    pub scree_cover: f64,
+    pub soil_depth_meters: f64,
+}
+
+impl ErosionSurfaceSample {
+    pub fn surface_height_meters(self) -> f64 {
+        self.base_height_meters - self.macro_weathering_meters
+            + self.sediment_deposition_meters
+            + self.micro_relief_meters
+    }
+}
+
 impl WildernessTerrain {
     pub const fn new(world: WorldIdentity) -> Self {
         Self { world }
@@ -146,6 +175,66 @@ impl WildernessTerrain {
 
     pub fn height_at(self, x: f64, z: f64) -> Option<f64> {
         self.inspect(x, z).map(|(_, height)| height)
+    }
+
+    /// Samples macro weathering, sediment deposition, and micro surface form.
+    ///
+    /// Central differences deliberately use a fixed world-space radius, so the
+    /// erosion result is independent of voxel LOD and sampling order.
+    pub fn erosion_at(self, x: f64, z: f64) -> Option<ErosionSurfaceSample> {
+        let (macro_sample, base_height_meters) = self.inspect(x, z)?;
+        let profile = RegionalProfile::sample(self.world, x, z)?;
+        let left = self.height_at(x - EROSION_SLOPE_SAMPLE_RADIUS_METERS, z)?;
+        let right = self.height_at(x + EROSION_SLOPE_SAMPLE_RADIUS_METERS, z)?;
+        let down = self.height_at(x, z - EROSION_SLOPE_SAMPLE_RADIUS_METERS)?;
+        let up = self.height_at(x, z + EROSION_SLOPE_SAMPLE_RADIUS_METERS)?;
+        let sample_span = EROSION_SLOPE_SAMPLE_RADIUS_METERS * 2.0;
+        let slope_x = (right - left) / sample_span;
+        let slope_z = (up - down) / sample_span;
+        let slope = slope_x.hypot(slope_z);
+
+        let softness = 1.0 - profile.rock_hardness;
+        let macro_weathering_meters = macro_sample.mountain_uplift_meters
+            * (0.04 + (profile.erosion_age * 0.16))
+            * (0.35 + (softness * 0.65));
+        let flatness = 1.0 - (slope / 0.08).clamp(0.0, 1.0);
+        let lowland = 1.0 - (macro_sample.elevation_meters.max(0.0) / 600.0).clamp(0.0, 1.0);
+        let sediment_deposition_meters = 18.0
+            * profile.erosion_age
+            * profile.precipitation
+            * (0.25 + (softness * 0.75))
+            * flatness
+            * lowland;
+
+        let steepness = (slope / 0.12).clamp(0.0, 1.0);
+        let rock_exposure = (steepness
+            * (0.35 + (profile.rock_hardness * 0.65))
+            * (0.4 + ((1.0 - profile.erosion_age) * 0.6)))
+            .clamp(0.0, 1.0);
+        let scree_cover = (((steepness - 0.18) / 0.62).clamp(0.0, 1.0)
+            * (0.3 + (profile.erosion_age * 0.7))
+            * (0.25 + (profile.rock_hardness * 0.75)))
+            .clamp(0.0, 1.0);
+        let soil_depth_meters = (0.2
+            + (3.3 * flatness * (0.25 + (profile.erosion_age * 0.75)) * (0.3 + (softness * 0.7))))
+            .clamp(0.2, 3.5);
+
+        let coarse = height_layer(self.world, x, z, 42.0, DOMAIN_EROSION_MICRO)?;
+        let fine = height_layer(self.world, x, z, 13.0, DOMAIN_EROSION_MICRO.wrapping_add(1))?;
+        let micro_amplitude = 0.2 + (rock_exposure * 2.4) + (scree_cover * 1.2);
+        let micro_relief_meters =
+            ((coarse - 0.5) * 2.0 * micro_amplitude) + ((fine - 0.5) * 0.8 * scree_cover);
+
+        Some(ErosionSurfaceSample {
+            base_height_meters,
+            macro_weathering_meters,
+            sediment_deposition_meters,
+            micro_relief_meters,
+            slope,
+            rock_exposure,
+            scree_cover,
+            soil_depth_meters,
+        })
     }
 }
 
@@ -359,5 +448,70 @@ mod tests {
             (macro_sample.base_elevation_meters + macro_sample.mountain_uplift_meters).to_bits()
         );
         assert!((height - macro_sample.elevation_meters).abs() <= 13.0);
+    }
+
+    #[test]
+    fn erosion_surface_is_deterministic_and_composes_its_contributors() {
+        let terrain = WildernessTerrain::new(WorldIdentity::new(0x5eed, 5, 0));
+        let first = terrain
+            .erosion_at(-8_125.5, 12_003.25)
+            .expect("finite erosion sample");
+        let second = terrain
+            .erosion_at(-8_125.5, 12_003.25)
+            .expect("same erosion sample");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.surface_height_meters().to_bits(),
+            (first.base_height_meters - first.macro_weathering_meters
+                + first.sediment_deposition_meters
+                + first.micro_relief_meters)
+                .to_bits()
+        );
+        assert!(first.macro_weathering_meters >= 0.0);
+        assert!(first.sediment_deposition_meters >= 0.0);
+        assert!((0.0..=1.0).contains(&first.rock_exposure));
+        assert!((0.0..=1.0).contains(&first.scree_cover));
+        assert!((0.2..=3.5).contains(&first.soil_depth_meters));
+    }
+
+    #[test]
+    fn erosion_sampling_is_continuous_across_negative_micro_cells() {
+        let terrain = WildernessTerrain::new(WorldIdentity::new(0x5eed, 5, 0));
+        let left = terrain
+            .erosion_at(-42.001, -13.0)
+            .expect("left erosion sample")
+            .surface_height_meters();
+        let right = terrain
+            .erosion_at(-41.999, -13.0)
+            .expect("right erosion sample")
+            .surface_height_meters();
+
+        assert!((left - right).abs() < 0.1);
+    }
+
+    #[test]
+    fn erosion_layers_create_weathering_deposition_and_surface_variety() {
+        let terrain = WildernessTerrain::new(WorldIdentity::new(0x5eed, 5, 0));
+        let mut maximum_weathering = 0.0_f64;
+        let mut maximum_deposition = 0.0_f64;
+        let mut maximum_rock_exposure = 0.0_f64;
+        let mut maximum_scree_cover = 0.0_f64;
+        for z in -8..=8 {
+            for x in -8..=8 {
+                let erosion = terrain
+                    .erosion_at(f64::from(x) * 8_000.0, f64::from(z) * 8_000.0)
+                    .expect("finite erosion sample");
+                maximum_weathering = maximum_weathering.max(erosion.macro_weathering_meters);
+                maximum_deposition = maximum_deposition.max(erosion.sediment_deposition_meters);
+                maximum_rock_exposure = maximum_rock_exposure.max(erosion.rock_exposure);
+                maximum_scree_cover = maximum_scree_cover.max(erosion.scree_cover);
+            }
+        }
+
+        assert!(maximum_weathering > 20.0, "{maximum_weathering}");
+        assert!(maximum_deposition > 1.0, "{maximum_deposition}");
+        assert!(maximum_rock_exposure > 0.4, "{maximum_rock_exposure}");
+        assert!(maximum_scree_cover > 0.3, "{maximum_scree_cover}");
     }
 }
