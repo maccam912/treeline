@@ -58,6 +58,13 @@ struct CameraUniform {
     view_projection: [[f32; 4]; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct TerrainCutoutUniform {
+    min_xz: [f32; 2],
+    max_xz: [f32; 2],
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RendererError {
     TooManyIndices,
@@ -78,8 +85,128 @@ impl Error for RendererError {}
 pub struct TerrainRenderer {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
+    far_bind_group: wgpu::BindGroup,
+    near_bind_group: wgpu::BindGroup,
+    far_cutout_buffer: wgpu::Buffer,
     depth: DepthTarget,
+}
+
+struct TerrainBindings {
+    layout: wgpu::BindGroupLayout,
+    camera_buffer: wgpu::Buffer,
+    far_bind_group: wgpu::BindGroup,
+    near_bind_group: wgpu::BindGroup,
+    far_cutout_buffer: wgpu::Buffer,
+}
+
+impl TerrainBindings {
+    fn new(device: &wgpu::Device) -> Self {
+        let camera_uniform = CameraUniform {
+            view_projection: [[0.0; 4]; 4],
+        };
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera uniform"),
+            contents: bytemuck::bytes_of(&camera_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let no_cutout = TerrainCutoutUniform {
+            min_xz: [0.0; 2],
+            max_xz: [0.0; 2],
+        };
+        let far_cutout_buffer = cutout_buffer(
+            device,
+            "far terrain cutout",
+            &no_cutout,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let no_cutout_buffer = cutout_buffer(
+            device,
+            "near terrain no-cutout",
+            &no_cutout,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera bind group layout"),
+            entries: &[
+                uniform_layout_entry(0, wgpu::ShaderStages::VERTEX),
+                uniform_layout_entry(1, wgpu::ShaderStages::FRAGMENT),
+            ],
+        });
+        let far_bind_group = terrain_bind_group(
+            device,
+            &layout,
+            &camera_buffer,
+            &far_cutout_buffer,
+            "far terrain bind group",
+        );
+        let near_bind_group = terrain_bind_group(
+            device,
+            &layout,
+            &camera_buffer,
+            &no_cutout_buffer,
+            "near terrain bind group",
+        );
+
+        Self {
+            layout,
+            camera_buffer,
+            far_bind_group,
+            near_bind_group,
+            far_cutout_buffer,
+        }
+    }
+}
+
+fn cutout_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    uniform: &TerrainCutoutUniform,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::bytes_of(uniform),
+        usage,
+    })
+}
+
+const fn uniform_layout_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn terrain_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    camera_buffer: &wgpu::Buffer,
+    cutout_buffer: &wgpu::Buffer,
+    label: &str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: cutout_buffer.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 /// GPU buffers for one independently loadable terrain chunk.
@@ -98,35 +225,7 @@ impl TerrainRenderer {
         width: u32,
         height: u32,
     ) -> Self {
-        let camera_uniform = CameraUniform {
-            view_projection: [[0.0; 4]; 4],
-        };
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("camera uniform"),
-            contents: bytemuck::bytes_of(&camera_uniform),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("camera bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera bind group"),
-            layout: &camera_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
+        let bindings = TerrainBindings::new(device);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain shader"),
@@ -134,7 +233,7 @@ impl TerrainRenderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain pipeline layout"),
-            bind_group_layouts: &[&camera_layout],
+            bind_group_layouts: &[&bindings.layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -175,8 +274,10 @@ impl TerrainRenderer {
 
         Self {
             pipeline,
-            camera_buffer,
-            camera_bind_group,
+            camera_buffer: bindings.camera_buffer,
+            far_bind_group: bindings.far_bind_group,
+            near_bind_group: bindings.near_bind_group,
+            far_cutout_buffer: bindings.far_cutout_buffer,
             depth: DepthTarget::new(device, width, height),
         }
     }
@@ -239,11 +340,21 @@ impl TerrainRenderer {
         );
     }
 
-    pub fn render<'mesh>(
+    /// Updates the half-open world-space rectangle removed from coarse terrain.
+    pub fn update_far_cutout(&self, queue: &wgpu::Queue, min_xz: [f32; 2], max_xz: [f32; 2]) {
+        queue.write_buffer(
+            &self.far_cutout_buffer,
+            0,
+            bytemuck::bytes_of(&TerrainCutoutUniform { min_xz, max_xz }),
+        );
+    }
+
+    pub fn render<'far, 'near>(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        meshes: impl IntoIterator<Item = &'mesh TerrainMesh>,
+        far_meshes: impl IntoIterator<Item = &'far TerrainMesh>,
+        near_meshes: impl IntoIterator<Item = &'near TerrainMesh>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("terrain render pass"),
@@ -272,8 +383,14 @@ impl TerrainRenderer {
             occlusion_query_set: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.camera_bind_group, &[]);
-        for mesh in meshes {
+        pass.set_bind_group(0, &self.far_bind_group, &[]);
+        for mesh in far_meshes {
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        }
+        pass.set_bind_group(0, &self.near_bind_group, &[]);
+        for mesh in near_meshes {
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
             pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.index_count, 0, 0..1);

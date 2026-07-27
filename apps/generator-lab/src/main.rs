@@ -640,8 +640,12 @@ impl GeneratorLab {
             &paint_jobs,
             &screen_descriptor,
         );
-        self.renderer
-            .render(&mut encoder, &view, std::iter::once(&self.mesh));
+        self.renderer.render(
+            &mut encoder,
+            &view,
+            std::iter::empty(),
+            std::iter::once(&self.mesh),
+        );
         {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {

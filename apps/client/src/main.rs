@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
@@ -31,9 +32,12 @@ use winit::window::CursorGrabMode;
 use winit::window::{Window, WindowId};
 
 const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
+const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
+const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn Error>> {
@@ -71,7 +75,7 @@ impl ApplicationHandler for TreelineApp {
         self.initialization_started = true;
 
         let attributes = Window::default_attributes()
-            .with_title("Treeline — Infinite Landscape")
+            .with_title(WINDOW_TITLE)
             .with_inner_size(LogicalSize::new(1280, 720));
         #[cfg(target_arch = "wasm32")]
         let attributes = {
@@ -217,52 +221,80 @@ struct Game {
     input: InputState,
     cursor_captured: bool,
     previous_frame: Instant,
+    initial_generation: InitialGenerationProgress,
+}
+
+struct InitializedGpu {
+    instance: wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface_config: wgpu::SurfaceConfiguration,
+}
+
+async fn initialize_gpu(window: Arc<Window>) -> Result<InitializedGpu, Box<dyn Error>> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let surface = instance.create_surface(window.clone())?;
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("no compatible graphics adapter found"))?;
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("Treeline device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+            },
+            None,
+        )
+        .await?;
+    let size = window.inner_size();
+    let capabilities = surface.get_capabilities(&adapter);
+    let surface_format = capabilities
+        .formats
+        .iter()
+        .copied()
+        .find(wgpu::TextureFormat::is_srgb)
+        .unwrap_or(capabilities.formats[0]);
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode: wgpu::PresentMode::Fifo,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: capabilities.alpha_modes[0],
+        view_formats: vec![],
+    };
+    surface.configure(&device, &surface_config);
+
+    Ok(InitializedGpu {
+        instance,
+        surface,
+        device,
+        queue,
+        surface_config,
+    })
 }
 
 impl Game {
     async fn new(window: Arc<Window>) -> Result<Self, Box<dyn Error>> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let surface = instance.create_surface(window.clone())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .ok_or_else(|| std::io::Error::other("no compatible graphics adapter found"))?;
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Treeline device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                },
-                None,
-            )
-            .await?;
+        let InitializedGpu {
+            instance,
+            surface,
+            device,
+            queue,
+            surface_config,
+        } = initialize_gpu(window.clone()).await?;
 
-        let size = window.inner_size();
-        let capabilities = surface.get_capabilities(&adapter);
-        let surface_format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(wgpu::TextureFormat::is_srgb)
-            .unwrap_or(capabilities.formats[0]);
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: capabilities.alpha_modes[0],
-            view_formats: vec![],
-        };
-        surface.configure(&device, &surface_config);
-
+        let world_generation_started = Instant::now();
+        window.set_title("Treeline — Preparing spawn geography…");
         let terrain = GeneratedWorldTerrain::new(WORLD);
         let renderer = TerrainRenderer::new(
             &device,
@@ -276,11 +308,16 @@ impl Game {
         let mut far_terrain_tiles = BTreeMap::new();
         let mut requested_chunks = BTreeMap::new();
         let mut requested_far_tiles = BTreeMap::new();
-        let mut terrain_jobs = TerrainMeshQueue::new(terrain.clone());
+        let mut terrain_jobs = TerrainMeshQueue::with_lake_mesh(
+            terrain.clone(),
+            GeneratedWorldTerrain::lake_surface_mesh,
+        );
 
         let start_x = 16.0;
         let start_z = 80.0;
+        let spawn_preparation_started = Instant::now();
         let start_y = surface_height(&terrain, start_x, start_z) + EYE_HEIGHT;
+        let spawn_preparation_time = spawn_preparation_started.elapsed();
         let camera = Camera::new(Vec3::new(start_x, start_y, start_z));
         schedule_terrain(
             chunk_streamer,
@@ -296,6 +333,18 @@ impl Game {
             &queue,
             camera.view_projection(surface_config.width, surface_config.height),
         );
+        let initial_generation = start_initial_progress(
+            &window,
+            &renderer,
+            &queue,
+            world_generation_started,
+            spawn_preparation_time,
+            &requested_chunks,
+            &requested_far_tiles,
+            chunk_streamer,
+            far_terrain_streamer,
+            camera.world_position(),
+        )?;
 
         let game = Self {
             window,
@@ -317,6 +366,7 @@ impl Game {
             input: InputState::default(),
             cursor_captured: false,
             previous_frame: Instant::now(),
+            initial_generation,
         };
         Ok(game)
     }
@@ -392,15 +442,22 @@ impl Game {
             &mut self.requested_chunks,
             &mut self.requested_far_tiles,
             &mut self.terrain_jobs,
-            &self.terrain,
+            &mut self.initial_generation,
         ) {
             eprintln!("terrain chunk streaming failed: {error}");
         }
+        self.initial_generation.publish(&self.window);
         self.renderer.update_camera(
             &self.queue,
             self.camera
                 .view_projection(self.surface_config.width, self.surface_config.height),
         );
+        if let Ok((cutout_min, cutout_max)) =
+            far_cutout_bounds(self.chunk_streamer, self.camera.world_position())
+        {
+            self.renderer
+                .update_far_cutout(&self.queue, cutout_min, cutout_max);
+        }
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -419,12 +476,14 @@ impl Game {
             self.far_terrain_tiles
                 .values()
                 .map(|resident| &resident.mesh)
-                .chain(self.terrain_chunks.values().map(|resident| &resident.mesh))
                 .chain(
                     self.far_terrain_tiles
                         .values()
                         .filter_map(|resident| resident.lake_mesh.as_ref()),
-                )
+                ),
+            self.terrain_chunks
+                .values()
+                .map(|resident| &resident.mesh)
                 .chain(
                     self.terrain_chunks
                         .values()
@@ -447,6 +506,149 @@ struct ResidentFarTerrainTile {
     spec: FarTerrainMeshSpec,
     mesh: TerrainMesh,
     lake_mesh: Option<TerrainMesh>,
+}
+
+#[derive(Debug)]
+struct InitialGenerationProgress {
+    started: Instant,
+    spawn_preparation_time: Duration,
+    horizon_tiles: BTreeSet<FarTileIndex>,
+    far_tiles: BTreeSet<FarTileIndex>,
+    near_chunks: BTreeSet<ChunkIndex>,
+    completed_horizon_tiles: BTreeSet<FarTileIndex>,
+    completed_far_tiles: BTreeSet<FarTileIndex>,
+    completed_near_chunks: BTreeSet<ChunkIndex>,
+    terrain_generation_time: Duration,
+    lake_generation_time: Duration,
+    integration_time: Duration,
+    stale_jobs: usize,
+    dirty: bool,
+    finished_at: Option<Duration>,
+    reported: bool,
+}
+
+impl InitialGenerationProgress {
+    fn new(
+        started: Instant,
+        spawn_preparation_time: Duration,
+        requested: &BTreeMap<ChunkIndex, ChunkMeshSpec>,
+        requested_far: &BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
+        far_streamer: FarTerrainStreamer,
+        player_position: WorldPosition,
+    ) -> Result<Self, Box<dyn Error>> {
+        let far_center = FarTileIndex::containing(player_position)
+            .ok_or_else(|| std::io::Error::other("player position is outside far tile range"))?;
+        let horizon_radius = far_streamer.config().load_radius();
+        let (horizon_tiles, far_tiles) = requested_far
+            .keys()
+            .copied()
+            .partition(|tile| tile.chebyshev_distance(far_center) == horizon_radius);
+
+        Ok(Self {
+            started,
+            spawn_preparation_time,
+            horizon_tiles,
+            far_tiles,
+            near_chunks: requested.keys().copied().collect(),
+            completed_horizon_tiles: BTreeSet::new(),
+            completed_far_tiles: BTreeSet::new(),
+            completed_near_chunks: BTreeSet::new(),
+            terrain_generation_time: Duration::ZERO,
+            lake_generation_time: Duration::ZERO,
+            integration_time: Duration::ZERO,
+            stale_jobs: 0,
+            dirty: true,
+            finished_at: None,
+            reported: false,
+        })
+    }
+
+    fn record_stale(&mut self, terrain_generation_time: Duration, lake_generation_time: Duration) {
+        if self.finished_at.is_some() {
+            return;
+        }
+        self.terrain_generation_time += terrain_generation_time;
+        self.lake_generation_time += lake_generation_time;
+        self.stale_jobs += 1;
+    }
+
+    fn record_completion(
+        &mut self,
+        spec: TerrainMeshSpec,
+        terrain_generation_time: Duration,
+        lake_generation_time: Duration,
+        integration_time: Duration,
+    ) {
+        if self.finished_at.is_some() {
+            return;
+        }
+        self.terrain_generation_time += terrain_generation_time;
+        self.lake_generation_time += lake_generation_time;
+        self.integration_time += integration_time;
+        let changed = match spec {
+            TerrainMeshSpec::Far(spec) if self.horizon_tiles.contains(&spec.tile) => {
+                self.completed_horizon_tiles.insert(spec.tile)
+            }
+            TerrainMeshSpec::Far(spec) if self.far_tiles.contains(&spec.tile) => {
+                self.completed_far_tiles.insert(spec.tile)
+            }
+            TerrainMeshSpec::Near(spec) if self.near_chunks.contains(&spec.chunk) => {
+                self.completed_near_chunks.insert(spec.chunk)
+            }
+            _ => false,
+        };
+        self.dirty |= changed;
+        if self.completed_horizon_tiles.len() == self.horizon_tiles.len()
+            && self.completed_far_tiles.len() == self.far_tiles.len()
+            && self.completed_near_chunks.len() == self.near_chunks.len()
+        {
+            self.finished_at = Some(self.started.elapsed());
+            self.dirty = true;
+        }
+    }
+
+    fn title(&self) -> String {
+        format!(
+            "Treeline — Building world: horizon {}/{} · far {}/{} · nearby {}/{}",
+            self.completed_horizon_tiles.len(),
+            self.horizon_tiles.len(),
+            self.completed_far_tiles.len(),
+            self.far_tiles.len(),
+            self.completed_near_chunks.len(),
+            self.near_chunks.len()
+        )
+    }
+
+    fn publish(&mut self, window: &Window) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        let Some(wall_time) = self.finished_at else {
+            window.set_title(&self.title());
+            return;
+        };
+        window.set_title(WINDOW_TITLE);
+        if self.reported {
+            return;
+        }
+        self.reported = true;
+        eprintln!(
+            "initial world ready in {:.2}s: horizon {}/{}, far {}/{}, nearby {}/{}; spawn geography {:.2}s, worker terrain CPU {:.2}s, worker lake CPU {:.2}s, main-thread integration {:.2}s, stale jobs {}",
+            wall_time.as_secs_f64(),
+            self.completed_horizon_tiles.len(),
+            self.horizon_tiles.len(),
+            self.completed_far_tiles.len(),
+            self.far_tiles.len(),
+            self.completed_near_chunks.len(),
+            self.near_chunks.len(),
+            self.spawn_preparation_time.as_secs_f64(),
+            self.terrain_generation_time.as_secs_f64(),
+            self.lake_generation_time.as_secs_f64(),
+            self.integration_time.as_secs_f64(),
+            self.stale_jobs
+        );
+    }
 }
 
 struct Camera {
@@ -687,6 +889,49 @@ fn far_terrain_streaming_config() -> FarTerrainStreamingConfig {
     }
 }
 
+fn far_cutout_bounds(
+    chunk_streamer: ChunkStreamer,
+    player_position: WorldPosition,
+) -> Result<([f32; 2], [f32; 2]), Box<dyn Error>> {
+    let center = ChunkIndex::containing(player_position)
+        .ok_or_else(|| std::io::Error::other("player position is outside chunk index range"))?;
+    let cutout = NearTerrainCutout::around(center, chunk_streamer.config().load_radius())
+        .ok_or_else(|| std::io::Error::other("near terrain cutout is outside chunk index range"))?;
+    let min = cutout.min.sample_origin();
+    let max = cutout.max_exclusive.sample_origin();
+    Ok((
+        [f64_as_f32(min.x), f64_as_f32(min.z)],
+        [f64_as_f32(max.x), f64_as_f32(max.z)],
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_initial_progress(
+    window: &Window,
+    renderer: &TerrainRenderer,
+    queue: &wgpu::Queue,
+    started: Instant,
+    spawn_preparation_time: Duration,
+    requested: &BTreeMap<ChunkIndex, ChunkMeshSpec>,
+    requested_far: &BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
+    chunk_streamer: ChunkStreamer,
+    far_streamer: FarTerrainStreamer,
+    player_position: WorldPosition,
+) -> Result<InitialGenerationProgress, Box<dyn Error>> {
+    let (cutout_min, cutout_max) = far_cutout_bounds(chunk_streamer, player_position)?;
+    renderer.update_far_cutout(queue, cutout_min, cutout_max);
+    let progress = InitialGenerationProgress::new(
+        started,
+        spawn_preparation_time,
+        requested,
+        requested_far,
+        far_streamer,
+        player_position,
+    )?;
+    window.set_title(&progress.title());
+    Ok(progress)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_terrain(
     device: &wgpu::Device,
@@ -699,45 +944,69 @@ fn update_terrain(
     requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
     jobs: &mut TerrainMeshQueue<GeneratedWorldTerrain>,
-    terrain: &GeneratedWorldTerrain,
+    initial_generation: &mut InitialGenerationProgress,
 ) -> Result<(), Box<dyn Error>> {
-    while let Some(generated) = jobs.try_next() {
-        match generated.spec {
+    let frame_integration_started = Instant::now();
+    let mut integrated = 0;
+    while integrated < MAX_TERRAIN_INTEGRATIONS_PER_FRAME
+        && (integrated == 0 || frame_integration_started.elapsed() < TERRAIN_INTEGRATION_BUDGET)
+    {
+        let Some(generated) = jobs.try_next() else {
+            break;
+        };
+        integrated += 1;
+        let integration_started = Instant::now();
+        let spec = generated.spec;
+        let terrain_generation_time = generated.terrain_generation_time;
+        let lake_generation_time = generated.lake_generation_time;
+        let expected = match spec {
+            TerrainMeshSpec::Near(spec) => requested.get(&spec.chunk) == Some(&spec),
+            TerrainMeshSpec::Far(spec) => requested_far.get(&spec.tile) == Some(&spec),
+        };
+        if !expected {
+            initial_generation.record_stale(terrain_generation_time, lake_generation_time);
+            continue;
+        }
+        let mesh = generated.mesh?;
+        let lake_mesh = generated.lake_mesh.transpose()?;
+        match spec {
             TerrainMeshSpec::Near(spec) => {
-                if requested.get(&spec.chunk) != Some(&spec) {
-                    continue;
-                }
                 requested.remove(&spec.chunk);
-                let lake_mesh = terrain.lake_surface_mesh(TerrainMeshSpec::Near(spec))?;
                 chunks.insert(
                     spec.chunk,
                     ResidentTerrainChunk {
                         spec,
-                        mesh: renderer.upload_mesh(device, &generated.mesh?)?,
-                        lake_mesh: (!lake_mesh.indices.is_empty())
-                            .then(|| renderer.upload_mesh(device, &lake_mesh))
+                        mesh: renderer.upload_mesh(device, &mesh)?,
+                        lake_mesh: lake_mesh
+                            .as_ref()
+                            .filter(|lake_mesh| !lake_mesh.indices.is_empty())
+                            .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
                             .transpose()?,
                     },
                 );
             }
             TerrainMeshSpec::Far(spec) => {
-                if requested_far.get(&spec.tile) != Some(&spec) {
-                    continue;
-                }
                 requested_far.remove(&spec.tile);
-                let lake_mesh = terrain.lake_surface_mesh(TerrainMeshSpec::Far(spec))?;
                 far_tiles.insert(
                     spec.tile,
                     ResidentFarTerrainTile {
                         spec,
-                        mesh: renderer.upload_mesh(device, &generated.mesh?)?,
-                        lake_mesh: (!lake_mesh.indices.is_empty())
-                            .then(|| renderer.upload_mesh(device, &lake_mesh))
+                        mesh: renderer.upload_mesh(device, &mesh)?,
+                        lake_mesh: lake_mesh
+                            .as_ref()
+                            .filter(|lake_mesh| !lake_mesh.indices.is_empty())
+                            .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
                             .transpose()?,
                     },
                 );
             }
         }
+        initial_generation.record_completion(
+            spec,
+            terrain_generation_time,
+            lake_generation_time,
+            integration_started.elapsed(),
+        );
     }
 
     schedule_terrain(
@@ -774,29 +1043,33 @@ fn schedule_terrain(
 
     for chunk in &chunk_plan.unload {
         chunks.remove(chunk);
-        requested.remove(chunk);
+        if let Some(spec) = requested.remove(chunk) {
+            jobs.cancel(TerrainMeshSpec::Near(spec));
+        }
     }
 
     let mut lod_counts = [0_usize; 3];
     for spec in &chunk_plan.load {
         let lod_index = usize::from(spec.lod.get() - ChunkIndex::NEAR_LOD.get());
         lod_counts[lod_index] += 1;
-        requested.insert(spec.chunk, *spec);
+        if let Some(previous) = requested.insert(spec.chunk, *spec) {
+            jobs.cancel(TerrainMeshSpec::Near(previous));
+        }
     }
 
-    let near_cutout =
-        NearTerrainCutout::around(chunk_plan.center, chunk_streamer.config().load_radius());
     let mut tracked_far = far_tiles
         .iter()
         .map(|(&tile, resident)| (tile, resident.spec))
         .collect::<BTreeMap<_, _>>();
     tracked_far.extend(requested_far.iter().map(|(&tile, &spec)| (tile, spec)));
     let far_plan = far_streamer
-        .plan(player_position, &tracked_far, near_cutout)
+        .plan(player_position, &tracked_far)
         .ok_or_else(|| std::io::Error::other("player position is outside far tile index range"))?;
     for tile in &far_plan.unload {
         far_tiles.remove(tile);
-        requested_far.remove(tile);
+        if let Some(spec) = requested_far.remove(tile) {
+            jobs.cancel(TerrainMeshSpec::Far(spec));
+        }
     }
     if let Some(spec) = chunk_plan
         .load
@@ -809,7 +1082,9 @@ fn schedule_terrain(
         );
     }
     for spec in &far_plan.load {
-        requested_far.insert(spec.tile, *spec);
+        if let Some(previous) = requested_far.insert(spec.tile, *spec) {
+            jobs.cancel(TerrainMeshSpec::Far(previous));
+        }
         let priority = if spec.tile.chebyshev_distance(far_plan.center)
             == far_streamer.config().load_radius()
         {
@@ -867,6 +1142,68 @@ fn u32_as_f32(value: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_generation_reports_horizon_far_and_near_separately() {
+        let near_spec = ChunkMeshSpec {
+            chunk: ChunkIndex::new(0, 0),
+            lod: ChunkIndex::NEAR_LOD,
+            transition_faces: treeline_voxel::TransitionFaces::none(),
+        };
+        let requested = BTreeMap::from([(near_spec.chunk, near_spec)]);
+        let horizon_spec = FarTerrainMeshSpec {
+            tile: FarTileIndex::new(1, 0),
+        };
+        let far_spec = FarTerrainMeshSpec {
+            tile: FarTileIndex::new(0, 0),
+        };
+        let requested_far =
+            BTreeMap::from([(horizon_spec.tile, horizon_spec), (far_spec.tile, far_spec)]);
+        let far_streamer =
+            FarTerrainStreamer::new(FarTerrainStreamingConfig::new(1, 1).expect("valid radii"));
+        let mut progress = InitialGenerationProgress::new(
+            Instant::now(),
+            Duration::ZERO,
+            &requested,
+            &requested_far,
+            far_streamer,
+            WorldPosition::new(0.0, 0.0, 0.0),
+        )
+        .expect("valid progress");
+
+        assert!(
+            progress
+                .title()
+                .contains("horizon 0/1 · far 0/1 · nearby 0/1")
+        );
+        for spec in [
+            TerrainMeshSpec::Far(horizon_spec),
+            TerrainMeshSpec::Far(far_spec),
+            TerrainMeshSpec::Near(near_spec),
+        ] {
+            progress.record_completion(spec, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        }
+
+        assert!(progress.finished_at.is_some());
+    }
+
+    #[test]
+    fn far_cutout_tracks_the_complete_near_residency_square() {
+        let streamer = ChunkStreamer::new(ChunkStreamingConfig::new(4, 5).expect("valid radii"));
+        let (min, max) =
+            far_cutout_bounds(streamer, WorldPosition::new(0.0, 0.0, 0.0)).expect("valid cutout");
+
+        assert!(
+            min.into_iter()
+                .zip([-128.0, -128.0])
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
+        assert!(
+            max.into_iter()
+                .zip([160.0, 160.0])
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
+    }
 
     #[test]
     fn twin_sticks_assign_left_to_movement_and_right_to_look() {

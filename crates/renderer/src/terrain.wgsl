@@ -5,6 +5,14 @@ struct Camera {
 @group(0) @binding(0)
 var<uniform> camera: Camera;
 
+struct TerrainCutout {
+    min_xz: vec2<f32>,
+    max_xz: vec2<f32>,
+};
+
+@group(0) @binding(1)
+var<uniform> terrain_cutout: TerrainCutout;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -50,6 +58,15 @@ fn value_noise(position: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    if (
+        input.world_position.x >= terrain_cutout.min_xz.x
+        && input.world_position.x < terrain_cutout.max_xz.x
+        && input.world_position.z >= terrain_cutout.min_xz.y
+        && input.world_position.z < terrain_cutout.max_xz.y
+    ) {
+        discard;
+    }
+
     let normal = normalize(input.world_normal);
     let slope = 1.0 - max(normal.y, 0.0);
     let grass = vec3<f32>(0.17, 0.34, 0.14);
