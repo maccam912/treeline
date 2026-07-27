@@ -2231,8 +2231,13 @@ The world generator is the game.
       trees, wind damage, fallen trees, standing deadwood, and storm breaks are
       deterministic; the client renders their generated trunks, branches, and
       crowns, and Generator Lab inspection explains nearby individuals.
-- [ ] **NEXT** — Surface rocks
-- [ ] Ground vegetation
+- [x] Surface rocks. Continuous geology-, erosion-, slope-, and soil-driven
+      rock distributions feed globally anchored rounded boulders, angular
+      blocks, weathered slabs, and scree fragments. Individuals have
+      deterministic scale, orientation, embedding, fracture, weathering, and
+      moss traits; the client renders their generated low-poly forms, and
+      Generator Lab maps the distribution and explains nearby individuals.
+- [ ] **NEXT** — Ground vegetation
 - [ ] **PARTIAL** — Snow. Climate generates seasonal snowfall, accumulation,
       permanent snowpack, and meltwater runoff, but terrain coverage and
       rendering remain.

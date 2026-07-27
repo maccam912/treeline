@@ -4,8 +4,11 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
-use treeline_ecology::{BarkStyle, CrownShape, ProceduralTree, TreeCondition, TreeFunctionalGroup};
+use glam::{Quat, Vec3};
+use treeline_ecology::{
+    BarkStyle, CrownShape, ProceduralTree, RockForm, SurfaceRock, TreeCondition,
+    TreeFunctionalGroup,
+};
 use treeline_mesher::Mesh;
 use wgpu::util::DeviceExt;
 
@@ -367,6 +370,42 @@ impl TerrainRenderer {
         })
     }
 
+    /// Builds and uploads deterministic surface rocks as one independently owned mesh.
+    ///
+    /// Rock bases are resolved against the composed world surface supplied by
+    /// the caller. Individuals without a surface sample are omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RendererError::TooManyIndices`] when the generated rock mesh
+    /// exceeds `u32` vertex or draw addressing.
+    pub fn upload_rocks(
+        &self,
+        device: &wgpu::Device,
+        rocks: &[SurfaceRock],
+        surface_height: impl FnMut(f64, f64) -> Option<f64>,
+    ) -> Result<TerrainMesh, RendererError> {
+        let (vertices, indices) = procedural_rock_geometry(rocks, surface_height)?;
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("surface rock vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("surface rock indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let index_count =
+            u32::try_from(indices.len()).map_err(|_| RendererError::TooManyIndices)?;
+
+        Ok(TerrainMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count,
+        })
+    }
+
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth = DepthTarget::new(device, width, height);
     }
@@ -455,6 +494,187 @@ fn procedural_tree_geometry(
         )?;
     }
     Ok((vertices, indices))
+}
+
+fn procedural_rock_geometry(
+    rocks: &[SurfaceRock],
+    mut surface_height: impl FnMut(f64, f64) -> Option<f64>,
+) -> Result<(Vec<TerrainVertex>, Vec<u32>), RendererError> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for rock in rocks {
+        let Some(surface_y) = surface_height(rock.x, rock.z) else {
+            continue;
+        };
+        append_surface_rock(&mut vertices, &mut indices, *rock, f64_as_f32(surface_y))?;
+    }
+    Ok((vertices, indices))
+}
+
+fn append_surface_rock(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    rock: SurfaceRock,
+    surface_y: f32,
+) -> Result<(), RendererError> {
+    const SIDES: usize = 8;
+    const RINGS: [(f32, f32); 3] = [(-0.62, 0.76), (-0.04, 1.0), (0.52, 0.70)];
+
+    let radii = Vec3::new(
+        f64_as_f32(rock.radii_meters[0]),
+        f64_as_f32(rock.radii_meters[1]),
+        f64_as_f32(rock.radii_meters[2]),
+    );
+    let center = Vec3::new(
+        f64_as_f32(rock.x),
+        surface_y + (radii.y * (1.0 - f64_as_f32(rock.embedded_fraction))),
+        f64_as_f32(rock.z),
+    );
+    let yaw = Quat::from_rotation_y(f64_as_f32(rock.rotation_turns) * std::f32::consts::TAU);
+    let tilt_axis = Vec3::new(
+        f64_as_f32(rock.tilt_direction[1]),
+        0.0,
+        -f64_as_f32(rock.tilt_direction[0]),
+    )
+    .normalize_or_zero();
+    let tilt = Quat::from_axis_angle(
+        tilt_axis,
+        f64_as_f32(rock.tilt_fraction) * std::f32::consts::FRAC_PI_2,
+    );
+    let rotation = tilt * yaw;
+    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
+    push_rock_vertex(
+        vertices,
+        rock,
+        center,
+        rotation,
+        Vec3::new(0.0, -radii.y, 0.0),
+        0,
+    );
+    for (ring_index, &(height_fraction, radius_fraction)) in RINGS.iter().enumerate() {
+        for side in 0..SIDES {
+            let angle = usize_as_f32(side) / usize_as_f32(SIDES) * std::f32::consts::TAU;
+            let irregularity = rock_irregularity(rock, ring_index, side);
+            let horizontal_scale = radius_fraction * irregularity;
+            let local = Vec3::new(
+                libm::cosf(angle) * radii.x * horizontal_scale,
+                radii.y * height_fraction,
+                libm::sinf(angle) * radii.z * horizontal_scale,
+            );
+            push_rock_vertex(
+                vertices,
+                rock,
+                center,
+                rotation,
+                local,
+                1 + (ring_index * SIDES) + side,
+            );
+        }
+    }
+    let top_ordinal = 1 + (RINGS.len() * SIDES);
+    push_rock_vertex(
+        vertices,
+        rock,
+        center,
+        rotation,
+        Vec3::new(0.0, radii.y, 0.0),
+        top_ordinal,
+    );
+
+    let first_ring = base_index + 1;
+    for side in 0..SIDES {
+        let next = (side + 1) % SIDES;
+        indices.extend_from_slice(&[
+            base_index,
+            first_ring + usize_as_u32(next)?,
+            first_ring + usize_as_u32(side)?,
+        ]);
+    }
+    for ring in 0..(RINGS.len() - 1) {
+        let lower = first_ring + usize_as_u32(ring * SIDES)?;
+        let upper = lower + usize_as_u32(SIDES)?;
+        for side in 0..SIDES {
+            let next = (side + 1) % SIDES;
+            let side = usize_as_u32(side)?;
+            let next = usize_as_u32(next)?;
+            indices.extend_from_slice(&[
+                lower + side,
+                lower + next,
+                upper + side,
+                lower + next,
+                upper + next,
+                upper + side,
+            ]);
+        }
+    }
+    let last_ring = first_ring + usize_as_u32((RINGS.len() - 1) * SIDES)?;
+    let top = base_index + usize_as_u32(top_ordinal)?;
+    for side in 0..SIDES {
+        let next = (side + 1) % SIDES;
+        indices.extend_from_slice(&[
+            last_ring + usize_as_u32(side)?,
+            last_ring + usize_as_u32(next)?,
+            top,
+        ]);
+    }
+    Ok(())
+}
+
+fn push_rock_vertex(
+    vertices: &mut Vec<TerrainVertex>,
+    rock: SurfaceRock,
+    center: Vec3,
+    rotation: Quat,
+    local: Vec3,
+    ordinal: usize,
+) {
+    let normalized = Vec3::new(
+        local.x / f64_as_f32(rock.radii_meters[0]),
+        local.y / f64_as_f32(rock.radii_meters[1]),
+        local.z / f64_as_f32(rock.radii_meters[2]),
+    )
+    .normalize_or_zero();
+    vertices.push(TerrainVertex {
+        position: (center + (rotation * local)).to_array(),
+        normal: (rotation * normalized).to_array(),
+        color: rock_color(rock, ordinal),
+    });
+}
+
+fn rock_irregularity(rock: SurfaceRock, ring: usize, side: usize) -> f32 {
+    let lane = ring * 3 + side;
+    let variation = hash_lane(
+        rock.id.rotate_left(u32::try_from(ring * 7).unwrap_or(0)),
+        lane,
+    ) - 0.5;
+    let angularity = 1.0 - f64_as_f32(rock.genotype.roundness_fraction);
+    let fracture = f64_as_f32(rock.genotype.fracture_fraction);
+    1.0 + (variation * ((angularity * 0.34) + (fracture * 0.12)))
+}
+
+fn rock_color(rock: SurfaceRock, ordinal: usize) -> [f32; 4] {
+    let hardness = f64_as_f32(rock.genotype.hardness_fraction);
+    let carbonate = f64_as_f32(rock.genotype.carbonate_fraction);
+    let weathering = f64_as_f32(rock.genotype.weathering_fraction);
+    let moss = f64_as_f32(rock.moss_fraction);
+    let form_tint = match rock.genotype.form {
+        RockForm::RoundedBoulder => [0.02, 0.025, 0.02],
+        RockForm::AngularBlock => [-0.025, -0.02, -0.01],
+        RockForm::Slab => [0.055, 0.05, 0.035],
+        RockForm::ScreeFragment => [-0.01, -0.005, 0.0],
+    };
+    let variation = (hash_lane(rock.id.rotate_right(13), ordinal) - 0.5) * 0.08;
+    let mineral = [
+        0.34 + (carbonate * 0.28) + (weathering * 0.10) + form_tint[0],
+        0.35 + (carbonate * 0.26) + (weathering * 0.055) + form_tint[1],
+        0.36 + (hardness * 0.12) + (carbonate * 0.19) - (weathering * 0.025) + form_tint[2],
+    ];
+    [
+        (mineral[0] + variation - (moss * 0.15)).clamp(0.0, 1.0),
+        (mineral[1] + variation + (moss * 0.035)).clamp(0.0, 1.0),
+        (mineral[2] + variation - (moss * 0.12)).clamp(0.0, 1.0),
+        1.0,
+    ]
 }
 
 fn append_tree(
@@ -915,6 +1135,10 @@ fn usize_as_f32(value: usize) -> f32 {
     value as f32
 }
 
+fn usize_as_u32(value: usize) -> Result<u32, RendererError> {
+    u32::try_from(value).map_err(|_| RendererError::TooManyIndices)
+}
+
 #[derive(Debug)]
 struct DepthTarget {
     view: wgpu::TextureView,
@@ -995,6 +1219,61 @@ mod tests {
                 && vertex.normal.into_iter().all(f32::is_finite)
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
+    }
+
+    #[test]
+    fn surface_rocks_build_well_formed_irregular_colored_geometry() {
+        let rocks = [
+            rock_fixture(10, RockForm::RoundedBoulder),
+            rock_fixture(20, RockForm::AngularBlock),
+            rock_fixture(30, RockForm::Slab),
+            rock_fixture(40, RockForm::ScreeFragment),
+        ];
+        let (vertices, indices) =
+            procedural_rock_geometry(&rocks, |x, z| Some((x - z) * 0.01)).expect("rock geometry");
+
+        assert!(!vertices.is_empty());
+        assert!(!indices.is_empty());
+        assert!(indices.len().is_multiple_of(3));
+        assert!(
+            indices
+                .iter()
+                .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
+        );
+        assert!(vertices.iter().all(|vertex| {
+            vertex.position.into_iter().all(f32::is_finite)
+                && vertex.normal.into_iter().all(f32::is_finite)
+                && vertex.color[..3]
+                    .iter()
+                    .all(|channel| (0.0..=1.0).contains(channel))
+                && (vertex.color[3] - 1.0).abs() < f32::EPSILON
+        }));
+    }
+
+    fn rock_fixture(id: u64, form: RockForm) -> SurfaceRock {
+        SurfaceRock {
+            id,
+            x: f64::from(u32::try_from(id).expect("small fixture id")),
+            z: -8.0,
+            radii_meters: [1.2, 0.8, 1.0],
+            rotation_turns: 0.27,
+            tilt_direction: [0.8, 0.6],
+            tilt_fraction: 0.12,
+            embedded_fraction: 0.22,
+            moss_fraction: 0.34,
+            genotype: treeline_ecology::RockGenotype {
+                form,
+                hardness_fraction: 0.72,
+                weathering_fraction: 0.46,
+                fracture_fraction: 0.58,
+                roundness_fraction: if form == RockForm::RoundedBoulder {
+                    0.88
+                } else {
+                    0.24
+                },
+                carbonate_fraction: 0.36,
+            },
+        }
     }
 
     fn tree_fixture(

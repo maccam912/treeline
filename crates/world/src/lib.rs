@@ -12,7 +12,7 @@ use std::sync::{Condvar, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
 
-use treeline_coordinates::{DETERMINISTIC_MATH_GENERATOR_VERSION, WorldIdentity, WorldPosition};
+use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
 use treeline_hydrology::{
     GullyNetwork, GullyTerrainInfluence, Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
@@ -31,7 +31,7 @@ pub const LAKE_GENERATOR_VERSION: u32 = 4;
 /// Generator version that first composes macro, meso, and micro erosion.
 pub const EROSION_GENERATOR_VERSION: u32 = 5;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = DETERMINISTIC_MATH_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = 12;
 
 /// Equilibrium lake water at one horizontal world position.
 #[derive(Clone, Copy, Debug, PartialEq)]
