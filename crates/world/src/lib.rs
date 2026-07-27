@@ -1247,6 +1247,7 @@ const FAR_FOREST_MIN_CELL_VISIBILITY: f64 = 0.04;
 
 #[derive(Clone, Copy, Debug)]
 struct FarForestCanopySample {
+    ground_meters: f64,
     top_meters: f64,
     visibility: f64,
     color: [f32; 4],
@@ -1307,7 +1308,7 @@ fn far_forest_canopy_mesh(
     }
 
     let vertices_per_edge = FAR_FOREST_CELLS_PER_EDGE + 1;
-    let mut indices = Vec::with_capacity(FAR_FOREST_CELLS_PER_EDGE.pow(2) * 6);
+    let mut indices = Vec::with_capacity(FAR_FOREST_CELLS_PER_EDGE.pow(2) * 18);
     for z in 0..FAR_FOREST_CELLS_PER_EDGE {
         for x in 0..FAR_FOREST_CELLS_PER_EDGE {
             let top_left = z * vertices_per_edge + x;
@@ -1332,6 +1333,23 @@ fn far_forest_canopy_mesh(
                 u32::try_from(bottom_left).map_err(|_| MeshingError::TooManyVertices)?,
                 u32::try_from(bottom_right).map_err(|_| MeshingError::TooManyVertices)?,
             ]);
+            append_far_forest_cluster(
+                &mut positions,
+                &mut normals,
+                &mut colors,
+                &mut indices,
+                [
+                    origin_x + ((usize_as_f64(x) + 0.5) * spacing),
+                    origin_z + ((usize_as_f64(z) + 0.5) * spacing),
+                ],
+                spacing,
+                [
+                    canopy_grid_sample(&samples, bordered_count, x + 1, z + 1),
+                    canopy_grid_sample(&samples, bordered_count, x + 1, z + 2),
+                    canopy_grid_sample(&samples, bordered_count, x + 2, z + 1),
+                    canopy_grid_sample(&samples, bordered_count, x + 2, z + 2),
+                ],
+            )?;
         }
     }
 
@@ -1352,6 +1370,66 @@ fn canopy_grid_sample(
     samples[(z * stride) + x]
 }
 
+fn append_far_forest_cluster(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    colors: &mut Vec<[f32; 4]>,
+    indices: &mut Vec<u32>,
+    center: [f64; 2],
+    spacing: f64,
+    samples: [FarForestCanopySample; 4],
+) -> Result<(), MeshingError> {
+    let average = |sample: fn(FarForestCanopySample) -> f64| {
+        samples.into_iter().map(sample).sum::<f64>() / 4.0
+    };
+    let ground = average(|sample| sample.ground_meters);
+    let top = average(|sample| sample.top_meters);
+    let visibility = average(|sample| sample.visibility);
+    let height = top - ground;
+    if visibility < FAR_FOREST_MIN_CELL_VISIBILITY || height <= 0.5 {
+        return Ok(());
+    }
+    let color = [0, 1, 2, 3].map(|channel| {
+        samples
+            .into_iter()
+            .map(|sample| sample.color[channel])
+            .sum::<f32>()
+            / 4.0
+    });
+    let half_width = spacing * (0.14 + (visibility * 0.08));
+    let crown_bottom = ground + (height * 0.12);
+    for (x_axis, z_axis, normal) in [
+        (1.0, 0.0, normalize_f32([0.0, 0.28, 1.0])),
+        (0.0, 1.0, normalize_f32([1.0, 0.28, 0.0])),
+    ] {
+        let vertex_offset =
+            u32::try_from(positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
+        for [lateral, elevation, taper] in [
+            [-1.0, crown_bottom, 1.0],
+            [1.0, crown_bottom, 1.0],
+            [-1.0, top, 0.38],
+            [1.0, top, 0.38],
+        ] {
+            positions.push([
+                f64_as_f32(center[0] + (x_axis * lateral * half_width * taper)),
+                f64_as_f32(elevation),
+                f64_as_f32(center[1] + (z_axis * lateral * half_width * taper)),
+            ]);
+            normals.push(normal);
+            colors.push(color);
+        }
+        indices.extend([
+            vertex_offset,
+            vertex_offset + 1,
+            vertex_offset + 2,
+            vertex_offset + 2,
+            vertex_offset + 1,
+            vertex_offset + 3,
+        ]);
+    }
+    Ok(())
+}
+
 fn far_forest_canopy_sample(
     terrain: &GeneratedWorldTerrain,
     forest: ForestDistribution,
@@ -1363,6 +1441,7 @@ fn far_forest_canopy_sample(
         .ok_or(MeshingError::MissingSurface)?;
     let Some(sample) = forest.sample(x, z) else {
         return Ok(FarForestCanopySample {
+            ground_meters: ground,
             top_meters: ground,
             visibility: 0.0,
             color: [0.0, 0.0, 0.0, 1.0],
@@ -1385,6 +1464,7 @@ fn far_forest_canopy_sample(
         0.0
     };
     Ok(FarForestCanopySample {
+        ground_meters: ground,
         top_meters: ground + canopy_height,
         visibility,
         color: far_forest_color(sample),
@@ -2162,6 +2242,21 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.is_well_formed());
         assert!(!first.indices.is_empty());
+        let canopy_vertex_count = (FAR_FOREST_CELLS_PER_EDGE + 1).pow(2);
+        let cluster_vertices = &first.positions[canopy_vertex_count..];
+        assert!(!cluster_vertices.is_empty());
+        assert_eq!(cluster_vertices.len() % 8, 0);
+        assert!(cluster_vertices.chunks_exact(4).any(|plane| {
+            let min_y = plane
+                .iter()
+                .map(|position| position[1])
+                .fold(f32::INFINITY, f32::min);
+            let max_y = plane
+                .iter()
+                .map(|position| position[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            max_y - min_y > 2.0
+        }));
         assert!(
             first
                 .colors
@@ -2199,7 +2294,7 @@ mod tests {
         words.extend(first.indices.iter().copied().map(u64::from));
         assert_eq!(
             stable_hash(&words),
-            1_115_843_523_164_616_057,
+            1_494_894_597_164_811_862,
             "changing this value changes the far-forest render contract"
         );
     }
