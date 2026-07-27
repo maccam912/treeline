@@ -75,6 +75,9 @@ utilities crate.
 
 - Work directly on `main`; do not create feature branches unless the user
   explicitly asks for one.
+- Use plain `git`, not the GitHub CLI (`gh`), for commit and push operations.
+  When the user asks to commit and push, commit and push directly on `main`
+  unless they explicitly request a different branch or pull-request workflow.
 - Build only machinery required by this game. Do not add a generic scene graph,
   scripting runtime, editor framework, plugin system, or reusable game engine.
 - Prefer functional sampling APIs such as `terrain.sample(position)` and

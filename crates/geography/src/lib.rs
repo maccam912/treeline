@@ -214,7 +214,9 @@ impl Climate {
     /// Version 7 adds a broad repeating latitude-like field and fixed
     /// world-space macro-elevation samples as an explainable ocean-proximity
     /// proxy. Wind normalization and all latitude, continentality, and
-    /// seasonal `f64` operations are part of the generation contract.
+    /// seasonal `f64` operations are part of the generation contract. Wind
+    /// normalization deliberately uses the same explicitly sequenced square
+    /// root on every target rather than the platform `hypot` implementation.
     pub fn sample(self, x: f64, z: f64) -> Option<ClimateSample> {
         let profile = RegionalProfile::sample(self.world, x, z)?;
         let elevation_meters = MacroElevation::new(self.world)
@@ -1060,7 +1062,9 @@ fn snow_cycle(
 fn prevailing_wind(world: WorldIdentity, x: f64, z: f64) -> Option<[f64; 2]> {
     let wind_x = (value_field(world, DOMAIN_WIND_X, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
     let wind_z = (value_field(world, DOMAIN_WIND_Z, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
-    let length = wind_x.hypot(wind_z);
+    // Keep these operations separate and ordered. `f64::hypot` may use
+    // platform-specific implementations whose last-bit rounding differs.
+    let length = f64::sqrt((wind_x * wind_x) + (wind_z * wind_z));
     if length <= 0.000_001 {
         return Some([1.0, 0.0]);
     }
