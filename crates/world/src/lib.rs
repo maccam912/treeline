@@ -13,6 +13,7 @@ use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::{WorldIdentity, WorldPosition};
+use treeline_ecology::{ForestDistribution, ForestSample, TreeFunctionalGroup};
 use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
 use treeline_hydrology::{
     GullyNetwork, GullyTerrainInfluence, Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
@@ -211,6 +212,32 @@ impl GeneratedWorldTerrain {
             }
         };
         lake_surface_grid(self, grid)
+    }
+
+    /// Builds the visible terrain representation, including the coarse forest
+    /// canopy used beyond individual-tree residency.
+    ///
+    /// The canopy is render-only. It never changes terrain density, collision,
+    /// hydrology, persistence, or the deterministic locations of individual
+    /// trees.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MeshingError`] when the requested terrain LOD is unsupported,
+    /// a surface sample is unavailable, or the combined mesh exceeds index
+    /// capacity.
+    pub fn render_mesh(&self, spec: TerrainMeshSpec) -> Result<Mesh, MeshingError> {
+        match spec {
+            TerrainMeshSpec::Near(spec) => {
+                transvoxel_chunk(self, spec.chunk, spec.lod, spec.transition_faces)
+            }
+            TerrainMeshSpec::Far(spec) => {
+                let mut terrain = far_terrain_mesh(self, spec)?;
+                let canopy = far_forest_canopy_mesh(self, spec)?;
+                append_mesh(&mut terrain, canopy)?;
+                Ok(terrain)
+            }
+        }
     }
 
     /// Reports all three erosion scales at a horizontal position.
@@ -474,6 +501,7 @@ pub struct GeneratedTerrainMesh {
 }
 
 type LakeMeshGenerator<F> = fn(&F, TerrainMeshSpec) -> Result<Mesh, MeshingError>;
+type TerrainMeshGenerator<F> = fn(&F, TerrainMeshSpec) -> Result<Mesh, MeshingError>;
 
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_TERRAIN_MESH_CACHE_BYTES: usize = 192 * 1024 * 1024;
@@ -608,6 +636,8 @@ pub struct TerrainMeshQueue<F> {
     #[cfg(target_arch = "wasm32")]
     field: F,
     #[cfg(target_arch = "wasm32")]
+    terrain_mesh_generator: Option<TerrainMeshGenerator<F>>,
+    #[cfg(target_arch = "wasm32")]
     lake_mesh_generator: Option<LakeMeshGenerator<F>>,
     #[cfg(target_arch = "wasm32")]
     pending: BinaryHeap<Reverse<QueuedTerrainMesh>>,
@@ -630,27 +660,41 @@ where
     /// The player client instead uses independent message-passing Wasm workers,
     /// which do not require shared-memory response headers.
     pub fn new(field: F) -> Self {
-        Self::with_optional_lake_mesh(field, None)
+        Self::with_optional_mesh_generators(field, None, None)
     }
 
     /// Starts terrain workers that also build the separate equilibrium-lake
     /// surface associated with each terrain mesh.
     pub fn with_lake_mesh(field: F, generator: LakeMeshGenerator<F>) -> Self {
-        Self::with_optional_lake_mesh(field, Some(generator))
+        Self::with_optional_mesh_generators(field, None, Some(generator))
     }
 
-    fn with_optional_lake_mesh(field: F, generator: Option<LakeMeshGenerator<F>>) -> Self {
+    fn with_optional_mesh_generators(
+        field: F,
+        terrain_mesh_generator: Option<TerrainMeshGenerator<F>>,
+        lake_mesh_generator: Option<LakeMeshGenerator<F>>,
+    ) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let available = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
             let worker_count =
                 NonZeroUsize::new(available.get().saturating_sub(1)).unwrap_or(NonZeroUsize::MIN);
-            Self::with_worker_count_and_lake_mesh(field, worker_count, generator)
+            Self::with_worker_count_and_mesh_generators(
+                field,
+                worker_count,
+                terrain_mesh_generator,
+                lake_mesh_generator,
+            )
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            Self::with_worker_count_and_lake_mesh(field, NonZeroUsize::MIN, generator)
+            Self::with_worker_count_and_mesh_generators(
+                field,
+                NonZeroUsize::MIN,
+                terrain_mesh_generator,
+                lake_mesh_generator,
+            )
         }
     }
 
@@ -658,18 +702,20 @@ where
     ///
     /// Browser builds ignore `worker_count` and use their incremental queue.
     pub fn with_worker_count(field: F, worker_count: NonZeroUsize) -> Self {
-        Self::with_worker_count_and_lake_mesh(field, worker_count, None)
+        Self::with_worker_count_and_mesh_generators(field, worker_count, None, None)
     }
 
-    fn with_worker_count_and_lake_mesh(
+    fn with_worker_count_and_mesh_generators(
         field: F,
         worker_count: NonZeroUsize,
+        terrain_mesh_generator: Option<TerrainMeshGenerator<F>>,
         lake_mesh_generator: Option<LakeMeshGenerator<F>>,
     ) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let shared = Arc::new(QueueState {
                 field,
+                terrain_mesh_generator,
                 lake_mesh_generator,
                 pending: Mutex::new(PendingJobs::default()),
                 cache: Mutex::new(TerrainMeshCache::new(DEFAULT_TERRAIN_MESH_CACHE_BYTES)),
@@ -698,6 +744,7 @@ where
             let _ = worker_count;
             Self {
                 field,
+                terrain_mesh_generator,
                 lake_mesh_generator,
                 pending: BinaryHeap::new(),
                 cache: TerrainMeshCache::new(DEFAULT_TERRAIN_MESH_CACHE_BYTES),
@@ -865,6 +912,7 @@ where
             let Reverse(job) = self.pending.pop()?;
             let generated = generate_terrain_mesh(
                 &self.field,
+                self.terrain_mesh_generator,
                 self.lake_mesh_generator,
                 job.priority,
                 job.spec,
@@ -873,6 +921,18 @@ where
             self.yield_after_mesh = true;
             Some(generated)
         }
+    }
+}
+
+impl TerrainMeshQueue<GeneratedWorldTerrain> {
+    /// Starts the player-world queue with terrain, lake, and distant-forest
+    /// render representations generated on the same worker threads.
+    pub fn for_generated_world(field: GeneratedWorldTerrain) -> Self {
+        Self::with_optional_mesh_generators(
+            field,
+            Some(GeneratedWorldTerrain::render_mesh),
+            Some(GeneratedWorldTerrain::lake_surface_mesh),
+        )
     }
 }
 
@@ -901,6 +961,7 @@ impl<F> Drop for TerrainMeshQueue<F> {
 #[derive(Debug)]
 struct QueueState<F> {
     field: F,
+    terrain_mesh_generator: Option<TerrainMeshGenerator<F>>,
     lake_mesh_generator: Option<LakeMeshGenerator<F>>,
     pending: Mutex<PendingJobs>,
     cache: Mutex<TerrainMeshCache>,
@@ -950,6 +1011,7 @@ where
         };
         let generated = generate_terrain_mesh(
             &shared.field,
+            shared.terrain_mesh_generator,
             shared.lake_mesh_generator,
             job.priority,
             job.spec,
@@ -973,6 +1035,7 @@ where
 
 fn generate_terrain_mesh<F>(
     field: &F,
+    terrain_mesh_generator: Option<TerrainMeshGenerator<F>>,
     lake_mesh_generator: Option<LakeMeshGenerator<F>>,
     priority: GenerationPriority,
     spec: TerrainMeshSpec,
@@ -981,12 +1044,15 @@ where
     F: DensityField + SurfaceField,
 {
     let terrain_started = Instant::now();
-    let mesh = match spec {
-        TerrainMeshSpec::Far(spec) => far_terrain_mesh(field, spec),
-        TerrainMeshSpec::Near(spec) => {
-            transvoxel_chunk(field, spec.chunk, spec.lod, spec.transition_faces)
-        }
-    };
+    let mesh = terrain_mesh_generator.map_or_else(
+        || match spec {
+            TerrainMeshSpec::Far(spec) => far_terrain_mesh(field, spec),
+            TerrainMeshSpec::Near(spec) => {
+                transvoxel_chunk(field, spec.chunk, spec.lod, spec.transition_faces)
+            }
+        },
+        |generator| generator(field, spec),
+    );
     let terrain_generation_time = terrain_started.elapsed();
     let lake_started = Instant::now();
     let lake_mesh = lake_mesh_generator.map(|generator| generator(field, spec));
@@ -1016,6 +1082,7 @@ pub fn generate_world_terrain_mesh(
 ) -> GeneratedTerrainMesh {
     generate_terrain_mesh(
         field,
+        Some(GeneratedWorldTerrain::render_mesh),
         Some(GeneratedWorldTerrain::lake_surface_mesh),
         priority,
         spec,
@@ -1173,6 +1240,227 @@ fn far_terrain_mesh(
     spec: FarTerrainMeshSpec,
 ) -> Result<Mesh, MeshingError> {
     surface_grid(field, spec.surface_grid())
+}
+
+const FAR_FOREST_CELLS_PER_EDGE: usize = 16;
+const FAR_FOREST_MIN_CELL_VISIBILITY: f64 = 0.04;
+
+#[derive(Clone, Copy, Debug)]
+struct FarForestCanopySample {
+    top_meters: f64,
+    visibility: f64,
+    color: [f32; 4],
+}
+
+fn far_forest_canopy_mesh(
+    terrain: &GeneratedWorldTerrain,
+    spec: FarTerrainMeshSpec,
+) -> Result<Mesh, MeshingError> {
+    let (origin_x, origin_z) = spec.tile.origin();
+    let spacing = FarTileIndex::edge_meters() / usize_as_f64(FAR_FOREST_CELLS_PER_EDGE);
+    let bordered_count = FAR_FOREST_CELLS_PER_EDGE
+        .checked_add(3)
+        .ok_or(MeshingError::GridTooLarge)?;
+    let sample_count = bordered_count
+        .checked_mul(bordered_count)
+        .ok_or(MeshingError::GridTooLarge)?;
+    let forest = ForestDistribution::new(terrain.world());
+    let mut samples = Vec::with_capacity(sample_count);
+    for z in 0..bordered_count {
+        let world_z = origin_z + ((usize_as_f64(z) - 1.0) * spacing);
+        for x in 0..bordered_count {
+            let world_x = origin_x + ((usize_as_f64(x) - 1.0) * spacing);
+            samples.push(far_forest_canopy_sample(terrain, forest, world_x, world_z)?);
+        }
+    }
+
+    let vertex_count = FAR_FOREST_CELLS_PER_EDGE
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(count))
+        .ok_or(MeshingError::GridTooLarge)?;
+    let mut positions = Vec::with_capacity(vertex_count);
+    let mut normals = Vec::with_capacity(vertex_count);
+    let mut colors = Vec::with_capacity(vertex_count);
+    let mut visibility = Vec::with_capacity(vertex_count);
+    for z in 0..=FAR_FOREST_CELLS_PER_EDGE {
+        let world_z = origin_z + (usize_as_f64(z) * spacing);
+        for x in 0..=FAR_FOREST_CELLS_PER_EDGE {
+            let world_x = origin_x + (usize_as_f64(x) * spacing);
+            let center = canopy_grid_sample(&samples, bordered_count, x + 1, z + 1);
+            let low_x = canopy_grid_sample(&samples, bordered_count, x, z + 1);
+            let high_x = canopy_grid_sample(&samples, bordered_count, x + 2, z + 1);
+            let low_z = canopy_grid_sample(&samples, bordered_count, x + 1, z);
+            let high_z = canopy_grid_sample(&samples, bordered_count, x + 1, z + 2);
+            positions.push([
+                f64_as_f32(world_x),
+                f64_as_f32(center.top_meters),
+                f64_as_f32(world_z),
+            ]);
+            normals.push(normalize_f32([
+                f64_as_f32(low_x.top_meters - high_x.top_meters),
+                f64_as_f32(2.0 * spacing),
+                f64_as_f32(low_z.top_meters - high_z.top_meters),
+            ]));
+            colors.push(center.color);
+            visibility.push(center.visibility);
+        }
+    }
+
+    let vertices_per_edge = FAR_FOREST_CELLS_PER_EDGE + 1;
+    let mut indices = Vec::with_capacity(FAR_FOREST_CELLS_PER_EDGE.pow(2) * 6);
+    for z in 0..FAR_FOREST_CELLS_PER_EDGE {
+        for x in 0..FAR_FOREST_CELLS_PER_EDGE {
+            let top_left = z * vertices_per_edge + x;
+            let bottom_left = top_left + vertices_per_edge;
+            let top_right = top_left + 1;
+            let bottom_right = bottom_left + 1;
+            let cell_visibility = [
+                visibility[top_left],
+                visibility[bottom_left],
+                visibility[top_right],
+                visibility[bottom_right],
+            ];
+            let average_visibility = cell_visibility.into_iter().sum::<f64>() / 4.0;
+            if average_visibility < FAR_FOREST_MIN_CELL_VISIBILITY {
+                continue;
+            }
+            indices.extend([
+                u32::try_from(top_left).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(bottom_left).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(top_right).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(top_right).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(bottom_left).map_err(|_| MeshingError::TooManyVertices)?,
+                u32::try_from(bottom_right).map_err(|_| MeshingError::TooManyVertices)?,
+            ]);
+        }
+    }
+
+    Ok(Mesh {
+        positions,
+        normals,
+        colors,
+        indices,
+    })
+}
+
+fn canopy_grid_sample(
+    samples: &[FarForestCanopySample],
+    stride: usize,
+    x: usize,
+    z: usize,
+) -> FarForestCanopySample {
+    samples[(z * stride) + x]
+}
+
+fn far_forest_canopy_sample(
+    terrain: &GeneratedWorldTerrain,
+    forest: ForestDistribution,
+    x: f64,
+    z: f64,
+) -> Result<FarForestCanopySample, MeshingError> {
+    let ground = terrain
+        .surface_height(x, z)
+        .ok_or(MeshingError::MissingSurface)?;
+    let Some(sample) = forest.sample(x, z) else {
+        return Ok(FarForestCanopySample {
+            top_meters: ground,
+            visibility: 0.0,
+            color: [0.0, 0.0, 0.0, 1.0],
+        });
+    };
+    let flooded = terrain
+        .lake_surface_at(x, z)
+        .is_some_and(|water| water.water_depth_meters > 0.15);
+    let in_river_channel = terrain
+        .river_influence_at(x, z)
+        .is_some_and(|river| river.distance_meters <= river.channel_half_width_meters);
+    let visibility = if flooded || in_river_channel {
+        0.0
+    } else {
+        ((sample.canopy_cover_fraction - 0.03) / 0.50).clamp(0.0, 1.0)
+    };
+    let canopy_height = if visibility > 0.0 {
+        0.3 + (sample.mean_canopy_height_meters * (0.72 + (visibility * 0.28)))
+    } else {
+        0.0
+    };
+    Ok(FarForestCanopySample {
+        top_meters: ground + canopy_height,
+        visibility,
+        color: far_forest_color(sample),
+    })
+}
+
+fn far_forest_color(sample: ForestSample) -> [f32; 4] {
+    let composition = sample.composition;
+    let colors = [
+        (
+            composition.fraction(TreeFunctionalGroup::EvergreenNeedleleaf),
+            [0.045_f64, 0.20, 0.095],
+        ),
+        (
+            composition.fraction(TreeFunctionalGroup::ColdDeciduous),
+            [0.19_f64, 0.34, 0.095],
+        ),
+        (
+            composition.fraction(TreeFunctionalGroup::TemperateBroadleaf),
+            [0.075_f64, 0.30, 0.065],
+        ),
+        (
+            composition.fraction(TreeFunctionalGroup::DryWoodland),
+            [0.28_f64, 0.32, 0.10],
+        ),
+    ];
+    let mut color = [0.0_f64; 3];
+    for (weight, group_color) in colors {
+        for channel in 0..3 {
+            color[channel] += weight * group_color[channel];
+        }
+    }
+    let age = (sample.stand_age_years / 180.0).clamp(0.0, 1.0);
+    let disturbance = sample.disturbance_severity;
+    let brightness = 0.84 + (age * 0.12) + (disturbance * 0.10);
+    [
+        f64_as_f32((color[0] * brightness).clamp(0.0, 1.0)),
+        f64_as_f32((color[1] * brightness).clamp(0.0, 1.0)),
+        f64_as_f32((color[2] * brightness).clamp(0.0, 1.0)),
+        1.0,
+    ]
+}
+
+fn append_mesh(target: &mut Mesh, appended: Mesh) -> Result<(), MeshingError> {
+    let vertex_offset =
+        u32::try_from(target.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
+    if target.colors.is_empty() {
+        target
+            .colors
+            .resize(target.positions.len(), [1.0, 1.0, 1.0, 0.0]);
+    }
+    target.positions.extend(appended.positions);
+    target.normals.extend(appended.normals);
+    target.colors.extend(appended.colors);
+    target.indices.extend(
+        appended
+            .indices
+            .into_iter()
+            .map(|index| {
+                index
+                    .checked_add(vertex_offset)
+                    .ok_or(MeshingError::TooManyVertices)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(())
+}
+
+fn normalize_f32(vector: [f32; 3]) -> [f32; 3] {
+    let length =
+        libm::sqrtf((vector[0] * vector[0]) + (vector[1] * vector[1]) + (vector[2] * vector[2]));
+    if length > 0.0 {
+        [vector[0] / length, vector[1] / length, vector[2] / length]
+    } else {
+        [0.0, 1.0, 0.0]
+    }
 }
 
 /// Validated far-terrain residency radii measured in 2,048-meter tiles.
@@ -1822,9 +2110,10 @@ mod tests {
             lod: ChunkIndex::MAX_LOD,
             transition_faces: TransitionFaces::none(),
         };
-        let mut queue = TerrainMeshQueue::with_worker_count_and_lake_mesh(
+        let mut queue = TerrainMeshQueue::with_worker_count_and_mesh_generators(
             terrain,
             NonZeroUsize::MIN,
+            None,
             Some(empty_lake_mesh),
         );
         queue.enqueue(GenerationPriority::NearTerrain, TerrainMeshSpec::Near(spec));
@@ -1858,6 +2147,99 @@ mod tests {
 
         assert_eq!(generated.spec, TerrainMeshSpec::Far(spec));
         assert_eq!(generated.mesh.expect("queued far mesh"), expected);
+    }
+
+    #[test]
+    fn far_forest_canopy_is_deterministic_well_formed_and_versioned() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0));
+        let spec = FarTerrainMeshSpec {
+            tile: FarTileIndex::new(38, -25),
+        };
+        let first = far_forest_canopy_mesh(&terrain, spec).expect("far forest canopy");
+        let second = far_forest_canopy_mesh(&terrain, spec).expect("same far forest canopy");
+
+        assert_eq!(first, second);
+        assert!(first.is_well_formed());
+        assert!(!first.indices.is_empty());
+        assert!(
+            first
+                .colors
+                .iter()
+                .all(|color| color[3].to_bits() == 1.0_f32.to_bits())
+        );
+        assert!(first.positions.iter().any(|position| {
+            terrain
+                .surface_height(f64::from(position[0]), f64::from(position[2]))
+                .is_some_and(|ground| f64::from(position[1]) > ground + 2.0)
+        }));
+
+        let mut words = Vec::new();
+        words.extend(
+            first
+                .positions
+                .iter()
+                .flatten()
+                .map(|value| u64::from(value.to_bits())),
+        );
+        words.extend(
+            first
+                .normals
+                .iter()
+                .flatten()
+                .map(|value| u64::from(value.to_bits())),
+        );
+        words.extend(
+            first
+                .colors
+                .iter()
+                .flatten()
+                .map(|value| u64::from(value.to_bits())),
+        );
+        words.extend(first.indices.iter().copied().map(u64::from));
+        assert_eq!(
+            stable_hash(&words),
+            1_115_843_523_164_616_057,
+            "changing this value changes the far-forest render contract"
+        );
+    }
+
+    #[test]
+    fn adjacent_far_forest_canopies_share_boundary_vertices() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0));
+        let west = far_forest_canopy_mesh(
+            &terrain,
+            FarTerrainMeshSpec {
+                tile: FarTileIndex::new(38, -25),
+            },
+        )
+        .expect("west canopy");
+        let east = far_forest_canopy_mesh(
+            &terrain,
+            FarTerrainMeshSpec {
+                tile: FarTileIndex::new(39, -25),
+            },
+        )
+        .expect("east canopy");
+        let vertices_per_edge = FAR_FOREST_CELLS_PER_EDGE + 1;
+
+        for z in 0..vertices_per_edge {
+            let west_index = (z * vertices_per_edge) + FAR_FOREST_CELLS_PER_EDGE;
+            let east_index = z * vertices_per_edge;
+            assert_eq!(
+                west.positions[west_index].map(f32::to_bits),
+                east.positions[east_index].map(f32::to_bits)
+            );
+            assert_eq!(
+                west.normals[west_index].map(f32::to_bits),
+                east.normals[east_index].map(f32::to_bits)
+            );
+            assert_eq!(
+                west.colors[west_index].map(f32::to_bits),
+                east.colors[east_index].map(f32::to_bits)
+            );
+        }
     }
 
     #[test]

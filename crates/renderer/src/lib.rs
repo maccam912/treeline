@@ -23,6 +23,17 @@ pub enum TerrainRenderTier {
     Horizon,
 }
 
+/// Geometry detail for one deterministic set of procedural tree individuals.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TreeMeshDetail {
+    /// Trunks, branches, damage, and species-specific crown clusters.
+    Full,
+    /// Trunks and one species-shaped crown, without individual branches.
+    Simplified,
+    /// A minimal trunk and crown silhouette for the outer individual-tree ring.
+    Silhouette,
+}
+
 /// Selects a representation from horizontal distance in meters.
 pub fn terrain_tier(distance_meters: f64) -> TerrainRenderTier {
     if distance_meters < 200.0 {
@@ -347,9 +358,10 @@ impl TerrainRenderer {
         &self,
         device: &wgpu::Device,
         trees: &[ProceduralTree],
+        detail: TreeMeshDetail,
         surface_height: impl FnMut(f64, f64) -> Option<f64>,
     ) -> Result<TerrainMesh, RendererError> {
-        let (vertices, indices) = procedural_tree_geometry(trees, surface_height)?;
+        let (vertices, indices) = procedural_tree_geometry(trees, detail, surface_height)?;
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("procedural tree vertices"),
             contents: bytemuck::cast_slice(&vertices),
@@ -514,6 +526,7 @@ impl TerrainRenderer {
 
 fn procedural_tree_geometry(
     trees: &[ProceduralTree],
+    detail: TreeMeshDetail,
     mut surface_height: impl FnMut(f64, f64) -> Option<f64>,
 ) -> Result<(Vec<TerrainVertex>, Vec<u32>), RendererError> {
     let mut vertices = Vec::new();
@@ -526,6 +539,7 @@ fn procedural_tree_geometry(
             &mut vertices,
             &mut indices,
             *tree,
+            detail,
             Vec3::new(f64_as_f32(tree.x), f64_as_f32(base_y), f64_as_f32(tree.z)),
         )?;
     }
@@ -1011,6 +1025,7 @@ fn append_tree(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     tree: ProceduralTree,
+    detail: TreeMeshDetail,
     base: Vec3,
 ) -> Result<(), RendererError> {
     let height = f64_as_f32(tree.height_meters);
@@ -1029,6 +1044,11 @@ fn append_tree(
     let top_radius = (trunk_radius
         * (1.0 - (f64_as_f32(tree.genotype.trunk_taper_fraction) * 0.88)))
         .max(trunk_radius * 0.08);
+    let trunk_sides = match detail {
+        TreeMeshDetail::Full => 7,
+        TreeMeshDetail::Simplified => 5,
+        TreeMeshDetail::Silhouette => 3,
+    };
     append_tapered_cylinder(
         vertices,
         indices,
@@ -1037,7 +1057,7 @@ fn append_tree(
             end: top,
             start_radius: trunk_radius,
             end_radius: top_radius,
-            sides: 7,
+            sides: trunk_sides,
             color: bark_color(tree),
         },
     )?;
@@ -1047,17 +1067,33 @@ fn append_tree(
         return Ok(());
     }
 
-    append_tree_crown(
-        vertices,
-        indices,
-        tree,
-        TreeFrame {
-            base,
-            top,
-            trunk_vector,
-            trunk_radius,
-        },
-    )
+    let frame = TreeFrame {
+        base,
+        top,
+        trunk_vector,
+        trunk_radius,
+    };
+    if detail == TreeMeshDetail::Full {
+        append_tree_crown(vertices, indices, tree, frame)
+    } else if tree_has_foliage(tree) {
+        let crown_start = match tree.genotype.crown_shape {
+            CrownShape::Conical => 0.24,
+            CrownShape::Columnar => 0.38,
+            CrownShape::Rounded => 0.46,
+            CrownShape::Spreading => 0.34,
+        };
+        append_terminal_crown(
+            vertices,
+            indices,
+            tree,
+            frame,
+            crown_start,
+            f64_as_f32(tree.crown_radius_meters),
+            foliage_color(tree),
+        )
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1534,7 +1570,8 @@ mod tests {
             ),
         ];
         let (vertices, indices) =
-            procedural_tree_geometry(&trees, |x, z| Some((x + z) * 0.01)).expect("tree geometry");
+            procedural_tree_geometry(&trees, TreeMeshDetail::Full, |x, z| Some((x + z) * 0.01))
+                .expect("tree geometry");
 
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
@@ -1549,6 +1586,50 @@ mod tests {
                 && vertex.normal.into_iter().all(f32::is_finite)
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
+    }
+
+    #[test]
+    fn tree_lod_tiers_preserve_individuals_while_reducing_geometry() {
+        let trees = [
+            tree_fixture(
+                11,
+                TreeFunctionalGroup::EvergreenNeedleleaf,
+                CrownShape::Conical,
+                TreeCondition::Mature,
+            ),
+            tree_fixture(
+                12,
+                TreeFunctionalGroup::TemperateBroadleaf,
+                CrownShape::Rounded,
+                TreeCondition::Ancient,
+            ),
+            tree_fixture(
+                13,
+                TreeFunctionalGroup::DryWoodland,
+                CrownShape::Spreading,
+                TreeCondition::DeadStanding,
+            ),
+        ];
+        let geometry = [
+            TreeMeshDetail::Full,
+            TreeMeshDetail::Simplified,
+            TreeMeshDetail::Silhouette,
+        ]
+        .map(|detail| {
+            procedural_tree_geometry(&trees, detail, |_, _| Some(42.0)).expect("tree LOD geometry")
+        });
+
+        assert!(geometry.iter().all(|(vertices, indices)| {
+            !vertices.is_empty()
+                && !indices.is_empty()
+                && indices
+                    .iter()
+                    .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
+        }));
+        assert!(geometry[0].0.len() > geometry[1].0.len());
+        assert!(geometry[1].0.len() > geometry[2].0.len());
+        assert!(geometry[0].1.len() > geometry[1].1.len());
+        assert!(geometry[1].1.len() > geometry[2].1.len());
     }
 
     #[test]

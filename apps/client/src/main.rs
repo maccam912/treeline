@@ -16,7 +16,7 @@ use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_ecology::{
     GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds,
 };
-use treeline_renderer::{TerrainMesh, TerrainRenderer};
+use treeline_renderer::{TerrainMesh, TerrainRenderer, TreeMeshDetail};
 use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -329,10 +329,7 @@ impl Game {
         let mut requested_chunks = BTreeMap::new();
         let mut requested_far_tiles = BTreeMap::new();
         #[cfg(not(target_arch = "wasm32"))]
-        let mut terrain_jobs = TerrainMeshQueue::with_lake_mesh(
-            terrain.clone(),
-            GeneratedWorldTerrain::lake_surface_mesh,
-        );
+        let mut terrain_jobs = TerrainMeshQueue::for_generated_world(terrain.clone());
         #[cfg(target_arch = "wasm32")]
         let mut terrain_jobs = browser_terrain::BrowserTerrainMeshQueue::new(WORLD)?;
 
@@ -1034,7 +1031,7 @@ fn update_terrain(
         match spec {
             TerrainMeshSpec::Near(spec) => {
                 requested.remove(&spec.chunk);
-                let tree_mesh = tree_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
+                let tree_mesh = tree_mesh_for_chunk(device, renderer, terrain, spec)?;
                 let rock_mesh = rock_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
                 let ground_vegetation_mesh =
                     ground_vegetation_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
@@ -1095,8 +1092,9 @@ fn tree_mesh_for_chunk(
     device: &wgpu::Device,
     renderer: &TerrainRenderer,
     terrain: &GeneratedWorldTerrain,
-    chunk: ChunkIndex,
+    spec: ChunkMeshSpec,
 ) -> Result<Option<TerrainMesh>, Box<dyn Error>> {
+    let chunk = spec.chunk;
     let origin = chunk.sample_origin();
     let edge = ChunkIndex::edge_meters();
     let bounds = TreeBounds::new(origin.x, origin.z, origin.x + edge, origin.z + edge)
@@ -1108,8 +1106,18 @@ fn tree_mesh_for_chunk(
     if trees.is_empty() {
         return Ok(None);
     }
-    let mesh = renderer.upload_trees(device, &trees, |x, z| terrain.surface_height(x, z))?;
+    let mesh = renderer.upload_trees(device, &trees, tree_mesh_detail(spec), |x, z| {
+        terrain.surface_height(x, z)
+    })?;
     Ok(Some(mesh))
+}
+
+fn tree_mesh_detail(spec: ChunkMeshSpec) -> TreeMeshDetail {
+    match spec.lod.get().saturating_sub(ChunkIndex::NEAR_LOD.get()) {
+        0 => TreeMeshDetail::Full,
+        1 => TreeMeshDetail::Simplified,
+        _ => TreeMeshDetail::Silhouette,
+    }
 }
 
 fn rock_mesh_for_chunk(
@@ -1381,6 +1389,30 @@ mod tests {
             max.into_iter()
                 .zip([160.0, 160.0])
                 .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn tree_mesh_detail_follows_terrain_lod_rings() {
+        let spec = |lod| ChunkMeshSpec {
+            chunk: ChunkIndex::new(0, 0),
+            lod,
+            transition_faces: treeline_voxel::TransitionFaces::none(),
+        };
+
+        assert_eq!(
+            tree_mesh_detail(spec(ChunkIndex::NEAR_LOD)),
+            TreeMeshDetail::Full
+        );
+        assert_eq!(
+            tree_mesh_detail(spec(treeline_voxel::LodLevel::new(
+                ChunkIndex::NEAR_LOD.get() + 1
+            ))),
+            TreeMeshDetail::Simplified
+        );
+        assert_eq!(
+            tree_mesh_detail(spec(ChunkIndex::MAX_LOD)),
+            TreeMeshDetail::Silhouette
         );
     }
 
