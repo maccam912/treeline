@@ -4,6 +4,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use bytemuck::{Pod, Zeroable};
+use glam::Vec3;
+use treeline_ecology::{BarkStyle, CrownShape, ProceduralTree, TreeCondition, TreeFunctionalGroup};
 use treeline_mesher::Mesh;
 use wgpu::util::DeviceExt;
 
@@ -328,6 +330,43 @@ impl TerrainRenderer {
         })
     }
 
+    /// Builds and uploads procedural tree grammars as one independently owned mesh.
+    ///
+    /// Tree bases are resolved against the composed world surface supplied by
+    /// the caller, keeping ecology independent from streaming-world artifacts.
+    /// Individuals without a surface sample are omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RendererError::TooManyIndices`] when the generated tree mesh
+    /// exceeds `u32` vertex or draw addressing.
+    pub fn upload_trees(
+        &self,
+        device: &wgpu::Device,
+        trees: &[ProceduralTree],
+        surface_height: impl FnMut(f64, f64) -> Option<f64>,
+    ) -> Result<TerrainMesh, RendererError> {
+        let (vertices, indices) = procedural_tree_geometry(trees, surface_height)?;
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("procedural tree vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("procedural tree indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let index_count =
+            u32::try_from(indices.len()).map_err(|_| RendererError::TooManyIndices)?;
+
+        Ok(TerrainMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count,
+        })
+    }
+
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth = DepthTarget::new(device, width, height);
     }
@@ -398,6 +437,484 @@ impl TerrainRenderer {
     }
 }
 
+fn procedural_tree_geometry(
+    trees: &[ProceduralTree],
+    mut surface_height: impl FnMut(f64, f64) -> Option<f64>,
+) -> Result<(Vec<TerrainVertex>, Vec<u32>), RendererError> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for tree in trees {
+        let Some(base_y) = surface_height(tree.x, tree.z) else {
+            continue;
+        };
+        append_tree(
+            &mut vertices,
+            &mut indices,
+            *tree,
+            Vec3::new(f64_as_f32(tree.x), f64_as_f32(base_y), f64_as_f32(tree.z)),
+        )?;
+    }
+    Ok((vertices, indices))
+}
+
+fn append_tree(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    tree: ProceduralTree,
+    base: Vec3,
+) -> Result<(), RendererError> {
+    let height = f64_as_f32(tree.height_meters);
+    let lean = Vec3::new(
+        f64_as_f32(tree.lean_direction[0]),
+        0.0,
+        f64_as_f32(tree.lean_direction[1]),
+    );
+    let trunk_vector = if tree.condition == TreeCondition::Fallen {
+        (lean * height * f64_as_f32(tree.lean_fraction)) + (Vec3::Y * height * 0.08)
+    } else {
+        (lean * height * f64_as_f32(tree.lean_fraction)) + (Vec3::Y * height)
+    };
+    let top = base + trunk_vector;
+    let trunk_radius = f64_as_f32(tree.trunk_base_radius_meters);
+    let top_radius = (trunk_radius
+        * (1.0 - (f64_as_f32(tree.genotype.trunk_taper_fraction) * 0.88)))
+        .max(trunk_radius * 0.08);
+    append_tapered_cylinder(
+        vertices,
+        indices,
+        CylinderSpec {
+            start: base,
+            end: top,
+            start_radius: trunk_radius,
+            end_radius: top_radius,
+            sides: 7,
+            color: bark_color(tree),
+        },
+    )?;
+
+    if tree.condition == TreeCondition::Sapling {
+        append_sapling_crown(vertices, indices, tree, base, top)?;
+        return Ok(());
+    }
+
+    append_tree_crown(
+        vertices,
+        indices,
+        tree,
+        TreeFrame {
+            base,
+            top,
+            trunk_vector,
+            trunk_radius,
+        },
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TreeFrame {
+    base: Vec3,
+    top: Vec3,
+    trunk_vector: Vec3,
+    trunk_radius: f32,
+}
+
+fn append_tree_crown(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    tree: ProceduralTree,
+    frame: TreeFrame,
+) -> Result<(), RendererError> {
+    let branch_count = branch_count(tree);
+    let crown_start = match tree.genotype.crown_shape {
+        CrownShape::Conical => 0.24,
+        CrownShape::Columnar => 0.38,
+        CrownShape::Rounded => 0.46,
+        CrownShape::Spreading => 0.34,
+    };
+    let crown_radius = f64_as_f32(tree.crown_radius_meters);
+    let foliage = foliage_color(tree);
+    for branch_index in 0..branch_count {
+        append_tree_branch(
+            vertices,
+            indices,
+            tree,
+            frame,
+            crown_start,
+            branch_index,
+            branch_count,
+        )?;
+    }
+
+    if !tree_has_foliage(tree) {
+        return Ok(());
+    }
+    append_terminal_crown(
+        vertices,
+        indices,
+        tree,
+        frame,
+        crown_start,
+        crown_radius,
+        foliage,
+    )
+}
+
+fn append_tree_branch(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    tree: ProceduralTree,
+    frame: TreeFrame,
+    crown_start: f32,
+    branch_index: usize,
+    branch_count: usize,
+) -> Result<(), RendererError> {
+    let ordinal = usize_as_f32(branch_index);
+    let count = usize_as_f32(branch_count);
+    let branch_fraction = crown_start + ((ordinal + 1.0) / (count + 1.0) * (0.88 - crown_start));
+    let start = frame.base + (frame.trunk_vector * branch_fraction);
+    let turn = f64_as_f32(tree.rotation_turns)
+        + (ordinal * 0.618_034)
+        + (hash_lane(tree.id, branch_index) * 0.16);
+    let (azimuth_sine, azimuth_cosine) = (turn * std::f32::consts::TAU).sin_cos();
+    let horizontal = Vec3::new(azimuth_cosine, 0.0, azimuth_sine);
+    let branch_angle = f64_as_f32(tree.genotype.branching_angle_radians);
+    let direction = (horizontal * branch_angle.sin()) + (Vec3::Y * branch_angle.cos());
+    let height_taper = 1.0 - (branch_fraction * 0.52);
+    let shape_scale = match tree.genotype.crown_shape {
+        CrownShape::Conical => height_taper,
+        CrownShape::Columnar => 0.58 + (height_taper * 0.20),
+        CrownShape::Rounded => 0.76 + (height_taper * 0.16),
+        CrownShape::Spreading => 0.92 + (height_taper * 0.18),
+    };
+    let damage_scale = 1.0 - (f64_as_f32(tree.damage_fraction) * 0.48);
+    let crown_radius = f64_as_f32(tree.crown_radius_meters);
+    let length = crown_radius * shape_scale * damage_scale;
+    let end = start + (direction.normalize_or_zero() * length);
+    append_tapered_cylinder(
+        vertices,
+        indices,
+        CylinderSpec {
+            start,
+            end,
+            start_radius: frame.trunk_radius * (0.20 * height_taper).max(0.07),
+            end_radius: frame.trunk_radius * 0.045,
+            sides: 4,
+            color: bark_color(tree),
+        },
+    )?;
+    if tree_has_foliage(tree) && tree.genotype.crown_shape != CrownShape::Conical {
+        let cluster_radius = crown_radius
+            * (0.22 + (f64_as_f32(tree.genotype.leaf_density_fraction) * 0.16))
+            * damage_scale;
+        let vertical_scale = match tree.genotype.crown_shape {
+            CrownShape::Columnar => 1.35,
+            CrownShape::Spreading => 0.72,
+            CrownShape::Conical | CrownShape::Rounded => 1.0,
+        };
+        append_octahedral_crown(
+            vertices,
+            indices,
+            end,
+            Vec3::new(
+                cluster_radius,
+                cluster_radius * vertical_scale,
+                cluster_radius,
+            ),
+            foliage_color(tree),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_terminal_crown(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    tree: ProceduralTree,
+    frame: TreeFrame,
+    crown_start: f32,
+    crown_radius: f32,
+    foliage: [f32; 4],
+) -> Result<(), RendererError> {
+    match tree.genotype.crown_shape {
+        CrownShape::Conical => append_conical_crown(
+            vertices,
+            indices,
+            frame.base + (frame.trunk_vector * crown_start),
+            frame.top + (Vec3::Y * crown_radius * 0.18),
+            crown_radius,
+            foliage,
+        ),
+        CrownShape::Columnar | CrownShape::Rounded | CrownShape::Spreading => {
+            append_octahedral_crown(
+                vertices,
+                indices,
+                frame.base + (frame.trunk_vector * 0.82),
+                Vec3::new(
+                    crown_radius * 0.72,
+                    crown_radius
+                        * if tree.genotype.crown_shape == CrownShape::Columnar {
+                            1.25
+                        } else {
+                            0.82
+                        },
+                    crown_radius * 0.72,
+                ),
+                foliage,
+            )
+        }
+    }
+}
+
+fn append_sapling_crown(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    tree: ProceduralTree,
+    base: Vec3,
+    top: Vec3,
+) -> Result<(), RendererError> {
+    if !tree_has_foliage(tree) {
+        return Ok(());
+    }
+    let radius = f64_as_f32(tree.crown_radius_meters);
+    if tree.genotype.crown_shape == CrownShape::Conical {
+        append_conical_crown(
+            vertices,
+            indices,
+            base + ((top - base) * 0.36),
+            top,
+            radius,
+            foliage_color(tree),
+        )
+    } else {
+        append_octahedral_crown(
+            vertices,
+            indices,
+            base + ((top - base) * 0.72),
+            Vec3::new(radius, radius * 1.15, radius),
+            foliage_color(tree),
+        )
+    }
+}
+
+fn branch_count(tree: ProceduralTree) -> usize {
+    let density = tree.genotype.branch_density_fraction * (1.0 - (tree.damage_fraction * 0.58));
+    let mut count = 4_usize;
+    for threshold in [0.18, 0.32, 0.46, 0.60, 0.74, 0.88] {
+        if density >= threshold {
+            count += 1;
+        }
+    }
+    if tree.condition == TreeCondition::StormBroken {
+        count.saturating_sub(2)
+    } else {
+        count
+    }
+}
+
+fn tree_has_foliage(tree: ProceduralTree) -> bool {
+    !matches!(
+        tree.condition,
+        TreeCondition::DeadStanding | TreeCondition::StormBroken
+    )
+}
+
+fn bark_color(tree: ProceduralTree) -> [f32; 4] {
+    let base = match tree.genotype.bark_style {
+        BarkStyle::Scaly => [0.25, 0.18, 0.11],
+        BarkStyle::Smooth => [0.43, 0.40, 0.33],
+        BarkStyle::Furrowed => [0.27, 0.20, 0.14],
+        BarkStyle::Plated => [0.36, 0.29, 0.18],
+    };
+    let bleaching = if tree.condition == TreeCondition::DeadStanding {
+        0.46
+    } else {
+        f64_as_f32(tree.damage_fraction) * 0.12
+    };
+    [
+        base[0] + bleaching,
+        base[1] + bleaching,
+        base[2] + (bleaching * 0.88),
+        1.0,
+    ]
+}
+
+fn foliage_color(tree: ProceduralTree) -> [f32; 4] {
+    let base = match tree.genotype.functional_group {
+        TreeFunctionalGroup::EvergreenNeedleleaf => [0.055, 0.24, 0.12],
+        TreeFunctionalGroup::ColdDeciduous => [0.25, 0.43, 0.12],
+        TreeFunctionalGroup::TemperateBroadleaf => [0.10, 0.36, 0.075],
+        TreeFunctionalGroup::DryWoodland => [0.34, 0.40, 0.13],
+    };
+    let variation = (hash_lane(tree.id, 31) - 0.5) * 0.10;
+    let damage = f64_as_f32(tree.damage_fraction);
+    [
+        (base[0] + variation + (damage * 0.12)).clamp(0.0, 1.0),
+        (base[1] + variation - (damage * 0.10)).clamp(0.0, 1.0),
+        (base[2] + (variation * 0.5) - (damage * 0.04)).clamp(0.0, 1.0),
+        1.0,
+    ]
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CylinderSpec {
+    start: Vec3,
+    end: Vec3,
+    start_radius: f32,
+    end_radius: f32,
+    sides: usize,
+    color: [f32; 4],
+}
+
+fn append_tapered_cylinder(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    spec: CylinderSpec,
+) -> Result<(), RendererError> {
+    let axis = (spec.end - spec.start).normalize_or_zero();
+    if axis == Vec3::ZERO {
+        return Ok(());
+    }
+    let reference = if axis.y.abs() < 0.92 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let tangent = axis.cross(reference).normalize_or_zero();
+    let bitangent = axis.cross(tangent).normalize_or_zero();
+    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
+    for ring in 0..2 {
+        let (center, radius) = if ring == 0 {
+            (spec.start, spec.start_radius)
+        } else {
+            (spec.end, spec.end_radius)
+        };
+        for side in 0..spec.sides {
+            let angle = usize_as_f32(side) / usize_as_f32(spec.sides) * std::f32::consts::TAU;
+            let radial = (tangent * angle.cos()) + (bitangent * angle.sin());
+            let position = center + (radial * radius);
+            vertices.push(TerrainVertex {
+                position: position.to_array(),
+                normal: radial.to_array(),
+                color: spec.color,
+            });
+        }
+    }
+    for side in 0..spec.sides {
+        let next = (side + 1) % spec.sides;
+        let side = u32::try_from(side).map_err(|_| RendererError::TooManyIndices)?;
+        let next = u32::try_from(next).map_err(|_| RendererError::TooManyIndices)?;
+        let sides = u32::try_from(spec.sides).map_err(|_| RendererError::TooManyIndices)?;
+        indices.extend_from_slice(&[
+            base_index + side,
+            base_index + next,
+            base_index + sides + side,
+            base_index + next,
+            base_index + sides + next,
+            base_index + sides + side,
+        ]);
+    }
+    Ok(())
+}
+
+fn append_conical_crown(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    base: Vec3,
+    apex: Vec3,
+    radius: f32,
+    color: [f32; 4],
+) -> Result<(), RendererError> {
+    let sides = 9_usize;
+    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
+    let axis = (apex - base).normalize_or_zero();
+    let reference = if axis.y.abs() < 0.92 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let tangent = axis.cross(reference).normalize_or_zero();
+    let bitangent = axis.cross(tangent).normalize_or_zero();
+    for side in 0..sides {
+        let angle = usize_as_f32(side) / usize_as_f32(sides) * std::f32::consts::TAU;
+        let radial = (tangent * angle.cos()) + (bitangent * angle.sin());
+        vertices.push(TerrainVertex {
+            position: (base + (radial * radius)).to_array(),
+            normal: (radial + (axis * 0.35)).normalize_or_zero().to_array(),
+            color,
+        });
+    }
+    vertices.push(TerrainVertex {
+        position: apex.to_array(),
+        normal: axis.to_array(),
+        color,
+    });
+    let apex_index =
+        base_index + u32::try_from(sides).map_err(|_| RendererError::TooManyIndices)?;
+    for side in 0..sides {
+        let next = (side + 1) % sides;
+        indices.extend_from_slice(&[
+            base_index + u32::try_from(side).map_err(|_| RendererError::TooManyIndices)?,
+            base_index + u32::try_from(next).map_err(|_| RendererError::TooManyIndices)?,
+            apex_index,
+        ]);
+    }
+    Ok(())
+}
+
+fn append_octahedral_crown(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    center: Vec3,
+    radius: Vec3,
+    color: [f32; 4],
+) -> Result<(), RendererError> {
+    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
+    let offsets = [
+        Vec3::Y * radius.y,
+        Vec3::X * radius.x,
+        Vec3::Z * radius.z,
+        -Vec3::X * radius.x,
+        -Vec3::Z * radius.z,
+        -Vec3::Y * radius.y,
+    ];
+    for offset in offsets {
+        vertices.push(TerrainVertex {
+            position: (center + offset).to_array(),
+            normal: offset.normalize_or_zero().to_array(),
+            color,
+        });
+    }
+    for triangle in [
+        [0, 1, 2],
+        [0, 2, 3],
+        [0, 3, 4],
+        [0, 4, 1],
+        [5, 2, 1],
+        [5, 3, 2],
+        [5, 4, 3],
+        [5, 1, 4],
+    ] {
+        indices.extend(triangle.map(|index| base_index + index));
+    }
+    Ok(())
+}
+
+fn hash_lane(key: u64, lane: usize) -> f32 {
+    let lane = u32::try_from(lane % 8).expect("hash lane is bounded");
+    let byte = u8::try_from((key >> (lane * 8)) & 0xff).expect("masked hash lane fits u8");
+    f32::from(byte) / 255.0
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn f64_as_f32(value: f64) -> f32 {
+    value as f32
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn usize_as_f32(value: usize) -> f32 {
+    value as f32
+}
+
 #[derive(Debug)]
 struct DepthTarget {
     view: wgpu::TextureView,
@@ -432,5 +949,91 @@ mod tests {
     #[test]
     fn distant_mountains_do_not_require_voxel_interiors() {
         assert_eq!(terrain_tier(30_000.0), TerrainRenderTier::Horizon);
+    }
+
+    #[test]
+    fn procedural_tree_grammars_build_well_formed_colored_geometry() {
+        let trees = [
+            tree_fixture(
+                1,
+                TreeFunctionalGroup::EvergreenNeedleleaf,
+                CrownShape::Conical,
+                TreeCondition::Mature,
+            ),
+            tree_fixture(
+                2,
+                TreeFunctionalGroup::ColdDeciduous,
+                CrownShape::Columnar,
+                TreeCondition::Sapling,
+            ),
+            tree_fixture(
+                3,
+                TreeFunctionalGroup::TemperateBroadleaf,
+                CrownShape::Rounded,
+                TreeCondition::Ancient,
+            ),
+            tree_fixture(
+                4,
+                TreeFunctionalGroup::DryWoodland,
+                CrownShape::Spreading,
+                TreeCondition::Fallen,
+            ),
+        ];
+        let (vertices, indices) =
+            procedural_tree_geometry(&trees, |x, z| Some((x + z) * 0.01)).expect("tree geometry");
+
+        assert!(!vertices.is_empty());
+        assert!(!indices.is_empty());
+        assert!(indices.len().is_multiple_of(3));
+        assert!(
+            indices
+                .iter()
+                .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
+        );
+        assert!(vertices.iter().all(|vertex| {
+            vertex.position.into_iter().all(f32::is_finite)
+                && vertex.normal.into_iter().all(f32::is_finite)
+                && (vertex.color[3] - 1.0).abs() < f32::EPSILON
+        }));
+    }
+
+    fn tree_fixture(
+        id: u64,
+        group: TreeFunctionalGroup,
+        crown_shape: CrownShape,
+        condition: TreeCondition,
+    ) -> ProceduralTree {
+        ProceduralTree {
+            id,
+            x: f64::from(u32::try_from(id).expect("small fixture id")) * 8.0,
+            z: -4.0,
+            age_years: 120.0,
+            height_meters: 18.0,
+            trunk_base_radius_meters: 0.42,
+            crown_radius_meters: 3.8,
+            lean_direction: [0.8, 0.6],
+            lean_fraction: if condition == TreeCondition::Fallen {
+                0.92
+            } else {
+                0.08
+            },
+            damage_fraction: 0.18,
+            rotation_turns: 0.37,
+            condition,
+            genotype: treeline_ecology::TreeGenotype {
+                functional_group: group,
+                mature_height_meters: 24.0,
+                height_variation_fraction: 0.5,
+                trunk_taper_fraction: 0.62,
+                branching_angle_radians: 0.84,
+                branch_density_fraction: 0.72,
+                crown_shape,
+                leaf_density_fraction: 0.78,
+                bark_style: BarkStyle::Furrowed,
+                slope_response_fraction: 0.5,
+                wind_response_fraction: 0.6,
+                competition_response_fraction: 0.7,
+            },
+        }
     }
 }

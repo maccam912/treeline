@@ -2217,8 +2217,13 @@ The world generator is the game.
       stand age, disturbance, and tree functional-group composition derive
       from climate, soil, terrain exposure, snowpack, and spatially correlated
       stand history, with a dedicated Generator Lab view and inspection data.
-- [ ] **NEXT** — Procedural trees
-- [ ] Surface rocks
+- [x] Procedural trees. Globally anchored individual trees derive continuous
+      height, taper, branching, crown, foliage, bark, competition, slope, wind,
+      age, and damage traits from forest structure. Saplings, mature and ancient
+      trees, wind damage, fallen trees, standing deadwood, and storm breaks are
+      deterministic; the client renders their generated trunks, branches, and
+      crowns, and Generator Lab inspection explains nearby individuals.
+- [ ] **NEXT** — Surface rocks
 - [ ] Ground vegetation
 - [ ] **PARTIAL** — Snow. Climate generates seasonal snowfall, accumulation,
       permanent snowpack, and meltwater runoff, but terrain coverage and
