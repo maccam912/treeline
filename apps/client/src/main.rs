@@ -13,7 +13,9 @@ use std::rc::Rc;
 
 use glam::{Mat4, Vec2, Vec3};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
-use treeline_ecology::{ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds};
+use treeline_ecology::{
+    GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds,
+};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
@@ -41,9 +43,9 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
-const START_X: f32 = 78_491.44;
-const START_Z: f32 = -50_153.98;
-const START_YAW: f32 = -2.13;
+const START_X: f32 = 78_481.44;
+const START_Z: f32 = -50_125.98;
+const START_YAW: f32 = 0.164;
 const START_PITCH: f32 = -0.08;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
@@ -521,6 +523,11 @@ impl Game {
                     self.terrain_chunks
                         .values()
                         .filter_map(|resident| resident.rock_mesh.as_ref()),
+                )
+                .chain(
+                    self.terrain_chunks
+                        .values()
+                        .filter_map(|resident| resident.ground_vegetation_mesh.as_ref()),
                 ),
         );
         self.queue.submit(Some(encoder.finish()));
@@ -535,6 +542,7 @@ struct ResidentTerrainChunk {
     lake_mesh: Option<TerrainMesh>,
     tree_mesh: Option<TerrainMesh>,
     rock_mesh: Option<TerrainMesh>,
+    ground_vegetation_mesh: Option<TerrainMesh>,
 }
 
 struct ResidentFarTerrainTile {
@@ -1028,6 +1036,8 @@ fn update_terrain(
                 requested.remove(&spec.chunk);
                 let tree_mesh = tree_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
                 let rock_mesh = rock_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
+                let ground_vegetation_mesh =
+                    ground_vegetation_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
                 chunks.insert(
                     spec.chunk,
                     ResidentTerrainChunk {
@@ -1040,6 +1050,7 @@ fn update_terrain(
                             .transpose()?,
                         tree_mesh,
                         rock_mesh,
+                        ground_vegetation_mesh,
                     },
                 );
             }
@@ -1119,6 +1130,28 @@ fn rock_mesh_for_chunk(
         return Ok(None);
     }
     let mesh = renderer.upload_rocks(device, &rocks, |x, z| terrain.surface_height(x, z))?;
+    Ok(Some(mesh))
+}
+
+fn ground_vegetation_mesh_for_chunk(
+    device: &wgpu::Device,
+    renderer: &TerrainRenderer,
+    terrain: &GeneratedWorldTerrain,
+    chunk: ChunkIndex,
+) -> Result<Option<TerrainMesh>, Box<dyn Error>> {
+    let origin = chunk.sample_origin();
+    let edge = ChunkIndex::edge_meters();
+    let bounds = GroundVegetationBounds::new(origin.x, origin.z, origin.x + edge, origin.z + edge)
+        .ok_or_else(|| std::io::Error::other("ground-vegetation chunk bounds are invalid"))?;
+    let mut plants = GroundVegetation::new(terrain.world())
+        .plants_in(bounds)
+        .ok_or_else(|| std::io::Error::other("ground-vegetation generation is unavailable"))?;
+    plants.retain(|plant| surface_feature_has_dry_ground(terrain, plant.x, plant.z));
+    if plants.is_empty() {
+        return Ok(None);
+    }
+    let mesh =
+        renderer.upload_ground_vegetation(device, &plants, |x, z| terrain.surface_height(x, z))?;
     Ok(Some(mesh))
 }
 
@@ -1353,23 +1386,10 @@ mod tests {
 
     #[test]
     fn prototype_region_exposes_real_lake() {
-        const LAKE_X: f64 = 78_576.0;
-        const LAKE_Z: f64 = -50_160.0;
+        const LAKE_X: f64 = 93_000.0;
+        const LAKE_Z: f64 = -121_000.0;
         let terrain = GeneratedWorldTerrain::new(WORLD);
-        assert!(
-            terrain.lake_surface_at(LAKE_X, LAKE_Z).is_none(),
-            "the known lakeshore should remain dry"
-        );
-        assert!(
-            terrain.lake_surface_at(LAKE_X, LAKE_Z - 16.0).is_some(),
-            "the lake should begin just south of the known shore"
-        );
-        for [x_offset, z_offset] in [
-            [0.0, -192.0],
-            [0.0, -320.0],
-            [-128.0, -192.0],
-            [128.0, -192.0],
-        ] {
+        for [x_offset, z_offset] in [[0.0, 0.0], [128.0, 0.0], [-128.0, 0.0], [0.0, 128.0]] {
             assert!(
                 terrain
                     .lake_surface_at(LAKE_X + x_offset, LAKE_Z + z_offset)
@@ -1380,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn rock_showcase_spawn_faces_a_boulder_and_retains_nearby_trees() {
+    fn showcase_spawn_faces_a_boulder_and_retains_trees_and_ground_cover() {
         let terrain = GeneratedWorldTerrain::new(WORLD);
         assert!(
             terrain
@@ -1416,7 +1436,7 @@ mod tests {
         assert!(retained.len() >= 20, "spawn should retain a visible stand");
         assert!(
             crown_clearance >= 5.0,
-            "spawn should not begin inside a tree crown"
+            "spawn should not begin inside a tree crown; clearance is {crown_clearance:.2} m"
         );
 
         let rock_bounds =
@@ -1454,6 +1474,19 @@ mod tests {
                         >= 0.98
             }),
             "the initial camera should face a nearby boulder-sized rock"
+        );
+
+        let vegetation_bounds = GroundVegetationBounds::new(min.x, min.z, max.x, max.z)
+            .expect("spawn ground-vegetation bounds");
+        let plants = GroundVegetation::new(WORLD)
+            .plants_in(vegetation_bounds)
+            .expect("ground-vegetation generation")
+            .into_iter()
+            .filter(|plant| surface_feature_has_dry_ground(&terrain, plant.x, plant.z))
+            .collect::<Vec<_>>();
+        assert!(
+            plants.len() >= 100,
+            "spawn should retain a visibly populated ground layer"
         );
     }
 

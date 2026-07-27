@@ -6,8 +6,8 @@ use std::fmt::{Display, Formatter};
 use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
 use treeline_ecology::{
-    BarkStyle, CrownShape, ProceduralTree, RockForm, SurfaceRock, TreeCondition,
-    TreeFunctionalGroup,
+    BarkStyle, CrownShape, GroundCoverGroup, GroundPlant, ProceduralTree, RockForm, SurfaceRock,
+    TreeCondition, TreeFunctionalGroup,
 };
 use treeline_mesher::Mesh;
 use wgpu::util::DeviceExt;
@@ -406,6 +406,42 @@ impl TerrainRenderer {
         })
     }
 
+    /// Builds and uploads deterministic ground vegetation as one independently owned mesh.
+    ///
+    /// Plant bases are resolved against the composed world surface supplied by
+    /// the caller. Individuals without a surface sample are omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RendererError::TooManyIndices`] when the generated plant mesh
+    /// exceeds `u32` vertex or draw addressing.
+    pub fn upload_ground_vegetation(
+        &self,
+        device: &wgpu::Device,
+        plants: &[GroundPlant],
+        surface_height: impl FnMut(f64, f64) -> Option<f64>,
+    ) -> Result<TerrainMesh, RendererError> {
+        let (vertices, indices) = procedural_ground_vegetation_geometry(plants, surface_height)?;
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground vegetation vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground vegetation indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let index_count =
+            u32::try_from(indices.len()).map_err(|_| RendererError::TooManyIndices)?;
+
+        Ok(TerrainMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count,
+        })
+    }
+
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth = DepthTarget::new(device, width, height);
     }
@@ -509,6 +545,300 @@ fn procedural_rock_geometry(
         append_surface_rock(&mut vertices, &mut indices, *rock, f64_as_f32(surface_y))?;
     }
     Ok((vertices, indices))
+}
+
+fn procedural_ground_vegetation_geometry(
+    plants: &[GroundPlant],
+    mut surface_height: impl FnMut(f64, f64) -> Option<f64>,
+) -> Result<(Vec<TerrainVertex>, Vec<u32>), RendererError> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for plant in plants {
+        let Some(surface_y) = surface_height(plant.x, plant.z) else {
+            continue;
+        };
+        append_ground_plant(
+            &mut vertices,
+            &mut indices,
+            *plant,
+            Vec3::new(
+                f64_as_f32(plant.x),
+                f64_as_f32(surface_y) + 0.015,
+                f64_as_f32(plant.z),
+            ),
+        )?;
+    }
+    Ok((vertices, indices))
+}
+
+fn append_ground_plant(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    plant: GroundPlant,
+    base: Vec3,
+) -> Result<(), RendererError> {
+    match plant.genotype.group {
+        GroundCoverGroup::Graminoid => append_graminoid(vertices, indices, plant, base),
+        GroundCoverGroup::Forb => append_forb(vertices, indices, plant, base),
+        GroundCoverGroup::Fern => append_fern(vertices, indices, plant, base),
+        GroundCoverGroup::LowShrub => append_low_shrub(vertices, indices, plant, base),
+        GroundCoverGroup::Moss => append_moss(vertices, indices, plant, base),
+    }
+}
+
+fn append_graminoid(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    plant: GroundPlant,
+    base: Vec3,
+) -> Result<(), RendererError> {
+    let count = usize::from(plant.genotype.leaf_count);
+    let height = f64_as_f32(plant.height_meters);
+    let radius = f64_as_f32(plant.radius_meters);
+    let color = ground_plant_color(plant, 0);
+    let lean = plant_lean(plant);
+    for ordinal in 0..count {
+        let radial = plant_radial(plant, ordinal, count);
+        let height_scale = 0.68 + (hash_lane(plant.id.rotate_left(9), ordinal) * 0.40);
+        let start = base + (radial * radius * 0.18);
+        let end = start
+            + (Vec3::Y * height * height_scale)
+            + (lean * height * f64_as_f32(plant.lean_fraction))
+            + (radial * radius * 0.18);
+        let width =
+            radius * (0.07 + ((1.0 - f64_as_f32(plant.genotype.slenderness_fraction)) * 0.08));
+        append_leaf_blade(vertices, indices, start, end, width, color)?;
+    }
+    Ok(())
+}
+
+fn append_forb(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    plant: GroundPlant,
+    base: Vec3,
+) -> Result<(), RendererError> {
+    let height = f64_as_f32(plant.height_meters);
+    let radius = f64_as_f32(plant.radius_meters);
+    let lean = plant_lean(plant);
+    let top = base + (Vec3::Y * height) + (lean * height * f64_as_f32(plant.lean_fraction));
+    append_tapered_cylinder(
+        vertices,
+        indices,
+        CylinderSpec {
+            start: base,
+            end: top,
+            start_radius: (height * 0.035).clamp(0.008, 0.025),
+            end_radius: (height * 0.012).clamp(0.004, 0.012),
+            sides: 4,
+            color: ground_plant_color(plant, 0),
+        },
+    )?;
+    let leaf_count = usize::from(plant.genotype.leaf_count).min(6);
+    for ordinal in 0..leaf_count {
+        let radial = plant_radial(plant, ordinal, leaf_count);
+        let fraction = 0.22 + (usize_as_f32(ordinal) / usize_as_f32(leaf_count) * 0.55);
+        let start = base + ((top - base) * fraction);
+        let end =
+            start + (radial * radius * (0.48 + (fraction * 0.24))) + (Vec3::Y * height * 0.06);
+        append_leaf_blade(
+            vertices,
+            indices,
+            start,
+            end,
+            radius * 0.16,
+            ground_plant_color(plant, ordinal + 1),
+        )?;
+    }
+    if plant.flowering_fraction > 0.08 {
+        let flower_radius =
+            (radius * (0.10 + (f64_as_f32(plant.flowering_fraction) * 0.13))).clamp(0.025, 0.12);
+        append_octahedral_crown(
+            vertices,
+            indices,
+            top,
+            Vec3::new(flower_radius, flower_radius * 0.46, flower_radius),
+            flower_color(plant),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_fern(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    plant: GroundPlant,
+    base: Vec3,
+) -> Result<(), RendererError> {
+    let count = usize::from(plant.genotype.leaf_count);
+    let height = f64_as_f32(plant.height_meters);
+    let radius = f64_as_f32(plant.radius_meters);
+    let lean = plant_lean(plant);
+    for ordinal in 0..count {
+        let radial = plant_radial(plant, ordinal, count);
+        let scale = 0.72 + (hash_lane(plant.id.rotate_right(11), ordinal) * 0.34);
+        let end = base
+            + (radial * radius * scale)
+            + (Vec3::Y * height * (0.62 + (scale * 0.18)))
+            + (lean * height * f64_as_f32(plant.lean_fraction) * 0.42);
+        append_leaf_blade(
+            vertices,
+            indices,
+            base + (Vec3::Y * height * 0.04),
+            end,
+            radius * (0.16 + ((1.0 - scale) * 0.06)),
+            ground_plant_color(plant, ordinal),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_low_shrub(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    plant: GroundPlant,
+    base: Vec3,
+) -> Result<(), RendererError> {
+    let count = usize::from(plant.genotype.leaf_count).min(7);
+    let height = f64_as_f32(plant.height_meters);
+    let radius = f64_as_f32(plant.radius_meters);
+    let woody_color = [0.25, 0.18, 0.09, 1.0];
+    for ordinal in 0..count {
+        let radial = plant_radial(plant, ordinal, count);
+        let scale = 0.55 + (hash_lane(plant.id.rotate_left(17), ordinal) * 0.42);
+        let end = base + (radial * radius * scale * 0.72) + (Vec3::Y * height * scale);
+        append_tapered_cylinder(
+            vertices,
+            indices,
+            CylinderSpec {
+                start: base,
+                end,
+                start_radius: (height * 0.025).clamp(0.012, 0.04),
+                end_radius: (height * 0.008).clamp(0.004, 0.015),
+                sides: 4,
+                color: woody_color,
+            },
+        )?;
+        let cluster_radius = radius * (0.20 + (scale * 0.12));
+        append_octahedral_crown(
+            vertices,
+            indices,
+            end,
+            Vec3::new(cluster_radius, cluster_radius * 0.72, cluster_radius),
+            ground_plant_color(plant, ordinal),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_moss(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    plant: GroundPlant,
+    base: Vec3,
+) -> Result<(), RendererError> {
+    let count = usize::from(plant.genotype.leaf_count).min(5);
+    let height = f64_as_f32(plant.height_meters);
+    let radius = f64_as_f32(plant.radius_meters);
+    for ordinal in 0..count {
+        let radial = plant_radial(plant, ordinal, count);
+        let scale = 0.48 + (hash_lane(plant.id.rotate_right(21), ordinal) * 0.32);
+        append_octahedral_crown(
+            vertices,
+            indices,
+            base + (radial * radius * 0.38),
+            Vec3::new(radius * scale, height * scale, radius * scale),
+            ground_plant_color(plant, ordinal),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_leaf_blade(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    start: Vec3,
+    end: Vec3,
+    width: f32,
+    color: [f32; 4],
+) -> Result<(), RendererError> {
+    let direction = (end - start).normalize_or_zero();
+    if direction == Vec3::ZERO {
+        return Ok(());
+    }
+    let tangent = direction.cross(Vec3::Y).normalize_or_zero();
+    let tangent = if tangent == Vec3::ZERO {
+        Vec3::X
+    } else {
+        tangent
+    };
+    let normal = tangent.cross(direction).normalize_or_zero();
+    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
+    for (position, normal) in [
+        (start - (tangent * width), normal),
+        (start + (tangent * width), normal),
+        (end + (tangent * width * 0.12), normal),
+        (end - (tangent * width * 0.12), normal),
+    ] {
+        vertices.push(TerrainVertex {
+            position: position.to_array(),
+            normal: normal.to_array(),
+            color,
+        });
+    }
+    indices.extend_from_slice(&[
+        base_index,
+        base_index + 1,
+        base_index + 2,
+        base_index,
+        base_index + 2,
+        base_index + 3,
+    ]);
+    Ok(())
+}
+
+fn plant_radial(plant: GroundPlant, ordinal: usize, count: usize) -> Vec3 {
+    let turn = f64_as_f32(plant.rotation_turns)
+        + (usize_as_f32(ordinal) / usize_as_f32(count))
+        + ((hash_lane(plant.id, ordinal) - 0.5) * 0.09);
+    let angle = turn * std::f32::consts::TAU;
+    Vec3::new(libm::cosf(angle), 0.0, libm::sinf(angle))
+        * f64_as_f32(plant.genotype.spread_fraction)
+}
+
+fn plant_lean(plant: GroundPlant) -> Vec3 {
+    Vec3::new(
+        f64_as_f32(plant.lean_direction[0]),
+        0.0,
+        f64_as_f32(plant.lean_direction[1]),
+    )
+}
+
+fn ground_plant_color(plant: GroundPlant, ordinal: usize) -> [f32; 4] {
+    let base = match plant.genotype.group {
+        GroundCoverGroup::Graminoid => [0.24, 0.46, 0.10],
+        GroundCoverGroup::Forb => [0.16, 0.42, 0.09],
+        GroundCoverGroup::Fern => [0.08, 0.34, 0.10],
+        GroundCoverGroup::LowShrub => [0.13, 0.31, 0.075],
+        GroundCoverGroup::Moss => [0.21, 0.38, 0.08],
+    };
+    let genotype_variation = f64_as_f32(plant.genotype.color_variation_fraction) - 0.5;
+    let individual_variation = (hash_lane(plant.id.rotate_left(5), ordinal) - 0.5) * 0.08;
+    [
+        (base[0] + (genotype_variation * 0.07) + individual_variation).clamp(0.0, 1.0),
+        (base[1] + (genotype_variation * 0.12) + individual_variation).clamp(0.0, 1.0),
+        (base[2] + (genotype_variation * 0.04) + (individual_variation * 0.45)).clamp(0.0, 1.0),
+        1.0,
+    ]
+}
+
+fn flower_color(plant: GroundPlant) -> [f32; 4] {
+    match plant.id % 4 {
+        0 => [0.95, 0.72, 0.12, 1.0],
+        1 => [0.76, 0.34, 0.72, 1.0],
+        2 => [0.90, 0.88, 0.76, 1.0],
+        _ => [0.38, 0.52, 0.88, 1.0],
+    }
 }
 
 fn append_surface_rock(
@@ -1248,6 +1578,72 @@ mod tests {
                     .all(|channel| (0.0..=1.0).contains(channel))
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
+    }
+
+    #[test]
+    fn ground_vegetation_builds_well_formed_distinct_growth_forms() {
+        let plants = [
+            ground_plant_fixture(50, GroundCoverGroup::Graminoid),
+            ground_plant_fixture(51, GroundCoverGroup::Forb),
+            ground_plant_fixture(52, GroundCoverGroup::Fern),
+            ground_plant_fixture(53, GroundCoverGroup::LowShrub),
+            ground_plant_fixture(54, GroundCoverGroup::Moss),
+        ];
+        let (vertices, indices) =
+            procedural_ground_vegetation_geometry(&plants, |x, z| Some((x + z) * 0.01))
+                .expect("ground vegetation geometry");
+
+        assert!(!vertices.is_empty());
+        assert!(!indices.is_empty());
+        assert!(indices.len().is_multiple_of(3));
+        assert!(
+            indices
+                .iter()
+                .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
+        );
+        assert!(vertices.iter().all(|vertex| {
+            vertex.position.into_iter().all(f32::is_finite)
+                && vertex.normal.into_iter().all(f32::is_finite)
+                && vertex.color[..3]
+                    .iter()
+                    .all(|channel| (0.0..=1.0).contains(channel))
+                && (vertex.color[3] - 1.0).abs() < f32::EPSILON
+        }));
+        assert!(
+            vertices.iter().any(|vertex| {
+                vertex.color[0] > vertex.color[1] * 1.35 || vertex.color[2] > vertex.color[1] * 1.35
+            }),
+            "flowering forbs should add a visible non-green accent"
+        );
+    }
+
+    fn ground_plant_fixture(id: u64, group: GroundCoverGroup) -> GroundPlant {
+        GroundPlant {
+            id,
+            x: f64::from(u32::try_from(id).expect("small fixture id")) * 0.4,
+            z: -6.0,
+            height_meters: match group {
+                GroundCoverGroup::Moss => 0.10,
+                GroundCoverGroup::LowShrub => 1.0,
+                _ => 0.62,
+            },
+            radius_meters: 0.38,
+            rotation_turns: 0.31,
+            lean_direction: [0.8, 0.6],
+            lean_fraction: 0.14,
+            flowering_fraction: if group == GroundCoverGroup::Forb {
+                0.8
+            } else {
+                0.0
+            },
+            genotype: treeline_ecology::GroundPlantGenotype {
+                group,
+                leaf_count: 6,
+                spread_fraction: 0.82,
+                slenderness_fraction: 0.64,
+                color_variation_fraction: 0.55,
+            },
+        }
     }
 
     fn rock_fixture(id: u64, form: RockForm) -> SurfaceRock {
