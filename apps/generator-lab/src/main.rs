@@ -750,8 +750,8 @@ fn inspect_nearby_trees(world: WorldIdentity, x: f64, z: f64) -> Option<NearbyTr
     let bounds = TreeBounds::new(x - 16.0, z - 16.0, x + 16.0, z + 16.0)?;
     let trees = ProceduralTrees::new(world).trees_in(bounds)?;
     let nearest = trees.iter().min_by(|left, right| {
-        let left_distance = (left.x - x).mul_add(left.x - x, (left.z - z) * (left.z - z));
-        let right_distance = (right.x - x).mul_add(right.x - x, (right.z - z) * (right.z - z));
+        let left_distance = libm::fma(left.x - x, left.x - x, (left.z - z) * (left.z - z));
+        let right_distance = libm::fma(right.x - x, right.x - x, (right.z - z) * (right.z - z));
         left_distance.total_cmp(&right_distance)
     });
     Some(NearbyTreeInspection {
@@ -1083,7 +1083,8 @@ fn drainage_color(
             ]
         }
         ViewMode::FlowAccumulation => {
-            let strength = (u64_as_f32(cell.flow_accumulation_cells).log2() / 12.0).clamp(0.0, 1.0);
+            let strength =
+                (libm::log2f(u64_as_f32(cell.flow_accumulation_cells)) / 12.0).clamp(0.0, 1.0);
             let dry = [0.28, 0.24, 0.16];
             let wet = if cell.basin.is_some() {
                 [0.05, 0.72, 0.78]
@@ -1098,9 +1099,9 @@ fn drainage_color(
             ]
         }
         ViewMode::Rivers => river.map_or([0.24, 0.21, 0.15, 1.0], |segment| {
-            let strength = ((f64_as_f32(segment.discharge_cubic_meters_per_second).log2() + 4.0)
-                / 10.0)
-                .clamp(0.0, 1.0);
+            let strength =
+                ((libm::log2f(f64_as_f32(segment.discharge_cubic_meters_per_second)) + 4.0) / 10.0)
+                    .clamp(0.0, 1.0);
             [
                 lerp_f32(0.08, 0.02, strength),
                 lerp_f32(0.42, 0.72, strength),

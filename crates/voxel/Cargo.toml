@@ -8,9 +8,9 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+libm.workspace = true
 treeline-coordinates.workspace = true
 treeline-terrain.workspace = true
 
 [lints]
 workspace = true
-

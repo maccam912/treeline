@@ -44,3 +44,28 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps
+
+  determinism:
+    name: Cross-platform generator fingerprints
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test generator fingerprints
+        run: >-
+          cargo test
+          -p treeline-coordinates
+          -p treeline-geography
+          -p treeline-terrain
+          -p treeline-hydrology
+          -p treeline-ecology
+          --lib

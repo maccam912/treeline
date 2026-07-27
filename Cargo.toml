@@ -15,7 +15,8 @@ console_error_panic_hook = "0.1"
 egui = "0.31.1"
 egui-wgpu = "0.31.1"
 egui-winit = { version = "0.31.1", default-features = false }
-glam = "0.30.5"
+glam = { version = "0.30.5", features = ["libm"] }
+libm = { version = "0.2.16", default-features = false }
 mcubes = "0.1.7"
 pollster = "0.4.0"
 transvoxel = "2.0.0"

@@ -35,28 +35,27 @@ impl RiverSegment {
     /// Evaluates the valley carved by this segment at a horizontal position.
     ///
     /// Channel and valley scale grow continuously with catchment and discharge
-    /// rather than selecting a river preset. The square roots are deliberately
-    /// specified `f64` operations and therefore part of the generation
-    /// contract.
+    /// rather than selecting a river preset. Fused operations, square roots,
+    /// and distances use `libm` and are part of the generation contract.
     pub fn terrain_influence(self, x: f64, z: f64) -> Option<RiverTerrainInfluence> {
         if !x.is_finite() || !z.is_finite() {
             return None;
         }
         let segment_x = self.mouth.x - self.source.x;
         let segment_z = self.mouth.z - self.source.z;
-        let length_squared = segment_x.mul_add(segment_x, segment_z * segment_z);
+        let length_squared = libm::fma(segment_x, segment_x, segment_z * segment_z);
         if length_squared <= 0.0 {
             return None;
         }
         let offset_x = x - self.source.x;
         let offset_z = z - self.source.z;
         let along =
-            ((offset_x.mul_add(segment_x, offset_z * segment_z)) / length_squared).clamp(0.0, 1.0);
+            (libm::fma(offset_x, segment_x, offset_z * segment_z) / length_squared).clamp(0.0, 1.0);
         let nearest_x = self.source.x + (segment_x * along);
         let nearest_z = self.source.z + (segment_z * along);
-        let distance_meters = (x - nearest_x).hypot(z - nearest_z);
-        let catchment_scale = self.drainage_area_square_kilometers.sqrt();
-        let discharge_scale = self.discharge_cubic_meters_per_second.sqrt();
+        let distance_meters = libm::hypot(x - nearest_x, z - nearest_z);
+        let catchment_scale = libm::sqrt(self.drainage_area_square_kilometers);
+        let discharge_scale = libm::sqrt(self.discharge_cubic_meters_per_second);
         let valley_half_width_meters =
             (96.0 + (catchment_scale * 18.0)).clamp(160.0, MAX_RIVER_INFLUENCE_METERS);
         if distance_meters > valley_half_width_meters {
@@ -196,7 +195,7 @@ impl GullyNetwork {
 
             let delta_x = mouth_x - source_x;
             let delta_z = mouth_z - source_z;
-            let length = delta_x.hypot(delta_z);
+            let length = libm::hypot(delta_x, delta_z);
             if length <= 0.0 {
                 return None;
             }
@@ -223,7 +222,7 @@ impl GullyNetwork {
             let erodibility = (0.2 + (softness * 0.8))
                 * (0.25 + (profile.erosion_age * 0.75))
                 * (0.3 + (precipitation * 0.7));
-            let catchment_scale = u64_as_f64(cell.flow_accumulation_cells).sqrt();
+            let catchment_scale = libm::sqrt(u64_as_f64(cell.flow_accumulation_cells));
             let gradient = ((source_y - mouth_y) / length).clamp(0.0, 1.0);
             let half_width_meters = ((28.0 + (catchment_scale * 12.0))
                 * (0.7 + (precipitation * 0.6)))
@@ -277,16 +276,16 @@ fn closest_on_segment(
 ) -> Option<(f64, f64)> {
     let segment_x = mouth.x - source.x;
     let segment_z = mouth.z - source.z;
-    let length_squared = segment_x.mul_add(segment_x, segment_z * segment_z);
+    let length_squared = libm::fma(segment_x, segment_x, segment_z * segment_z);
     if length_squared <= 0.0 {
         return None;
     }
-    let local_along = (((x - source.x).mul_add(segment_x, (z - source.z) * segment_z))
+    let local_along = (libm::fma(x - source.x, segment_x, (z - source.z) * segment_z)
         / length_squared)
         .clamp(0.0, 1.0);
     let nearest_x = source.x + (segment_x * local_along);
     let nearest_z = source.z + (segment_z * local_along);
-    let distance = (x - nearest_x).hypot(z - nearest_z);
+    let distance = libm::hypot(x - nearest_x, z - nearest_z);
     let along = along_start + ((along_end - along_start) * local_along);
     Some((distance, along))
 }
@@ -859,7 +858,7 @@ mod tests {
 
         assert_eq!(
             stable_hash(&words),
-            15_629_364_864_375_601_938,
+            10_865_102_493_463_890_939,
             "changing this value changes climate-fed regional rivers"
         );
     }
@@ -883,7 +882,7 @@ mod tests {
 
         assert_eq!(
             stable_hash(&words),
-            16_346_003_465_188_982_832,
+            2_193_941_950_152_600_383,
             "changing this value changes seasonal-runoff regional rivers"
         );
     }

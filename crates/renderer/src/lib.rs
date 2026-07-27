@@ -575,10 +575,10 @@ fn append_tree_branch(
     let turn = f64_as_f32(tree.rotation_turns)
         + (ordinal * 0.618_034)
         + (hash_lane(tree.id, branch_index) * 0.16);
-    let (azimuth_sine, azimuth_cosine) = (turn * std::f32::consts::TAU).sin_cos();
+    let (azimuth_sine, azimuth_cosine) = libm::sincosf(turn * std::f32::consts::TAU);
     let horizontal = Vec3::new(azimuth_cosine, 0.0, azimuth_sine);
     let branch_angle = f64_as_f32(tree.genotype.branching_angle_radians);
-    let direction = (horizontal * branch_angle.sin()) + (Vec3::Y * branch_angle.cos());
+    let direction = (horizontal * libm::sinf(branch_angle)) + (Vec3::Y * libm::cosf(branch_angle));
     let height_taper = 1.0 - (branch_fraction * 0.52);
     let shape_scale = match tree.genotype.crown_shape {
         CrownShape::Conical => height_taper,
@@ -790,7 +790,7 @@ fn append_tapered_cylinder(
         };
         for side in 0..spec.sides {
             let angle = usize_as_f32(side) / usize_as_f32(spec.sides) * std::f32::consts::TAU;
-            let radial = (tangent * angle.cos()) + (bitangent * angle.sin());
+            let radial = (tangent * libm::cosf(angle)) + (bitangent * libm::sinf(angle));
             let position = center + (radial * radius);
             vertices.push(TerrainVertex {
                 position: position.to_array(),
@@ -836,7 +836,7 @@ fn append_conical_crown(
     let bitangent = axis.cross(tangent).normalize_or_zero();
     for side in 0..sides {
         let angle = usize_as_f32(side) / usize_as_f32(sides) * std::f32::consts::TAU;
-        let radial = (tangent * angle.cos()) + (bitangent * angle.sin());
+        let radial = (tangent * libm::cosf(angle)) + (bitangent * libm::sinf(angle));
         vertices.push(TerrainVertex {
             position: (base + (radial * radius)).to_array(),
             normal: (radial + (axis * 0.35)).normalize_or_zero().to_array(),

@@ -65,9 +65,11 @@ generator version 4. Multi-scale erosion is enabled by generator version 5.
 Orographic climate begins with generator version 6. Latitude-like climate,
 continentality, seasons, snowpack, and meltwater runoff begin with generator
 version 7. Soil profiles begin with generator version 8, forest distribution
-with version 9, and procedural tree individuals with version 10; older
-identities retain their prior generation contracts. Surface rocks, ground
-vegetation, survival, and networking have not been added yet.
+with version 9, and procedural tree individuals with version 10. Generator
+version 11 standardizes non-basic floating-point operations on pure-Rust
+`libm`; version 10 and older worlds require their original executable to retain
+their previous platform-math behavior. Surface rocks, ground vegetation,
+survival, and networking have not been added yet.
 
 ## Getting started
 

@@ -675,11 +675,11 @@ impl Camera {
     }
 
     fn direction(&self) -> Vec3 {
-        let pitch_cosine = self.pitch.cos();
+        let pitch_cosine = libm::cosf(self.pitch);
         Vec3::new(
-            self.yaw.cos() * pitch_cosine,
-            self.pitch.sin(),
-            self.yaw.sin() * pitch_cosine,
+            libm::cosf(self.yaw) * pitch_cosine,
+            libm::sinf(self.pitch),
+            libm::sinf(self.yaw) * pitch_cosine,
         )
         .normalize()
     }
@@ -698,7 +698,7 @@ impl Camera {
     }
 
     fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f32) {
-        let forward = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
+        let forward = Vec3::new(libm::cosf(self.yaw), 0.0, libm::sinf(self.yaw));
         let right = forward.cross(Vec3::Y);
         let movement = (forward * input.forward_axis()) + (right * input.right_axis());
         if movement.length_squared() > 0.0 {

@@ -144,6 +144,12 @@ The engine itself should remain small.
 
 Avoid building a general game engine.
 
+Deterministic generation and simulation use pure-Rust `libm` for non-basic
+floating-point operations, with architecture-specific implementations disabled.
+`glam` uses its `libm` backend. Generator version 11 establishes this contract;
+older world versions require their original executable because their platform
+math was not bit-stable across supported targets.
+
 Do not create:
 
 * a generic editor framework
