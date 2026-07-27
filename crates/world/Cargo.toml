@@ -10,7 +10,6 @@ authors.workspace = true
 [dependencies]
 libm.workspace = true
 treeline-coordinates.workspace = true
-treeline-ecology.workspace = true
 treeline-geography.workspace = true
 treeline-hydrology.workspace = true
 treeline-mesher.workspace = true

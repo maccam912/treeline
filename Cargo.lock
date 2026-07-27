@@ -2089,7 +2089,6 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "treeline-coordinates",
- "treeline-ecology",
  "treeline-geography",
  "treeline-hydrology",
  "treeline-mesher",
