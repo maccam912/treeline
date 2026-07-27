@@ -17,6 +17,7 @@ egui-wgpu = "0.31.1"
 egui-winit = { version = "0.31.1", default-features = false }
 glam = { version = "0.30.5", features = ["libm"] }
 libm = { version = "0.2.16", default-features = false }
+js-sys = "0.3"
 mcubes = "0.1.7"
 pollster = "0.4.0"
 transvoxel = "2.0.0"
@@ -36,7 +37,9 @@ treeline-world = { path = "crates/world" }
 wgpu = "24.0.5"
 winit = "0.30.12"
 wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
 web-time = "1.1"
+web-sys = "0.3"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

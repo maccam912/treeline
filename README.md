@@ -24,7 +24,10 @@ test-backed foundations described in the design. The prototype provides:
 - distance-selected 2 m, 4 m, and 8 m terrain LODs with Transvoxel seams;
 - vertically aligned near-terrain slabs that follow high mountain surfaces;
 - coarse surface-only terrain extending the visible landscape beyond 20 km;
-- prioritized asynchronous terrain meshing outside the window thread;
+- prioritized asynchronous terrain meshing outside the window thread, using
+  native threads or independent message-passing Wasm Web Workers;
+- direction-aware terrain prewarming and a bounded exact-mesh cache that reuse
+  completed terrain and lake meshes across chunk crossings;
 - phase-aware initial-generation progress and timing reports;
 - frame-budgeted terrain uploads, worker-built lake meshes, and shader-based
   near/far cutouts that avoid rebuilding 2 km far tiles at each chunk boundary;

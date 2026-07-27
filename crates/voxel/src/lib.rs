@@ -154,6 +154,18 @@ impl TransitionFaces {
         Self(0)
     }
 
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !0b1111 == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
     #[must_use]
     pub const fn with(self, face: ChunkFace) -> Self {
         Self(self.0 | face_bit(face))
@@ -289,6 +301,8 @@ mod tests {
         assert!(faces.contains(ChunkFace::HighZ));
         assert!(!faces.contains(ChunkFace::HighX));
         assert!(!faces.is_empty());
+        assert_eq!(TransitionFaces::from_bits(faces.bits()), Some(faces));
+        assert_eq!(TransitionFaces::from_bits(0b1_0000), None);
     }
 
     #[test]
