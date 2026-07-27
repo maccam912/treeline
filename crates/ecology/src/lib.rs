@@ -1,5 +1,6 @@
 //! Ecosystem primitives built from environmental variables rather than biome IDs.
 
+mod ground_vegetation;
 mod rocks;
 
 use std::collections::BTreeMap;
@@ -8,6 +9,11 @@ use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
 use treeline_geography::{Climate, RegionalProfile};
 use treeline_terrain::WildernessTerrain;
 
+pub use ground_vegetation::{
+    GROUND_VEGETATION_GENERATOR_VERSION, GroundCoverGroup, GroundPlant, GroundPlantGenotype,
+    GroundVegetation, GroundVegetationBounds, GroundVegetationComposition,
+    GroundVegetationDistribution, GroundVegetationSample,
+};
 pub use rocks::{
     RockBounds, RockForm, RockGenotype, SURFACE_ROCK_GENERATOR_VERSION, SurfaceRock,
     SurfaceRockDistribution, SurfaceRockSample, SurfaceRocks,

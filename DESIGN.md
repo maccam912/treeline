@@ -2237,10 +2237,15 @@ The world generator is the game.
       deterministic scale, orientation, embedding, fracture, weathering, and
       moss traits; the client renders their generated low-poly forms, and
       Generator Lab maps the distribution and explains nearby individuals.
-- [ ] **NEXT** — Ground vegetation
-- [ ] **PARTIAL** — Snow. Climate generates seasonal snowfall, accumulation,
-      permanent snowpack, and meltwater runoff, but terrain coverage and
-      rendering remain.
+- [x] Ground vegetation. Continuous climate-, soil-, forest-, snow-, slope-, and
+      disturbance-driven ground cover feeds globally anchored grasses and
+      sedges, flowering forbs, ferns, low shrubs, and moss cushions. Individuals
+      have deterministic height, spread, foliage, wind lean, color, and
+      flowering traits; the client renders their generated low-poly forms, and
+      Generator Lab maps the distribution and explains nearby individuals.
+- [ ] **NEXT** — Snow terrain coverage and rendering. **PARTIAL:** Climate
+      already generates seasonal snowfall, accumulation, permanent snowpack,
+      and meltwater runoff.
 - [ ] Wetlands
 - [ ] Reefs
 

@@ -5,8 +5,10 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_ecology::{
-    ForestDistribution, ForestSample, ProceduralTree, ProceduralTrees, RockBounds, Soil,
-    SoilSample, SurfaceRock, SurfaceRockDistribution, SurfaceRockSample, SurfaceRocks, TreeBounds,
+    ForestDistribution, ForestSample, GroundPlant, GroundVegetation, GroundVegetationBounds,
+    GroundVegetationDistribution, GroundVegetationSample, ProceduralTree, ProceduralTrees,
+    RockBounds, Soil, SoilSample, SurfaceRock, SurfaceRockDistribution, SurfaceRockSample,
+    SurfaceRocks, TreeBounds,
 };
 use treeline_geography::{
     Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
@@ -44,11 +46,12 @@ enum ViewMode {
     Snowpack,
     Soil,
     Forest,
+    GroundVegetation,
     SurfaceRocks,
 }
 
 impl ViewMode {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Terrain,
         Self::Watersheds,
         Self::FlowAccumulation,
@@ -60,6 +63,7 @@ impl ViewMode {
         Self::Snowpack,
         Self::Soil,
         Self::Forest,
+        Self::GroundVegetation,
         Self::SurfaceRocks,
     ];
 
@@ -76,6 +80,7 @@ impl ViewMode {
             Self::Snowpack => "snowpack",
             Self::Soil => "soil",
             Self::Forest => "forest distribution",
+            Self::GroundVegetation => "ground vegetation",
             Self::SurfaceRocks => "surface rocks",
         }
     }
@@ -93,6 +98,7 @@ impl ViewMode {
             Self::Snowpack => "9",
             Self::Soil => "0",
             Self::Forest => "F",
+            Self::GroundVegetation => "V",
             Self::SurfaceRocks => "G",
         }
     }
@@ -105,6 +111,7 @@ impl ViewMode {
                 | Self::Snowpack
                 | Self::Soil
                 | Self::Forest
+                | Self::GroundVegetation
                 | Self::SurfaceRocks
         )
     }
@@ -443,6 +450,10 @@ impl GeneratorLab {
                 self.mode = ViewMode::Forest;
                 true
             }
+            KeyCode::KeyV => {
+                self.mode = ViewMode::GroundVegetation;
+                true
+            }
             KeyCode::KeyG => {
                 self.mode = ViewMode::SurfaceRocks;
                 true
@@ -541,10 +552,17 @@ impl GeneratorLab {
         let Some(forest) = ForestDistribution::new(world).sample(x, z) else {
             return;
         };
+        let Some(ground_vegetation) = GroundVegetationDistribution::new(world).sample(x, z) else {
+            return;
+        };
         let Some(rock_distribution) = SurfaceRockDistribution::new(world).sample(x, z) else {
             return;
         };
         let Some(tree_inspection) = inspect_nearby_trees(world, x, z) else {
+            return;
+        };
+        let Some(ground_vegetation_inspection) = inspect_nearby_ground_vegetation(world, x, z)
+        else {
             return;
         };
         let Some(rock_inspection) = inspect_nearby_rocks(world, x, z) else {
@@ -571,9 +589,10 @@ impl GeneratorLab {
         let lake_surface = generated_terrain.lake_surface_at(x, z);
         let drainage_summary = describe_drainage(drainage, river, lake);
         let tree_summary = tree_inspection.summary();
+        let ground_vegetation_summary = ground_vegetation_inspection.summary();
         let rock_summary = rock_inspection.summary();
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ground {:.0}% {}, {} nearby, nearest {ground_vegetation_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | ridge +{:.0} m | {drainage_summary}",
             self.season.label(),
             seasonal_climate.mean_temperature_celsius,
             seasonal_climate.snowpack_water_equivalent_millimeters,
@@ -585,15 +604,20 @@ impl GeneratorLab {
             forest.dominant_group().label(),
             forest.stand_age_years,
             tree_inspection.count,
+            ground_vegetation.ground_cover_fraction * 100.0,
+            ground_vegetation.dominant_group().label(),
+            ground_vegetation_inspection.count,
             rock_distribution.density_per_hectare,
             rock_inspection.count,
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nsurface-rock distribution: {rock_distribution:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nground-vegetation distribution: {ground_vegetation:#?}\nsurface-rock distribution: {rock_distribution:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby ground-vegetation count: {}\nnearest ground plant: {nearest_ground_plant:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
             tree_inspection.count,
+            ground_vegetation_inspection.count,
             rock_inspection.count,
             nearest_tree = tree_inspection.nearest,
+            nearest_ground_plant = ground_vegetation_inspection.nearest,
             nearest_rock = rock_inspection.nearest,
         );
         self.inspection = Some(summary);
@@ -762,6 +786,46 @@ fn inspect_nearby_trees(world: WorldIdentity, x: f64, z: f64) -> Option<NearbyTr
     });
     Some(NearbyTreeInspection {
         count: trees.len(),
+        nearest: nearest.copied(),
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NearbyGroundVegetationInspection {
+    count: usize,
+    nearest: Option<GroundPlant>,
+}
+
+impl NearbyGroundVegetationInspection {
+    fn summary(self) -> String {
+        self.nearest.map_or_else(
+            || "no nearby ground plant".to_owned(),
+            |plant| {
+                format!(
+                    "{} {:.2} m tall, {:.2} m wide",
+                    plant.genotype.group.label(),
+                    plant.height_meters,
+                    plant.radius_meters * 2.0
+                )
+            },
+        )
+    }
+}
+
+fn inspect_nearby_ground_vegetation(
+    world: WorldIdentity,
+    x: f64,
+    z: f64,
+) -> Option<NearbyGroundVegetationInspection> {
+    let bounds = GroundVegetationBounds::new(x - 16.0, z - 16.0, x + 16.0, z + 16.0)?;
+    let plants = GroundVegetation::new(world).plants_in(bounds)?;
+    let nearest = plants.iter().min_by(|left, right| {
+        let left_distance = libm::fma(left.x - x, left.x - x, (left.z - z) * (left.z - z));
+        let right_distance = libm::fma(right.x - x, right.x - x, (right.z - z) * (right.z - z));
+        left_distance.total_cmp(&right_distance)
+    });
+    Some(NearbyGroundVegetationInspection {
+        count: plants.len(),
         nearest: nearest.copied(),
     })
 }
@@ -981,7 +1045,7 @@ fn draw_keyboard_help(ui: &mut egui::Ui) {
     ui.heading("Keyboard & mouse");
     for help in [
         "1–9  Select view layer",
-        "0 / F / G  Soil / forest / surface rocks",
+        "0 / F / V / G  Soil / forest / ground vegetation / surface rocks",
         "C  Advance climate season",
         "WASD / arrows  Pan",
         "+ / − / wheel  Zoom",
@@ -1043,6 +1107,7 @@ fn generate_drainage_mesh(
         climate: Climate::new(world),
         soil: Soil::new(world),
         forest: ForestDistribution::new(world),
+        ground_vegetation: GroundVegetationDistribution::new(world),
         surface_rocks: SurfaceRockDistribution::new(world),
     };
     let mut regions = BTreeMap::new();
@@ -1119,6 +1184,7 @@ struct EnvironmentLayers {
     climate: Climate,
     soil: Soil,
     forest: ForestDistribution,
+    ground_vegetation: GroundVegetationDistribution,
     surface_rocks: SurfaceRockDistribution,
 }
 
@@ -1139,6 +1205,9 @@ fn environment_layer_color(
         }
         ViewMode::Soil => Some(soil_color(layers.soil.sample(x, z)?)),
         ViewMode::Forest => Some(forest_color(layers.forest.sample(x, z)?)),
+        ViewMode::GroundVegetation => Some(ground_vegetation_color(
+            layers.ground_vegetation.sample(x, z)?,
+        )),
         ViewMode::SurfaceRocks => Some(surface_rock_color(layers.surface_rocks.sample(x, z)?)),
         ViewMode::Terrain
         | ViewMode::Watersheds
@@ -1246,6 +1315,7 @@ fn drainage_color(
         | ViewMode::Snowpack
         | ViewMode::Soil
         | ViewMode::Forest
+        | ViewMode::GroundVegetation
         | ViewMode::SurfaceRocks => [1.0, 0.0, 1.0, 1.0],
     }
 }
@@ -1332,6 +1402,39 @@ fn forest_color(forest: ForestSample) -> [f32; 4] {
         lerp_f32(bare[0], forest_tint[0], visible_cover) + (disturbance * 0.10),
         lerp_f32(bare[1], forest_tint[1], visible_cover) - (disturbance * 0.08),
         lerp_f32(bare[2], forest_tint[2], visible_cover) - (disturbance * 0.04),
+        1.0,
+    ]
+}
+
+fn ground_vegetation_color(vegetation: GroundVegetationSample) -> [f32; 4] {
+    let composition = vegetation.composition;
+    let graminoid = f64_as_f32(composition.graminoid_fraction);
+    let forb = f64_as_f32(composition.forb_fraction);
+    let fern = f64_as_f32(composition.fern_fraction);
+    let shrub = f64_as_f32(composition.low_shrub_fraction);
+    let moss = f64_as_f32(composition.moss_fraction);
+    let cover = f64_as_f32(vegetation.ground_cover_fraction);
+    let flower = f64_as_f32(vegetation.flowering_fraction);
+    let vegetation_tint = [
+        (graminoid * 0.33)
+            + (forb * 0.28)
+            + (fern * 0.08)
+            + (shrub * 0.18)
+            + (moss * 0.24)
+            + (flower * 0.22),
+        (graminoid * 0.58) + (forb * 0.48) + (fern * 0.37) + (shrub * 0.32) + (moss * 0.43),
+        (graminoid * 0.10)
+            + (forb * 0.15)
+            + (fern * 0.11)
+            + (shrub * 0.08)
+            + (moss * 0.09)
+            + (flower * 0.16),
+    ];
+    let sparse_ground = [0.48, 0.38, 0.20];
+    [
+        lerp_f32(sparse_ground[0], vegetation_tint[0], cover),
+        lerp_f32(sparse_ground[1], vegetation_tint[1], cover),
+        lerp_f32(sparse_ground[2], vegetation_tint[2], cover),
         1.0,
     ]
 }
@@ -1425,6 +1528,41 @@ mod tests {
             Season::Summer,
         )
         .expect("surface-rock view mesh");
+        let first = mesh.colors[0];
+
+        assert_eq!(mesh.colors.len(), mesh.positions.len());
+        assert!(
+            mesh.colors
+                .iter()
+                .all(|color| (color[3] - 1.0).abs() < f32::EPSILON)
+        );
+        assert!(mesh.colors.iter().any(|color| {
+            color
+                .iter()
+                .zip(first)
+                .map(|(channel, first_channel)| (channel - first_channel).abs())
+                .sum::<f32>()
+                > 0.01
+        }));
+        assert!(mesh.colors.iter().all(|color| {
+            color[..3]
+                .iter()
+                .all(|channel| (0.0..=1.0).contains(channel))
+        }));
+    }
+
+    #[test]
+    fn ground_vegetation_view_generates_varied_opaque_distribution_colors() {
+        let mesh = generate_mesh(
+            0x5eed,
+            [0.0, 0.0],
+            64_000.0,
+            64,
+            64,
+            ViewMode::GroundVegetation,
+            Season::Summer,
+        )
+        .expect("ground-vegetation view mesh");
         let first = mesh.colors[0];
 
         assert_eq!(mesh.colors.len(), mesh.positions.len());
