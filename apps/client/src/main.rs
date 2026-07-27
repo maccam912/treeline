@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +49,9 @@ const START_YAW: f32 = 0.164;
 const START_PITCH: f32 = -0.08;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
+const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 10;
+const DISTANT_TREE_SIMPLIFIED_DISTANCE_MULTIPLIER: u64 = 4;
+const DISTANT_TREE_TILE_CHUNKS_PER_EDGE: u64 = 4;
 #[cfg(not(target_arch = "wasm32"))]
 const TERRAIN_PREFETCH_CENTERS_AHEAD: u64 = 2;
 #[cfg(target_arch = "wasm32")]
@@ -231,6 +234,8 @@ struct Game {
     renderer: TerrainRenderer,
     terrain_chunks: BTreeMap<ChunkIndex, ResidentTerrainChunk>,
     far_terrain_tiles: BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
+    distant_tree_tiles: BTreeMap<DistantTreeTileIndex, ResidentDistantTreeTile>,
+    pending_distant_tree_tiles: VecDeque<DistantTreeMeshSpec>,
     requested_chunks: BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far_tiles: BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
     terrain_jobs: ClientTerrainMeshQueue,
@@ -326,6 +331,8 @@ impl Game {
         let far_terrain_streamer = FarTerrainStreamer::new(far_terrain_streaming_config());
         let mut terrain_chunks = BTreeMap::new();
         let mut far_terrain_tiles = BTreeMap::new();
+        let distant_tree_tiles = BTreeMap::new();
+        let pending_distant_tree_tiles = VecDeque::new();
         let mut requested_chunks = BTreeMap::new();
         let mut requested_far_tiles = BTreeMap::new();
         #[cfg(not(target_arch = "wasm32"))]
@@ -375,6 +382,8 @@ impl Game {
             renderer,
             terrain_chunks,
             far_terrain_tiles,
+            distant_tree_tiles,
+            pending_distant_tree_tiles,
             requested_chunks,
             requested_far_tiles,
             terrain_jobs,
@@ -468,6 +477,17 @@ impl Game {
         ) {
             eprintln!("terrain chunk streaming failed: {error}");
         }
+        if let Err(error) = update_distant_trees(
+            &self.device,
+            &self.renderer,
+            &self.terrain,
+            self.chunk_streamer.config(),
+            self.camera.world_position(),
+            &mut self.distant_tree_tiles,
+            &mut self.pending_distant_tree_tiles,
+        ) {
+            eprintln!("distant tree streaming failed: {error}");
+        }
         self.initial_generation.publish(&self.window);
         self.renderer.update_camera(
             &self.queue,
@@ -502,6 +522,11 @@ impl Game {
                     self.far_terrain_tiles
                         .values()
                         .filter_map(|resident| resident.lake_mesh.as_ref()),
+                )
+                .chain(
+                    self.distant_tree_tiles
+                        .values()
+                        .filter_map(|resident| resident.mesh.as_ref()),
                 ),
             self.terrain_chunks
                 .values()
@@ -546,6 +571,49 @@ struct ResidentFarTerrainTile {
     spec: FarTerrainMeshSpec,
     mesh: TerrainMesh,
     lake_mesh: Option<TerrainMesh>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct DistantTreeTileIndex {
+    x: i64,
+    z: i64,
+}
+
+impl DistantTreeTileIndex {
+    fn containing(position: WorldPosition) -> Option<Self> {
+        let chunk = ChunkIndex::containing(position)?;
+        let chunks_per_edge = i64::try_from(DISTANT_TREE_TILE_CHUNKS_PER_EDGE).ok()?;
+        Some(Self {
+            x: chunk.x.div_euclid(chunks_per_edge),
+            z: chunk.z.div_euclid(chunks_per_edge),
+        })
+    }
+
+    fn bounds(self) -> Option<TreeBounds> {
+        let chunks_per_edge = i64::try_from(DISTANT_TREE_TILE_CHUNKS_PER_EDGE).ok()?;
+        let chunk = ChunkIndex::new(
+            self.x.checked_mul(chunks_per_edge)?,
+            self.z.checked_mul(chunks_per_edge)?,
+        );
+        let origin = chunk.sample_origin();
+        let edge = ChunkIndex::edge_meters() * 4.0;
+        TreeBounds::new(origin.x, origin.z, origin.x + edge, origin.z + edge)
+    }
+
+    fn chebyshev_distance(self, other: Self) -> u64 {
+        self.x.abs_diff(other.x).max(self.z.abs_diff(other.z))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DistantTreeMeshSpec {
+    tile: DistantTreeTileIndex,
+    detail: TreeMeshDetail,
+}
+
+struct ResidentDistantTreeTile {
+    spec: DistantTreeMeshSpec,
+    mesh: Option<TerrainMesh>,
 }
 
 #[derive(Debug)]
@@ -1088,6 +1156,122 @@ fn update_terrain(
     )
 }
 
+fn update_distant_trees(
+    device: &wgpu::Device,
+    renderer: &TerrainRenderer,
+    terrain: &GeneratedWorldTerrain,
+    config: ChunkStreamingConfig,
+    player_position: WorldPosition,
+    tiles: &mut BTreeMap<DistantTreeTileIndex, ResidentDistantTreeTile>,
+    pending: &mut VecDeque<DistantTreeMeshSpec>,
+) -> Result<(), Box<dyn Error>> {
+    let center = DistantTreeTileIndex::containing(player_position)
+        .ok_or_else(|| std::io::Error::other("player position is outside tree tile range"))?;
+    let load_radius = distant_tree_load_radius(config);
+    let retain_radius = load_radius.saturating_add(1);
+    let desired = desired_distant_tree_tiles(center, config)?;
+
+    tiles.retain(|tile, _| tile.chebyshev_distance(center) <= retain_radius);
+    pending.retain(|spec| desired.get(&spec.tile) == Some(&spec.detail));
+
+    let mut missing = desired
+        .iter()
+        .filter_map(|(&tile, &detail)| {
+            let spec = DistantTreeMeshSpec { tile, detail };
+            if tiles
+                .get(&tile)
+                .is_some_and(|resident| resident.spec == spec)
+                || pending.contains(&spec)
+            {
+                None
+            } else {
+                tiles.remove(&tile);
+                Some(spec)
+            }
+        })
+        .collect::<Vec<_>>();
+    missing.sort_by_key(|spec| {
+        (
+            spec.tile.chebyshev_distance(center),
+            spec.tile.z,
+            spec.tile.x,
+        )
+    });
+    pending.extend(missing);
+
+    if let Some(spec) = pending.pop_front() {
+        let mesh = distant_tree_mesh_for_tile(device, renderer, terrain, spec)?;
+        tiles.insert(spec.tile, ResidentDistantTreeTile { spec, mesh });
+    }
+    Ok(())
+}
+
+fn desired_distant_tree_tiles(
+    center: DistantTreeTileIndex,
+    config: ChunkStreamingConfig,
+) -> Result<BTreeMap<DistantTreeTileIndex, TreeMeshDetail>, Box<dyn Error>> {
+    let load_radius = distant_tree_load_radius(config);
+    let load_radius_i64 = i64::try_from(load_radius)?;
+    let simplified_radius = config
+        .load_radius()
+        .saturating_mul(DISTANT_TREE_SIMPLIFIED_DISTANCE_MULTIPLIER)
+        .div_ceil(DISTANT_TREE_TILE_CHUNKS_PER_EDGE);
+    let mut desired = BTreeMap::new();
+    for z_offset in -load_radius_i64..=load_radius_i64 {
+        for x_offset in -load_radius_i64..=load_radius_i64 {
+            let tile = DistantTreeTileIndex {
+                x: center
+                    .x
+                    .checked_add(x_offset)
+                    .ok_or_else(|| std::io::Error::other("tree tile x index overflow"))?,
+                z: center
+                    .z
+                    .checked_add(z_offset)
+                    .ok_or_else(|| std::io::Error::other("tree tile z index overflow"))?,
+            };
+            let detail = if tile.chebyshev_distance(center) <= simplified_radius {
+                TreeMeshDetail::Simplified
+            } else {
+                TreeMeshDetail::Silhouette
+            };
+            desired.insert(tile, detail);
+        }
+    }
+    Ok(desired)
+}
+
+const fn distant_tree_load_radius(config: ChunkStreamingConfig) -> u64 {
+    config
+        .load_radius()
+        .saturating_mul(DISTANT_TREE_DISTANCE_MULTIPLIER)
+        .div_ceil(DISTANT_TREE_TILE_CHUNKS_PER_EDGE)
+}
+
+fn distant_tree_mesh_for_tile(
+    device: &wgpu::Device,
+    renderer: &TerrainRenderer,
+    terrain: &GeneratedWorldTerrain,
+    spec: DistantTreeMeshSpec,
+) -> Result<Option<TerrainMesh>, Box<dyn Error>> {
+    let bounds = spec
+        .tile
+        .bounds()
+        .ok_or_else(|| std::io::Error::other("distant tree tile bounds are invalid"))?;
+    let mut trees = ProceduralTrees::new(terrain.world())
+        .trees_in(bounds)
+        .ok_or_else(|| std::io::Error::other("distant tree generation is unavailable"))?;
+    trees.retain(|tree| surface_feature_has_dry_ground(terrain, tree.x, tree.z));
+    if trees.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(renderer.upload_trees(
+        device,
+        &trees,
+        spec.detail,
+        |x, z| terrain.surface_height(x, z),
+    )?))
+}
+
 fn tree_mesh_for_chunk(
     device: &wgpu::Device,
     renderer: &TerrainRenderer,
@@ -1413,6 +1597,45 @@ mod tests {
         assert_eq!(
             tree_mesh_detail(spec(ChunkIndex::MAX_LOD)),
             TreeMeshDetail::Silhouette
+        );
+    }
+
+    #[test]
+    fn distant_tree_plan_extends_ten_times_farther_with_a_visible_middle_ring() {
+        let config = ChunkStreamingConfig::new(4, 5).expect("valid terrain radii");
+        let center = DistantTreeTileIndex { x: 0, z: 0 };
+        let desired = desired_distant_tree_tiles(center, config).expect("distant tree plan");
+        let load_radius = distant_tree_load_radius(config);
+
+        assert_eq!(load_radius, 10);
+        assert_eq!(desired.len(), 441);
+        assert_eq!(
+            desired.get(&DistantTreeTileIndex { x: 4, z: 0 }),
+            Some(&TreeMeshDetail::Simplified)
+        );
+        assert_eq!(
+            desired.get(&DistantTreeTileIndex { x: 5, z: 0 }),
+            Some(&TreeMeshDetail::Silhouette)
+        );
+        assert_eq!(
+            load_radius * DISTANT_TREE_TILE_CHUNKS_PER_EDGE,
+            config.load_radius() * DISTANT_TREE_DISTANCE_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn distant_tree_tiles_are_half_open_across_negative_boundaries() {
+        assert_eq!(
+            DistantTreeTileIndex::containing(WorldPosition::new(-0.001, 0.0, -128.0)),
+            Some(DistantTreeTileIndex { x: -1, z: -1 })
+        );
+        assert_eq!(
+            DistantTreeTileIndex::containing(WorldPosition::new(0.0, 0.0, 127.999)),
+            Some(DistantTreeTileIndex { x: 0, z: 0 })
+        );
+        assert_eq!(
+            DistantTreeTileIndex::containing(WorldPosition::new(128.0, 0.0, 128.0)),
+            Some(DistantTreeTileIndex { x: 1, z: 1 })
         );
     }
 
