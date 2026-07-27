@@ -41,8 +41,10 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
-const START_X: f32 = 78_576.0;
-const START_Z: f32 = -50_160.0;
+const START_X: f32 = 78_491.44;
+const START_Z: f32 = -50_153.98;
+const START_YAW: f32 = -2.13;
+const START_PITCH: f32 = -0.08;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
 #[cfg(not(target_arch = "wasm32"))]
@@ -335,7 +337,7 @@ impl Game {
         let spawn_preparation_started = Instant::now();
         let start_y = surface_height(&terrain, START_X, START_Z) + EYE_HEIGHT;
         let spawn_preparation_time = spawn_preparation_started.elapsed();
-        let camera = Camera::new(Vec3::new(START_X, start_y, START_Z));
+        let camera = Camera::new(Vec3::new(START_X, start_y, START_Z), START_YAW, START_PITCH);
         schedule_terrain(
             chunk_streamer,
             far_terrain_streamer,
@@ -691,11 +693,11 @@ struct Camera {
 }
 
 impl Camera {
-    const fn new(position: Vec3) -> Self {
+    const fn new(position: Vec3, yaw: f32, pitch: f32) -> Self {
         Self {
             position,
-            yaw: -std::f32::consts::FRAC_PI_2,
-            pitch: 0.0,
+            yaw,
+            pitch,
         }
     }
 
@@ -1350,17 +1352,17 @@ mod tests {
     }
 
     #[test]
-    fn lakeshore_spawn_exposes_real_water_and_retains_nearby_trees() {
+    fn prototype_region_exposes_real_lake() {
+        const LAKE_X: f64 = 78_576.0;
+        const LAKE_Z: f64 = -50_160.0;
         let terrain = GeneratedWorldTerrain::new(WORLD);
         assert!(
-            terrain
-                .lake_surface_at(f64::from(START_X), f64::from(START_Z))
-                .is_none()
+            terrain.lake_surface_at(LAKE_X, LAKE_Z).is_none(),
+            "the known lakeshore should remain dry"
         );
         assert!(
-            terrain
-                .lake_surface_at(f64::from(START_X), f64::from(START_Z - 16.0))
-                .is_some()
+            terrain.lake_surface_at(LAKE_X, LAKE_Z - 16.0).is_some(),
+            "the lake should begin just south of the known shore"
         );
         for [x_offset, z_offset] in [
             [0.0, -192.0],
@@ -1370,12 +1372,22 @@ mod tests {
         ] {
             assert!(
                 terrain
-                    .lake_surface_at(f64::from(START_X + x_offset), f64::from(START_Z + z_offset))
+                    .lake_surface_at(LAKE_X + x_offset, LAKE_Z + z_offset)
                     .is_some_and(|water| water.water_depth_meters >= 0.5),
-                "spawn should overlook a broad, visible lake"
+                "the prototype region should retain a broad, visible lake"
             );
         }
+    }
 
+    #[test]
+    fn rock_showcase_spawn_faces_a_boulder_and_retains_nearby_trees() {
+        let terrain = GeneratedWorldTerrain::new(WORLD);
+        assert!(
+            terrain
+                .lake_surface_at(f64::from(START_X), f64::from(START_Z))
+                .is_none(),
+            "spawn should begin on dry ground"
+        );
         let center = ChunkIndex::containing(WorldPosition::new(
             f64::from(START_X),
             0.0,
@@ -1409,11 +1421,14 @@ mod tests {
 
         let rock_bounds =
             RockBounds::new(min.x, min.z, max.x, max.z).expect("spawn surface-rock bounds");
-        let rock_clearance = SurfaceRocks::new(WORLD)
+        let rocks = SurfaceRocks::new(WORLD)
             .rocks_in(rock_bounds)
             .expect("surface-rock generation")
             .into_iter()
             .filter(|rock| surface_feature_has_dry_ground(&terrain, rock.x, rock.z))
+            .collect::<Vec<_>>();
+        let rock_clearance = rocks
+            .iter()
             .map(|rock| {
                 (rock.x - f64::from(START_X)).hypot(rock.z - f64::from(START_Z))
                     - rock.radii_meters[0].max(rock.radii_meters[2])
@@ -1422,6 +1437,23 @@ mod tests {
         assert!(
             rock_clearance >= 1.0,
             "spawn should not begin inside a surface rock"
+        );
+
+        let camera_direction = Camera::new(Vec3::ZERO, START_YAW, START_PITCH).direction();
+        assert!(
+            rocks.iter().any(|rock| {
+                let offset = Vec2::new(
+                    f64_as_f32(rock.x - f64::from(START_X)),
+                    f64_as_f32(rock.z - f64::from(START_Z)),
+                );
+                offset.length() <= 25.0
+                    && rock.radii_meters[1] >= 1.0
+                    && offset
+                        .normalize_or_zero()
+                        .dot(Vec2::new(camera_direction.x, camera_direction.z))
+                        >= 0.98
+            }),
+            "the initial camera should face a nearby boulder-sized rock"
         );
     }
 
