@@ -37,6 +37,8 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
+const START_X: f32 = 46_392.0;
+const START_Z: f32 = -23_211.0;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
 
@@ -314,12 +316,10 @@ impl Game {
             GeneratedWorldTerrain::lake_surface_mesh,
         );
 
-        let start_x = 16.0;
-        let start_z = 80.0;
         let spawn_preparation_started = Instant::now();
-        let start_y = surface_height(&terrain, start_x, start_z) + EYE_HEIGHT;
+        let start_y = surface_height(&terrain, START_X, START_Z) + EYE_HEIGHT;
         let spawn_preparation_time = spawn_preparation_started.elapsed();
-        let camera = Camera::new(Vec3::new(start_x, start_y, start_z));
+        let camera = Camera::new(Vec3::new(START_X, start_y, START_Z));
         schedule_terrain(
             chunk_streamer,
             far_terrain_streamer,
@@ -1045,17 +1045,19 @@ fn tree_mesh_for_chunk(
     let mut trees = ProceduralTrees::new(terrain.world())
         .trees_in(bounds)
         .ok_or_else(|| std::io::Error::other("tree generation is unavailable"))?;
-    trees.retain(|tree| {
-        terrain.lake_surface_at(tree.x, tree.z).is_none()
-            && !terrain
-                .river_influence_at(tree.x, tree.z)
-                .is_some_and(|river| river.blend > 0.24)
-    });
+    trees.retain(|tree| tree_has_dry_ground(terrain, tree.x, tree.z));
     if trees.is_empty() {
         return Ok(None);
     }
     let mesh = renderer.upload_trees(device, &trees, |x, z| terrain.surface_height(x, z))?;
     Ok(Some(mesh))
+}
+
+fn tree_has_dry_ground(terrain: &GeneratedWorldTerrain, x: f64, z: f64) -> bool {
+    terrain.lake_surface_at(x, z).is_none()
+        && !terrain
+            .river_influence_at(x, z)
+            .is_some_and(|river| river.distance_meters <= river.channel_half_width_meters)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1240,6 +1242,84 @@ mod tests {
                 .zip([160.0, 160.0])
                 .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
         );
+    }
+
+    #[test]
+    fn lakeshore_spawn_exposes_real_water_and_retains_nearby_trees() {
+        let terrain = GeneratedWorldTerrain::new(WORLD);
+        assert!(
+            terrain
+                .lake_surface_at(f64::from(START_X), f64::from(START_Z))
+                .is_none()
+        );
+        assert!(
+            terrain
+                .lake_surface_at(f64::from(START_X), f64::from(START_Z - 16.0))
+                .is_some()
+        );
+        for [x_offset, z_offset] in [
+            [0.0, -192.0],
+            [0.0, -320.0],
+            [-128.0, -192.0],
+            [128.0, -192.0],
+        ] {
+            assert!(
+                terrain
+                    .lake_surface_at(f64::from(START_X + x_offset), f64::from(START_Z + z_offset))
+                    .is_some_and(|water| water.water_depth_meters >= 0.5),
+                "spawn should overlook a broad, visible lake"
+            );
+        }
+
+        let center = ChunkIndex::containing(WorldPosition::new(
+            f64::from(START_X),
+            0.0,
+            f64::from(START_Z),
+        ))
+        .expect("spawn chunk");
+        let cutout = NearTerrainCutout::around(center, chunk_streaming_config().load_radius())
+            .expect("spawn residency");
+        let min = cutout.min.sample_origin();
+        let max = cutout.max_exclusive.sample_origin();
+        let bounds = TreeBounds::new(min.x, min.z, max.x, max.z).expect("spawn tree bounds");
+        let retained = ProceduralTrees::new(WORLD)
+            .trees_in(bounds)
+            .expect("tree generation")
+            .into_iter()
+            .filter(|tree| tree_has_dry_ground(&terrain, tree.x, tree.z))
+            .collect::<Vec<_>>();
+        let crown_clearance = retained
+            .iter()
+            .map(|tree| {
+                (tree.x - f64::from(START_X)).hypot(tree.z - f64::from(START_Z))
+                    - tree.crown_radius_meters
+            })
+            .fold(f64::INFINITY, f64::min);
+
+        assert!(retained.len() >= 20, "spawn should retain a visible stand");
+        assert!(
+            crown_clearance >= 5.0,
+            "spawn should not begin inside a tree crown"
+        );
+    }
+
+    #[test]
+    fn tree_filter_excludes_channels_without_clearing_river_valleys() {
+        let terrain = GeneratedWorldTerrain::new(WORLD);
+        let bounds = TreeBounds::new(-64.0, 0.0, 96.0, 160.0).expect("old spawn bounds");
+        let trees = ProceduralTrees::new(WORLD)
+            .trees_in(bounds)
+            .expect("tree generation");
+        let valley_tree = trees.into_iter().find(|tree| {
+            terrain
+                .river_influence_at(tree.x, tree.z)
+                .is_some_and(|river| {
+                    river.blend > 0.24 && river.distance_meters > river.channel_half_width_meters
+                })
+        });
+
+        let tree = valley_tree.expect("old spawn should contain a tree outside the channel");
+        assert!(tree_has_dry_ground(&terrain, tree.x, tree.z));
     }
 
     #[test]
