@@ -1,6 +1,8 @@
 //! Ecosystem primitives built from environmental variables rather than biome IDs.
 
-use treeline_coordinates::{CellIndex, WorldIdentity};
+use std::collections::BTreeMap;
+
+use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
 use treeline_geography::{Climate, RegionalProfile};
 use treeline_terrain::WildernessTerrain;
 
@@ -8,6 +10,8 @@ use treeline_terrain::WildernessTerrain;
 pub const SOIL_GENERATOR_VERSION: u32 = 8;
 /// Generator version that first exposes deterministic forest distributions.
 pub const FOREST_GENERATOR_VERSION: u32 = 9;
+/// Generator version that first exposes deterministic procedural tree individuals.
+pub const TREE_GENERATOR_VERSION: u32 = 10;
 
 const DOMAIN_FOREST_PATCHES: u64 = 0x464f_5245_5354_5041;
 const DOMAIN_FOREST_STANDS: u64 = 0x464f_5245_5354_5354;
@@ -19,6 +23,9 @@ const DOMAIN_LANDSLIDE_HISTORY: u64 = 0x4c41_4e44_534c_4944;
 const FOREST_PATCH_EDGE_METERS: f64 = 2_000.0;
 const FOREST_STAND_EDGE_METERS: f64 = 12_000.0;
 const FOREST_HISTORY_EDGE_METERS: f64 = 32_000.0;
+const DOMAIN_TREE_INDIVIDUALS: u64 = 0x5452_4545_5f49_4e44;
+const TREE_PLACEMENT_CELL_EDGE_METERS: f64 = 6.0;
+const TREE_ENVIRONMENT_CELL_EDGE_METERS: f64 = 48.0;
 
 /// Broad, explainable soil texture derived from mineral fractions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -520,6 +527,467 @@ impl ForestDistribution {
     }
 }
 
+/// Half-open horizontal area used to request individual trees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TreeBounds {
+    min_x: f64,
+    min_z: f64,
+    max_x: f64,
+    max_z: f64,
+}
+
+impl TreeBounds {
+    /// Creates finite, non-empty tree-generation bounds.
+    pub fn new(min_x: f64, min_z: f64, max_x: f64, max_z: f64) -> Option<Self> {
+        [min_x, min_z, max_x, max_z]
+            .into_iter()
+            .all(f64::is_finite)
+            .then_some(())
+            .filter(|()| min_x < max_x && min_z < max_z)?;
+        Some(Self {
+            min_x,
+            min_z,
+            max_x,
+            max_z,
+        })
+    }
+
+    fn contains(self, x: f64, z: f64) -> bool {
+        x >= self.min_x && x < self.max_x && z >= self.min_z && z < self.max_z
+    }
+}
+
+/// Broad crown architecture selected by a tree's procedural genotype.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CrownShape {
+    Conical,
+    Columnar,
+    Rounded,
+    Spreading,
+}
+
+/// Bark architecture used to vary trunk color and surface treatment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BarkStyle {
+    Scaly,
+    Smooth,
+    Furrowed,
+    Plated,
+}
+
+/// Visible life history of one tree individual.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TreeCondition {
+    Sapling,
+    Mature,
+    Ancient,
+    WindDamaged,
+    Fallen,
+    DeadStanding,
+    StormBroken,
+}
+
+impl TreeCondition {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sapling => "sapling",
+            Self::Mature => "mature",
+            Self::Ancient => "ancient",
+            Self::WindDamaged => "wind-damaged",
+            Self::Fallen => "fallen",
+            Self::DeadStanding => "dead standing",
+            Self::StormBroken => "storm-broken",
+        }
+    }
+}
+
+/// Continuous architecture and environmental responses for one procedural tree.
+///
+/// Functional groups provide ecological strategy, while these values vary per
+/// individual. Renderers consume the genotype as a grammar rather than choosing
+/// from a fixed library of tree models.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TreeGenotype {
+    pub functional_group: TreeFunctionalGroup,
+    pub mature_height_meters: f64,
+    pub height_variation_fraction: f64,
+    pub trunk_taper_fraction: f64,
+    pub branching_angle_radians: f64,
+    pub branch_density_fraction: f64,
+    pub crown_shape: CrownShape,
+    pub leaf_density_fraction: f64,
+    pub bark_style: BarkStyle,
+    pub slope_response_fraction: f64,
+    pub wind_response_fraction: f64,
+    pub competition_response_fraction: f64,
+}
+
+/// A deterministic tree individual positioned on the global horizontal lattice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProceduralTree {
+    pub id: u64,
+    pub x: f64,
+    pub z: f64,
+    pub age_years: f64,
+    pub height_meters: f64,
+    pub trunk_base_radius_meters: f64,
+    pub crown_radius_meters: f64,
+    pub lean_direction: [f64; 2],
+    pub lean_fraction: f64,
+    pub damage_fraction: f64,
+    pub rotation_turns: f64,
+    pub condition: TreeCondition,
+    pub genotype: TreeGenotype,
+}
+
+/// Functional generator for spatially stable tree individuals and architectures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProceduralTrees {
+    pub world: WorldIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TreeCellEnvironment {
+    forest: ForestSample,
+    soil: SoilSample,
+    prevailing_wind: [f64; 2],
+}
+
+impl ProceduralTrees {
+    pub const fn new(world: WorldIdentity) -> Self {
+        Self { world }
+    }
+
+    /// Generates all tree bases inside a half-open horizontal area.
+    ///
+    /// A global six-meter lattice owns placement candidates. Each cell samples
+    /// the forest field once, then stochastically rounds its expected stem count
+    /// and jitters those stems inside the cell. Filtering after generation makes
+    /// adjacent requests share exact boundary behavior and keeps output
+    /// independent of request or job order. IEEE-754 arithmetic and stable hashes
+    /// are part of the generator-version-10 contract.
+    pub fn trees_in(self, bounds: TreeBounds) -> Option<Vec<ProceduralTree>> {
+        if self.world.generator_version < TREE_GENERATOR_VERSION {
+            return None;
+        }
+        let minimum = CellIndex::containing(
+            bounds.min_x,
+            bounds.min_z,
+            0,
+            TREE_PLACEMENT_CELL_EDGE_METERS,
+        )?;
+        let maximum = CellIndex::containing(
+            bounds.max_x,
+            bounds.max_z,
+            0,
+            TREE_PLACEMENT_CELL_EDGE_METERS,
+        )?;
+        let forest = ForestDistribution::new(self.world);
+        let soil = Soil::new(self.world);
+        let climate = Climate::new(self.world);
+        let mut environments = BTreeMap::new();
+        let mut trees = Vec::new();
+        let mut cell_z = minimum.z;
+        loop {
+            let mut cell_x = minimum.x;
+            loop {
+                let cell = CellIndex::new(cell_x, cell_z, 0);
+                let origin_x = index_as_f64(cell_x) * TREE_PLACEMENT_CELL_EDGE_METERS;
+                let origin_z = index_as_f64(cell_z) * TREE_PLACEMENT_CELL_EDGE_METERS;
+                let center_x = origin_x + (TREE_PLACEMENT_CELL_EDGE_METERS * 0.5);
+                let center_z = origin_z + (TREE_PLACEMENT_CELL_EDGE_METERS * 0.5);
+                let environment_cell = CellIndex::containing(
+                    center_x,
+                    center_z,
+                    0,
+                    TREE_ENVIRONMENT_CELL_EDGE_METERS,
+                )?;
+                let environment_key = (environment_cell.x, environment_cell.z);
+                let environment = if let Some(environment) = environments.get(&environment_key) {
+                    *environment
+                } else {
+                    let environment_x = (index_as_f64(environment_cell.x) + 0.5)
+                        * TREE_ENVIRONMENT_CELL_EDGE_METERS;
+                    let environment_z = (index_as_f64(environment_cell.z) + 0.5)
+                        * TREE_ENVIRONMENT_CELL_EDGE_METERS;
+                    let climate_sample = climate.sample(environment_x, environment_z)?;
+                    let environment = TreeCellEnvironment {
+                        forest: forest.sample(environment_x, environment_z)?,
+                        soil: soil.sample(environment_x, environment_z)?,
+                        prevailing_wind: climate_sample.prevailing_wind,
+                    };
+                    environments.insert(environment_key, environment);
+                    environment
+                };
+                let cell_key = cell.generation_key(self.world, DOMAIN_TREE_INDIVIDUALS);
+                let expected_stems = environment.forest.tree_density_per_hectare
+                    * TREE_PLACEMENT_CELL_EDGE_METERS
+                    * TREE_PLACEMENT_CELL_EDGE_METERS
+                    / 10_000.0;
+                let stem_count =
+                    stochastic_count(expected_stems, random_fraction(cell_key, 0x0043_4f55_4e54));
+                for ordinal in 0..stem_count {
+                    let id = stable_hash(&[cell_key, u64::from(ordinal)]);
+                    let x = origin_x
+                        + (TREE_PLACEMENT_CELL_EDGE_METERS
+                            * lerp(0.06, 0.94, random_fraction(id, 0x585f_4a49_5454)));
+                    let z = origin_z
+                        + (TREE_PLACEMENT_CELL_EDGE_METERS
+                            * lerp(0.06, 0.94, random_fraction(id, 0x5a5f_4a49_5454)));
+                    if bounds.contains(x, z) {
+                        trees.push(tree_individual(
+                            id,
+                            x,
+                            z,
+                            environment.forest,
+                            environment.soil,
+                            environment.prevailing_wind,
+                        ));
+                    }
+                }
+
+                if cell_x == maximum.x {
+                    break;
+                }
+                cell_x = cell_x.checked_add(1)?;
+            }
+            if cell_z == maximum.z {
+                break;
+            }
+            cell_z = cell_z.checked_add(1)?;
+        }
+        trees.sort_by_key(|tree| tree.id);
+        Some(trees)
+    }
+}
+
+fn stochastic_count(expected: f64, rounding_fraction: f64) -> u8 {
+    let mut count = 0_u8;
+    let mut remainder = expected.max(0.0);
+    while remainder >= 1.0 && count < 16 {
+        count += 1;
+        remainder -= 1.0;
+    }
+    count + u8::from(rounding_fraction < remainder)
+}
+
+fn tree_individual(
+    id: u64,
+    x: f64,
+    z: f64,
+    forest: ForestSample,
+    soil: SoilSample,
+    prevailing_wind: [f64; 2],
+) -> ProceduralTree {
+    let group = select_functional_group(forest.composition, random_fraction(id, 0x0047_524f_5550));
+    let genotype = tree_genotype(group, id);
+    let regeneration_chance = 0.08 + (forest.disturbance_severity * 0.24);
+    let regeneration = random_fraction(id, 0x0052_4547_454e) < regeneration_chance;
+    let age_years = if regeneration {
+        1.0 + (random_fraction(id, 0x0059_4f55_4e47) * 13.0)
+    } else {
+        forest.stand_age_years * lerp(0.55, 1.45, random_fraction(id, 0x4147_455f_5641))
+    };
+    let event_roll = random_fraction(id, 0x0045_5645_4e54);
+    let damage_noise = random_fraction(id, 0x4441_4d41_4745);
+    let damage_fraction = ((forest.disturbance_severity * lerp(0.55, 1.25, damage_noise))
+        + (soil.rock_exposure * genotype.slope_response_fraction * 0.12))
+        .clamp(0.0, 1.0);
+    let condition = tree_condition(
+        age_years,
+        damage_fraction,
+        event_roll,
+        forest.dominant_disturbance,
+        forest.disturbance_severity,
+    );
+    let maturity = (age_years / 90.0).clamp(0.0, 1.0).sqrt();
+    let condition_height = match condition {
+        TreeCondition::Sapling => 0.28,
+        TreeCondition::StormBroken => 0.62,
+        TreeCondition::Fallen => 0.88,
+        TreeCondition::Mature
+        | TreeCondition::Ancient
+        | TreeCondition::WindDamaged
+        | TreeCondition::DeadStanding => 1.0,
+    };
+    let competition = forest.canopy_cover_fraction * genotype.competition_response_fraction;
+    let height_meters = (genotype.mature_height_meters
+        * lerp(0.72, 1.28, genotype.height_variation_fraction)
+        * lerp(0.22, 1.0, maturity)
+        * (1.0 - (competition * 0.12))
+        * condition_height)
+        .max(0.8);
+    let ancient_girth = if condition == TreeCondition::Ancient {
+        1.28
+    } else {
+        1.0
+    };
+    let trunk_base_radius_meters =
+        (height_meters * lerp(0.025, 0.043, 1.0 - genotype.trunk_taper_fraction) * ancient_girth)
+            .max(0.045);
+    let crown_scale = match genotype.crown_shape {
+        CrownShape::Conical => 0.18,
+        CrownShape::Columnar => 0.20,
+        CrownShape::Rounded => 0.26,
+        CrownShape::Spreading => 0.34,
+    };
+    let crown_radius_meters = (height_meters
+        * crown_scale
+        * lerp(0.72, 1.12, genotype.leaf_density_fraction)
+        * (1.0 - (competition * 0.24)))
+        .max(0.25);
+    let direction_jitter = [
+        (random_fraction(id, 0x004c_4541_4e58) - 0.5) * 0.42,
+        (random_fraction(id, 0x004c_4541_4e5a) - 0.5) * 0.42,
+    ];
+    let lean_direction = normalized_direction([
+        prevailing_wind[0] + direction_jitter[0],
+        prevailing_wind[1] + direction_jitter[1],
+    ]);
+    let slope_fraction = (soil.slope / 0.22).clamp(0.0, 1.0);
+    let ordinary_lean = (genotype.wind_response_fraction
+        * (0.018 + (forest.disturbance_severity * 0.12)))
+        + (genotype.slope_response_fraction * slope_fraction * 0.035);
+    let lean_fraction = match condition {
+        TreeCondition::Fallen => 0.92,
+        TreeCondition::WindDamaged => ordinary_lean + 0.12,
+        _ => ordinary_lean,
+    }
+    .clamp(0.0, 0.96);
+
+    ProceduralTree {
+        id,
+        x,
+        z,
+        age_years,
+        height_meters,
+        trunk_base_radius_meters,
+        crown_radius_meters,
+        lean_direction,
+        lean_fraction,
+        damage_fraction,
+        rotation_turns: random_fraction(id, 0x524f_5441_5445),
+        condition,
+        genotype,
+    }
+}
+
+fn tree_condition(
+    age_years: f64,
+    damage_fraction: f64,
+    event_roll: f64,
+    disturbance: ForestDisturbance,
+    severity: f64,
+) -> TreeCondition {
+    if age_years < 15.0 {
+        return TreeCondition::Sapling;
+    }
+    if severity > 0.18 && event_roll < severity * 0.10 {
+        return TreeCondition::Fallen;
+    }
+    if event_roll < severity * 0.18 {
+        return TreeCondition::DeadStanding;
+    }
+    if disturbance == ForestDisturbance::Windthrow && event_roll < severity * 0.40 {
+        return TreeCondition::StormBroken;
+    }
+    if age_years > 240.0 && event_roll > 0.36 {
+        return TreeCondition::Ancient;
+    }
+    if damage_fraction > 0.42 {
+        return TreeCondition::WindDamaged;
+    }
+    TreeCondition::Mature
+}
+
+fn select_functional_group(composition: ForestComposition, selection: f64) -> TreeFunctionalGroup {
+    let mut cumulative = 0.0;
+    for group in TreeFunctionalGroup::ALL {
+        cumulative += composition.fraction(group);
+        if selection <= cumulative {
+            return group;
+        }
+    }
+    TreeFunctionalGroup::DryWoodland
+}
+
+fn tree_genotype(group: TreeFunctionalGroup, id: u64) -> TreeGenotype {
+    let architecture = random_fraction(id, 0x4152_4348);
+    let foliage = random_fraction(id, 0x464f_4c49_4147);
+    let response = random_fraction(id, 0x5245_5350);
+    match group {
+        TreeFunctionalGroup::EvergreenNeedleleaf => TreeGenotype {
+            functional_group: group,
+            mature_height_meters: lerp(23.0, 38.0, architecture),
+            height_variation_fraction: random_fraction(id, 0x4845_4947_4854),
+            trunk_taper_fraction: lerp(0.64, 0.88, architecture),
+            branching_angle_radians: lerp(0.82, 1.28, foliage),
+            branch_density_fraction: lerp(0.70, 1.0, foliage),
+            crown_shape: CrownShape::Conical,
+            leaf_density_fraction: lerp(0.72, 1.0, foliage),
+            bark_style: BarkStyle::Scaly,
+            slope_response_fraction: lerp(0.34, 0.58, response),
+            wind_response_fraction: lerp(0.52, 0.82, response),
+            competition_response_fraction: lerp(0.66, 0.90, architecture),
+        },
+        TreeFunctionalGroup::ColdDeciduous => TreeGenotype {
+            functional_group: group,
+            mature_height_meters: lerp(17.0, 29.0, architecture),
+            height_variation_fraction: random_fraction(id, 0x4845_4947_4854),
+            trunk_taper_fraction: lerp(0.48, 0.72, architecture),
+            branching_angle_radians: lerp(0.70, 1.16, foliage),
+            branch_density_fraction: lerp(0.48, 0.82, foliage),
+            crown_shape: CrownShape::Columnar,
+            leaf_density_fraction: lerp(0.50, 0.86, foliage),
+            bark_style: BarkStyle::Smooth,
+            slope_response_fraction: lerp(0.40, 0.68, response),
+            wind_response_fraction: lerp(0.58, 0.88, response),
+            competition_response_fraction: lerp(0.58, 0.84, architecture),
+        },
+        TreeFunctionalGroup::TemperateBroadleaf => TreeGenotype {
+            functional_group: group,
+            mature_height_meters: lerp(21.0, 35.0, architecture),
+            height_variation_fraction: random_fraction(id, 0x4845_4947_4854),
+            trunk_taper_fraction: lerp(0.38, 0.64, architecture),
+            branching_angle_radians: lerp(0.62, 1.08, foliage),
+            branch_density_fraction: lerp(0.56, 0.92, foliage),
+            crown_shape: CrownShape::Rounded,
+            leaf_density_fraction: lerp(0.62, 1.0, foliage),
+            bark_style: BarkStyle::Furrowed,
+            slope_response_fraction: lerp(0.28, 0.52, response),
+            wind_response_fraction: lerp(0.36, 0.68, response),
+            competition_response_fraction: lerp(0.62, 0.92, architecture),
+        },
+        TreeFunctionalGroup::DryWoodland => TreeGenotype {
+            functional_group: group,
+            mature_height_meters: lerp(7.0, 18.0, architecture),
+            height_variation_fraction: random_fraction(id, 0x4845_4947_4854),
+            trunk_taper_fraction: lerp(0.30, 0.58, architecture),
+            branching_angle_radians: lerp(0.48, 0.92, foliage),
+            branch_density_fraction: lerp(0.30, 0.68, foliage),
+            crown_shape: CrownShape::Spreading,
+            leaf_density_fraction: lerp(0.26, 0.68, foliage),
+            bark_style: BarkStyle::Plated,
+            slope_response_fraction: lerp(0.46, 0.78, response),
+            wind_response_fraction: lerp(0.42, 0.76, response),
+            competition_response_fraction: lerp(0.24, 0.58, architecture),
+        },
+    }
+}
+
+fn normalized_direction(direction: [f64; 2]) -> [f64; 2] {
+    let length = direction[0].hypot(direction[1]);
+    if length <= f64::EPSILON {
+        [1.0, 0.0]
+    } else {
+        [direction[0] / length, direction[1] / length]
+    }
+}
+
+fn random_fraction(key: u64, lane: u64) -> f64 {
+    hash53_as_f64(stable_hash(&[key, lane]) >> 11) / 9_007_199_254_740_991.0
+}
+
 fn sample_forest_history(
     world: WorldIdentity,
     x: f64,
@@ -670,12 +1138,11 @@ fn lerp(start: f64, end: f64, amount: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use treeline_coordinates::stable_hash;
-
     use super::*;
 
     const TEST_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, SOIL_GENERATOR_VERSION, 0);
     const FOREST_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, FOREST_GENERATOR_VERSION, 0);
+    const TREE_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, TREE_GENERATOR_VERSION, 0);
 
     #[test]
     fn soil_is_deterministic_bounded_and_composition_is_conserved() {
@@ -893,5 +1360,153 @@ mod tests {
             fingerprint, 12_136_453_503_781_334_745,
             "changing this value changes generated forest distributions"
         );
+    }
+
+    #[test]
+    fn procedural_trees_are_deterministic_bounded_and_architecturally_valid() {
+        let generator = ProceduralTrees::new(TREE_WORLD);
+        let bounds = TreeBounds::new(-96.0, -96.0, 96.0, 96.0).expect("valid bounds");
+        let first = generator.trees_in(bounds).expect("tree generation");
+        let second = generator.trees_in(bounds).expect("same tree generation");
+
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+        assert!(first.iter().all(|tree| {
+            bounds.contains(tree.x, tree.z)
+                && tree.height_meters >= 0.8
+                && tree.trunk_base_radius_meters >= 0.045
+                && tree.crown_radius_meters >= 0.25
+                && (0.0..=1.0).contains(&tree.damage_fraction)
+                && (0.0..=0.96).contains(&tree.lean_fraction)
+                && (tree.lean_direction[0].hypot(tree.lean_direction[1]) - 1.0).abs() < 1.0e-12
+        }));
+        assert!(first.windows(2).all(|pair| pair[0].id <= pair[1].id));
+    }
+
+    #[test]
+    fn adjacent_tree_requests_match_one_combined_request_at_negative_boundaries() {
+        let generator = ProceduralTrees::new(TREE_WORLD);
+        let combined = TreeBounds::new(-64.0, -64.0, 64.0, 64.0).expect("combined bounds");
+        let mut tiled = [
+            TreeBounds::new(-64.0, -64.0, 0.0, 0.0).expect("southwest"),
+            TreeBounds::new(0.0, -64.0, 64.0, 0.0).expect("southeast"),
+            TreeBounds::new(-64.0, 0.0, 0.0, 64.0).expect("northwest"),
+            TreeBounds::new(0.0, 0.0, 64.0, 64.0).expect("northeast"),
+        ]
+        .into_iter()
+        .rev()
+        .flat_map(|bounds| generator.trees_in(bounds).expect("tile generation"))
+        .collect::<Vec<_>>();
+        tiled.sort_by_key(|tree| tree.id);
+
+        assert_eq!(
+            generator.trees_in(combined).expect("combined generation"),
+            tiled
+        );
+    }
+
+    #[test]
+    fn tree_generation_requires_its_versioned_contract() {
+        let old_world = WorldIdentity::new(0x5eed, TREE_GENERATOR_VERSION - 1, 0);
+        let bounds = TreeBounds::new(0.0, 0.0, 32.0, 32.0).expect("valid bounds");
+
+        assert!(ProceduralTrees::new(old_world).trees_in(bounds).is_none());
+    }
+
+    #[test]
+    fn distant_tree_stands_use_distinct_grammars_and_life_histories() {
+        let generator = ProceduralTrees::new(TREE_WORLD);
+        let mut trees = Vec::new();
+        for [x, z] in [
+            [-820_000.0, -640_000.0],
+            [-240_000.0, 510_000.0],
+            [370_000.0, -760_000.0],
+            [910_000.0, 430_000.0],
+        ] {
+            trees.extend(
+                generator
+                    .trees_in(TreeBounds::new(x, z, x + 96.0, z + 96.0).expect("valid stand"))
+                    .expect("stand generation"),
+            );
+        }
+
+        assert!(!trees.is_empty());
+        let first_group = trees[0].genotype.functional_group;
+        let first_shape = trees[0].genotype.crown_shape;
+        assert!(
+            trees
+                .iter()
+                .any(|tree| tree.genotype.functional_group != first_group)
+        );
+        assert!(
+            trees
+                .iter()
+                .any(|tree| tree.genotype.crown_shape != first_shape)
+        );
+        assert!(
+            trees
+                .iter()
+                .any(|tree| tree.condition != TreeCondition::Mature)
+        );
+    }
+
+    #[test]
+    fn procedural_trees_have_a_golden_fingerprint() {
+        let generator = ProceduralTrees::new(TREE_WORLD);
+        let bounds = TreeBounds::new(-96.0, -64.0, 96.0, 64.0).expect("valid bounds");
+        let trees = generator.trees_in(bounds).expect("tree generation");
+        let fingerprint = stable_hash(
+            &trees
+                .iter()
+                .flat_map(|tree| {
+                    [
+                        tree.id,
+                        tree.x.to_bits(),
+                        tree.z.to_bits(),
+                        tree.age_years.to_bits(),
+                        tree.height_meters.to_bits(),
+                        tree.trunk_base_radius_meters.to_bits(),
+                        tree.crown_radius_meters.to_bits(),
+                        tree.lean_direction[0].to_bits(),
+                        tree.lean_direction[1].to_bits(),
+                        tree.lean_fraction.to_bits(),
+                        tree.damage_fraction.to_bits(),
+                        tree.rotation_turns.to_bits(),
+                        tree_condition_fingerprint(tree.condition),
+                        tree_group_fingerprint(tree.genotype.functional_group),
+                        tree.genotype.mature_height_meters.to_bits(),
+                        tree.genotype.branching_angle_radians.to_bits(),
+                        tree.genotype.branch_density_fraction.to_bits(),
+                        tree.genotype.leaf_density_fraction.to_bits(),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        assert_eq!(
+            fingerprint, 4_748_501_871_403_592_086,
+            "changing this value changes generated procedural trees"
+        );
+    }
+
+    const fn tree_condition_fingerprint(condition: TreeCondition) -> u64 {
+        match condition {
+            TreeCondition::Sapling => 0,
+            TreeCondition::Mature => 1,
+            TreeCondition::Ancient => 2,
+            TreeCondition::WindDamaged => 3,
+            TreeCondition::Fallen => 4,
+            TreeCondition::DeadStanding => 5,
+            TreeCondition::StormBroken => 6,
+        }
+    }
+
+    const fn tree_group_fingerprint(group: TreeFunctionalGroup) -> u64 {
+        match group {
+            TreeFunctionalGroup::EvergreenNeedleleaf => 0,
+            TreeFunctionalGroup::ColdDeciduous => 1,
+            TreeFunctionalGroup::TemperateBroadleaf => 2,
+            TreeFunctionalGroup::DryWoodland => 3,
+        }
     }
 }

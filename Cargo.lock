@@ -239,6 +239,7 @@ dependencies = [
  "glam",
  "pollster",
  "treeline-coordinates",
+ "treeline-ecology",
  "treeline-renderer",
  "treeline-terrain",
  "treeline-voxel",
@@ -2031,6 +2032,8 @@ name = "treeline-renderer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam",
+ "treeline-ecology",
  "treeline-mesher",
  "wgpu",
 ]

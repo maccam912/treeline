@@ -12,6 +12,7 @@ publish = false
 glam.workspace = true
 pollster.workspace = true
 treeline-coordinates.workspace = true
+treeline-ecology.workspace = true
 treeline-renderer.workspace = true
 treeline-terrain.workspace = true
 treeline-voxel.workspace = true

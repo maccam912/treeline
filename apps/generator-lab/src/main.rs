@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
-use treeline_ecology::{ForestDistribution, ForestSample, Soil, SoilSample};
+use treeline_ecology::{
+    ForestDistribution, ForestSample, ProceduralTree, ProceduralTrees, Soil, SoilSample, TreeBounds,
+};
 use treeline_geography::{
     Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
     WatershedRegion, WatershedRegionIndex,
@@ -518,6 +520,9 @@ impl GeneratorLab {
         let Some(forest) = ForestDistribution::new(world).sample(x, z) else {
             return;
         };
+        let Some(tree_inspection) = inspect_nearby_trees(world, x, z) else {
+            return;
+        };
         let watershed = WatershedRegionIndex::containing(x, z)
             .and_then(|index| WatershedRegion::generate(world, index));
         let drainage = watershed
@@ -564,8 +569,9 @@ impl GeneratorLab {
                 )
             },
         );
+        let tree_summary = tree_inspection.summary();
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ridge +{:.0} m | {drainage_summary}",
             self.season.label(),
             seasonal_climate.mean_temperature_celsius,
             seasonal_climate.snowpack_water_equivalent_millimeters,
@@ -576,10 +582,13 @@ impl GeneratorLab {
             forest.canopy_cover_fraction * 100.0,
             forest.dominant_group().label(),
             forest.stand_age_years,
+            tree_inspection.count,
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}"
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
+            tree_inspection.count,
+            nearest_tree = tree_inspection.nearest
         );
         self.inspection = Some(summary);
         self.window.request_redraw();
@@ -713,6 +722,42 @@ impl GeneratorLab {
             eprintln!("failed to update Generator Lab from UI: {error}");
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NearbyTreeInspection {
+    count: usize,
+    nearest: Option<ProceduralTree>,
+}
+
+impl NearbyTreeInspection {
+    fn summary(self) -> String {
+        self.nearest.map_or_else(
+            || "no nearby tree".to_owned(),
+            |tree| {
+                format!(
+                    "{} {:.1} m {}",
+                    tree.condition.label(),
+                    tree.height_meters,
+                    tree.genotype.functional_group.label()
+                )
+            },
+        )
+    }
+}
+
+fn inspect_nearby_trees(world: WorldIdentity, x: f64, z: f64) -> Option<NearbyTreeInspection> {
+    let bounds = TreeBounds::new(x - 16.0, z - 16.0, x + 16.0, z + 16.0)?;
+    let trees = ProceduralTrees::new(world).trees_in(bounds)?;
+    let nearest = trees.iter().min_by(|left, right| {
+        let left_distance = (left.x - x).mul_add(left.x - x, (left.z - z) * (left.z - z));
+        let right_distance = (right.x - x).mul_add(right.x - x, (right.z - z) * (right.z - z));
+        left_distance.total_cmp(&right_distance)
+    });
+    Some(NearbyTreeInspection {
+        count: trees.len(),
+        nearest: nearest.copied(),
+    })
 }
 
 #[derive(Clone, Copy)]

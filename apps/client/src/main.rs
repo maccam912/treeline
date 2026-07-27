@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use glam::{Mat4, Vec2, Vec3};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
+use treeline_ecology::{ProceduralTrees, TreeBounds};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
@@ -434,6 +435,7 @@ impl Game {
         if let Err(error) = update_terrain(
             &self.device,
             &self.renderer,
+            &self.terrain,
             self.chunk_streamer,
             self.far_terrain_streamer,
             self.camera.world_position(),
@@ -488,6 +490,11 @@ impl Game {
                     self.terrain_chunks
                         .values()
                         .filter_map(|resident| resident.lake_mesh.as_ref()),
+                )
+                .chain(
+                    self.terrain_chunks
+                        .values()
+                        .filter_map(|resident| resident.tree_mesh.as_ref()),
                 ),
         );
         self.queue.submit(Some(encoder.finish()));
@@ -500,6 +507,7 @@ struct ResidentTerrainChunk {
     spec: ChunkMeshSpec,
     mesh: TerrainMesh,
     lake_mesh: Option<TerrainMesh>,
+    tree_mesh: Option<TerrainMesh>,
 }
 
 struct ResidentFarTerrainTile {
@@ -936,6 +944,7 @@ fn start_initial_progress(
 fn update_terrain(
     device: &wgpu::Device,
     renderer: &TerrainRenderer,
+    terrain: &GeneratedWorldTerrain,
     chunk_streamer: ChunkStreamer,
     far_streamer: FarTerrainStreamer,
     player_position: WorldPosition,
@@ -972,6 +981,7 @@ fn update_terrain(
         match spec {
             TerrainMeshSpec::Near(spec) => {
                 requested.remove(&spec.chunk);
+                let tree_mesh = tree_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
                 chunks.insert(
                     spec.chunk,
                     ResidentTerrainChunk {
@@ -982,6 +992,7 @@ fn update_terrain(
                             .filter(|lake_mesh| !lake_mesh.indices.is_empty())
                             .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
                             .transpose()?,
+                        tree_mesh,
                     },
                 );
             }
@@ -1019,6 +1030,32 @@ fn update_terrain(
         requested_far,
         jobs,
     )
+}
+
+fn tree_mesh_for_chunk(
+    device: &wgpu::Device,
+    renderer: &TerrainRenderer,
+    terrain: &GeneratedWorldTerrain,
+    chunk: ChunkIndex,
+) -> Result<Option<TerrainMesh>, Box<dyn Error>> {
+    let origin = chunk.sample_origin();
+    let edge = ChunkIndex::edge_meters();
+    let bounds = TreeBounds::new(origin.x, origin.z, origin.x + edge, origin.z + edge)
+        .ok_or_else(|| std::io::Error::other("tree chunk bounds are invalid"))?;
+    let mut trees = ProceduralTrees::new(terrain.world())
+        .trees_in(bounds)
+        .ok_or_else(|| std::io::Error::other("tree generation is unavailable"))?;
+    trees.retain(|tree| {
+        terrain.lake_surface_at(tree.x, tree.z).is_none()
+            && !terrain
+                .river_influence_at(tree.x, tree.z)
+                .is_some_and(|river| river.blend > 0.24)
+    });
+    if trees.is_empty() {
+        return Ok(None);
+    }
+    let mesh = renderer.upload_trees(device, &trees, |x, z| terrain.surface_height(x, z))?;
+    Ok(Some(mesh))
 }
 
 #[allow(clippy::too_many_arguments)]
