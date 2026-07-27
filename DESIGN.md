@@ -2231,6 +2231,11 @@ The world generator is the game.
       trees, wind damage, fallen trees, standing deadwood, and storm breaks are
       deterministic; the client renders their generated trunks, branches, and
       crowns, and Generator Lab inspection explains nearby individuals.
+- [ ] **PARTIAL** — Distant forest LOD. Near terrain renders full procedural
+      trees, successive individual-tree rings use simplified and silhouette
+      geometry, and a deterministic, composition-colored canopy surface keeps
+      forests visible across far-terrain and horizon tiles. Textured cluster
+      impostors and dithered transitions between representation tiers remain.
 - [x] Surface rocks. Continuous geology-, erosion-, slope-, and soil-driven
       rock distributions feed globally anchored rounded boulders, angular
       blocks, weathered slabs, and scree fragments. Individuals have
