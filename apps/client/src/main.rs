@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use glam::{Mat4, Vec2, Vec3};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
-use treeline_ecology::{ProceduralTrees, TreeBounds};
+use treeline_ecology::{ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
@@ -41,8 +41,8 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f32 = 1.72;
 const WALK_SPEED: f32 = 8.0;
 const SPRINT_SPEED: f32 = 16.0;
-const START_X: f32 = 46_392.0;
-const START_Z: f32 = -23_211.0;
+const START_X: f32 = 78_576.0;
+const START_Z: f32 = -50_160.0;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
 #[cfg(not(target_arch = "wasm32"))]
@@ -514,6 +514,11 @@ impl Game {
                     self.terrain_chunks
                         .values()
                         .filter_map(|resident| resident.tree_mesh.as_ref()),
+                )
+                .chain(
+                    self.terrain_chunks
+                        .values()
+                        .filter_map(|resident| resident.rock_mesh.as_ref()),
                 ),
         );
         self.queue.submit(Some(encoder.finish()));
@@ -527,6 +532,7 @@ struct ResidentTerrainChunk {
     mesh: TerrainMesh,
     lake_mesh: Option<TerrainMesh>,
     tree_mesh: Option<TerrainMesh>,
+    rock_mesh: Option<TerrainMesh>,
 }
 
 struct ResidentFarTerrainTile {
@@ -1019,6 +1025,7 @@ fn update_terrain(
             TerrainMeshSpec::Near(spec) => {
                 requested.remove(&spec.chunk);
                 let tree_mesh = tree_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
+                let rock_mesh = rock_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
                 chunks.insert(
                     spec.chunk,
                     ResidentTerrainChunk {
@@ -1030,6 +1037,7 @@ fn update_terrain(
                             .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
                             .transpose()?,
                         tree_mesh,
+                        rock_mesh,
                     },
                 );
             }
@@ -1083,7 +1091,7 @@ fn tree_mesh_for_chunk(
     let mut trees = ProceduralTrees::new(terrain.world())
         .trees_in(bounds)
         .ok_or_else(|| std::io::Error::other("tree generation is unavailable"))?;
-    trees.retain(|tree| tree_has_dry_ground(terrain, tree.x, tree.z));
+    trees.retain(|tree| surface_feature_has_dry_ground(terrain, tree.x, tree.z));
     if trees.is_empty() {
         return Ok(None);
     }
@@ -1091,7 +1099,28 @@ fn tree_mesh_for_chunk(
     Ok(Some(mesh))
 }
 
-fn tree_has_dry_ground(terrain: &GeneratedWorldTerrain, x: f64, z: f64) -> bool {
+fn rock_mesh_for_chunk(
+    device: &wgpu::Device,
+    renderer: &TerrainRenderer,
+    terrain: &GeneratedWorldTerrain,
+    chunk: ChunkIndex,
+) -> Result<Option<TerrainMesh>, Box<dyn Error>> {
+    let origin = chunk.sample_origin();
+    let edge = ChunkIndex::edge_meters();
+    let bounds = RockBounds::new(origin.x, origin.z, origin.x + edge, origin.z + edge)
+        .ok_or_else(|| std::io::Error::other("rock chunk bounds are invalid"))?;
+    let mut rocks = SurfaceRocks::new(terrain.world())
+        .rocks_in(bounds)
+        .ok_or_else(|| std::io::Error::other("surface-rock generation is unavailable"))?;
+    rocks.retain(|rock| surface_feature_has_dry_ground(terrain, rock.x, rock.z));
+    if rocks.is_empty() {
+        return Ok(None);
+    }
+    let mesh = renderer.upload_rocks(device, &rocks, |x, z| terrain.surface_height(x, z))?;
+    Ok(Some(mesh))
+}
+
+fn surface_feature_has_dry_ground(terrain: &GeneratedWorldTerrain, x: f64, z: f64) -> bool {
     terrain.lake_surface_at(x, z).is_none()
         && !terrain
             .river_influence_at(x, z)
@@ -1362,7 +1391,7 @@ mod tests {
             .trees_in(bounds)
             .expect("tree generation")
             .into_iter()
-            .filter(|tree| tree_has_dry_ground(&terrain, tree.x, tree.z))
+            .filter(|tree| surface_feature_has_dry_ground(&terrain, tree.x, tree.z))
             .collect::<Vec<_>>();
         let crown_clearance = retained
             .iter()
@@ -1377,25 +1406,51 @@ mod tests {
             crown_clearance >= 5.0,
             "spawn should not begin inside a tree crown"
         );
+
+        let rock_bounds =
+            RockBounds::new(min.x, min.z, max.x, max.z).expect("spawn surface-rock bounds");
+        let rock_clearance = SurfaceRocks::new(WORLD)
+            .rocks_in(rock_bounds)
+            .expect("surface-rock generation")
+            .into_iter()
+            .filter(|rock| surface_feature_has_dry_ground(&terrain, rock.x, rock.z))
+            .map(|rock| {
+                (rock.x - f64::from(START_X)).hypot(rock.z - f64::from(START_Z))
+                    - rock.radii_meters[0].max(rock.radii_meters[2])
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            rock_clearance >= 1.0,
+            "spawn should not begin inside a surface rock"
+        );
     }
 
     #[test]
-    fn tree_filter_excludes_channels_without_clearing_river_valleys() {
+    fn surface_feature_filter_excludes_channels_without_clearing_river_valleys() {
         let terrain = GeneratedWorldTerrain::new(WORLD);
-        let bounds = TreeBounds::new(-64.0, 0.0, 96.0, 160.0).expect("old spawn bounds");
-        let trees = ProceduralTrees::new(WORLD)
-            .trees_in(bounds)
-            .expect("tree generation");
-        let valley_tree = trees.into_iter().find(|tree| {
-            terrain
-                .river_influence_at(tree.x, tree.z)
-                .is_some_and(|river| {
-                    river.blend > 0.24 && river.distance_meters > river.channel_half_width_meters
-                })
-        });
+        let mut channel = None;
+        let mut valley = None;
+        for z_index in -64_i32..=64 {
+            for x_index in -64_i32..=64 {
+                let x = f64::from(x_index) * 16.0;
+                let z = f64::from(z_index) * 16.0;
+                let Some(river) = terrain.river_influence_at(x, z) else {
+                    continue;
+                };
+                if river.distance_meters <= river.channel_half_width_meters {
+                    channel.get_or_insert([x, z]);
+                } else if river.blend > 0.24 && terrain.lake_surface_at(x, z).is_none() {
+                    valley.get_or_insert([x, z]);
+                }
+            }
+        }
 
-        let tree = valley_tree.expect("old spawn should contain a tree outside the channel");
-        assert!(tree_has_dry_ground(&terrain, tree.x, tree.z));
+        let [channel_x, channel_z] = channel.expect("search area should contain a river channel");
+        let [valley_x, valley_z] = valley.expect("search area should contain a river valley");
+        assert!(!surface_feature_has_dry_ground(
+            &terrain, channel_x, channel_z
+        ));
+        assert!(surface_feature_has_dry_ground(&terrain, valley_x, valley_z));
     }
 
     #[test]

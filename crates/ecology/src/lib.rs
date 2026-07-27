@@ -1,10 +1,17 @@
 //! Ecosystem primitives built from environmental variables rather than biome IDs.
 
+mod rocks;
+
 use std::collections::BTreeMap;
 
 use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
 use treeline_geography::{Climate, RegionalProfile};
 use treeline_terrain::WildernessTerrain;
+
+pub use rocks::{
+    RockBounds, RockForm, RockGenotype, SURFACE_ROCK_GENERATOR_VERSION, SurfaceRock,
+    SurfaceRockDistribution, SurfaceRockSample, SurfaceRocks,
+};
 
 /// Generator version that first exposes deterministic soil profiles.
 pub const SOIL_GENERATOR_VERSION: u32 = 8;
