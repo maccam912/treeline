@@ -2233,8 +2233,9 @@ The world generator is the game.
       crowns, and Generator Lab inspection explains nearby individuals.
 - [ ] **PARTIAL** — Distant forest LOD. Near terrain renders full procedural
       trees, successive individual-tree rings use simplified and silhouette
-      geometry, and a deterministic, composition-colored canopy surface keeps
-      forests visible across far-terrain and horizon tiles. Textured cluster
+      geometry, and deterministic composition-colored canopy surfaces plus
+      vertical cluster silhouettes keep forests visible from both ridges and
+      walking height across far-terrain and horizon tiles. Textured cluster
       impostors and dithered transitions between representation tiers remain.
 - [x] Surface rocks. Continuous geology-, erosion-, slope-, and soil-driven
       rock distributions feed globally anchored rounded boulders, angular
