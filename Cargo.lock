@@ -2066,6 +2066,7 @@ dependencies = [
  "treeline-mesher",
  "treeline-terrain",
  "treeline-voxel",
+ "web-time",
 ]
 
 [[package]]

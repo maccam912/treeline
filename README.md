@@ -25,6 +25,9 @@ test-backed foundations described in the design. The prototype provides:
 - vertically aligned near-terrain slabs that follow high mountain surfaces;
 - coarse surface-only terrain extending the visible landscape beyond 20 km;
 - prioritized asynchronous terrain meshing outside the window thread;
+- phase-aware initial-generation progress and timing reports;
+- frame-budgeted terrain uploads, worker-built lake meshes, and shader-based
+  near/far cutouts that avoid rebuilding 2 km far tiles at each chunk boundary;
 - continuous deterministic regional fields;
 - deterministic 128 km watershed artifacts with depression filling, basin spill
   levels, cross-region drainage exits, and flow accumulation;

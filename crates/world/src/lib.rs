@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::num::NonZeroUsize;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Condvar, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
@@ -17,13 +17,12 @@ use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
 use treeline_hydrology::{
     GullyNetwork, GullyTerrainInfluence, Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
 };
-use treeline_mesher::{
-    Mesh, MeshingError, SurfaceCutout, SurfaceGridSpec, surface_grid, transvoxel_chunk,
-};
+use treeline_mesher::{Mesh, MeshingError, SurfaceGridSpec, surface_grid, transvoxel_chunk};
 use treeline_terrain::{
     DensityField, ErosionSurfaceSample, Material, SurfaceField, TerrainSample, WildernessTerrain,
 };
 use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
+use web_time::{Duration, Instant};
 
 /// Generator version that first makes regional rivers shape terrain.
 pub const RIVER_TERRAIN_GENERATOR_VERSION: u32 = 3;
@@ -59,10 +58,13 @@ pub struct WorldErosionSample {
 #[derive(Clone, Debug)]
 pub struct GeneratedWorldTerrain {
     base: WildernessTerrain,
-    river_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<RiverNetwork>>>>,
-    gully_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<GullyNetwork>>>>,
-    lake_networks: Arc<RwLock<BTreeMap<WatershedRegionIndex, Arc<LakeNetwork>>>>,
+    river_networks: Arc<NetworkCache<RiverNetwork>>,
+    gully_networks: Arc<NetworkCache<GullyNetwork>>,
+    lake_networks: Arc<NetworkCache<LakeNetwork>>,
 }
+
+type NetworkSlot<T> = Arc<OnceLock<Option<Arc<T>>>>;
+type NetworkCache<T> = RwLock<BTreeMap<WatershedRegionIndex, NetworkSlot<T>>>;
 
 impl GeneratedWorldTerrain {
     pub fn new(world: WorldIdentity) -> Self {
@@ -150,57 +152,15 @@ impl GeneratedWorldTerrain {
     }
 
     fn river_network(&self, region: WatershedRegionIndex) -> Option<Arc<RiverNetwork>> {
-        if let Some(network) = self
-            .river_networks
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&region)
-            .cloned()
-        {
-            return Some(network);
-        }
-
-        let mut cache = self
-            .river_networks
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(network) = cache.get(&region) {
-            return Some(Arc::clone(network));
-        }
-        let generated = Arc::new(RiverNetwork::generate(self.world(), region)?);
-        Some(
-            cache
-                .entry(region)
-                .or_insert_with(|| Arc::clone(&generated))
-                .clone(),
-        )
+        let slot = network_slot(&self.river_networks, region);
+        slot.get_or_init(|| RiverNetwork::generate(self.world(), region).map(Arc::new))
+            .clone()
     }
 
     fn gully_network(&self, region: WatershedRegionIndex) -> Option<Arc<GullyNetwork>> {
-        if let Some(network) = self
-            .gully_networks
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&region)
-            .cloned()
-        {
-            return Some(network);
-        }
-
-        let mut cache = self
-            .gully_networks
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(network) = cache.get(&region) {
-            return Some(Arc::clone(network));
-        }
-        let generated = Arc::new(GullyNetwork::generate(self.world(), region)?);
-        Some(
-            cache
-                .entry(region)
-                .or_insert_with(|| Arc::clone(&generated))
-                .clone(),
-        )
+        let slot = network_slot(&self.gully_networks, region);
+        slot.get_or_init(|| GullyNetwork::generate(self.world(), region).map(Arc::new))
+            .clone()
     }
 
     /// Returns equilibrium lake water above the generated terrain, if present.
@@ -221,30 +181,9 @@ impl GeneratedWorldTerrain {
     }
 
     fn lake_network(&self, region: WatershedRegionIndex) -> Option<Arc<LakeNetwork>> {
-        if let Some(network) = self
-            .lake_networks
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&region)
-            .cloned()
-        {
-            return Some(network);
-        }
-
-        let mut cache = self
-            .lake_networks
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(network) = cache.get(&region) {
-            return Some(Arc::clone(network));
-        }
-        let generated = Arc::new(LakeNetwork::generate(self.world(), region)?);
-        Some(
-            cache
-                .entry(region)
-                .or_insert_with(|| Arc::clone(&generated))
-                .clone(),
-        )
+        let slot = network_slot(&self.lake_networks, region);
+        slot.get_or_init(|| LakeNetwork::generate(self.world(), region).map(Arc::new))
+            .clone()
     }
 
     /// Builds the lake surface aligned with one near or far terrain mesh.
@@ -315,6 +254,25 @@ impl GeneratedWorldTerrain {
             river,
         })
     }
+}
+
+fn network_slot<T>(cache: &NetworkCache<T>, region: WatershedRegionIndex) -> NetworkSlot<T> {
+    if let Some(slot) = cache
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&region)
+        .cloned()
+    {
+        return slot;
+    }
+
+    Arc::clone(
+        cache
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(region)
+            .or_insert_with(|| Arc::new(OnceLock::new())),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -480,7 +438,12 @@ pub enum TerrainMeshSpec {
 pub struct GeneratedTerrainMesh {
     pub spec: TerrainMeshSpec,
     pub mesh: Result<Mesh, MeshingError>,
+    pub lake_mesh: Option<Result<Mesh, MeshingError>>,
+    pub terrain_generation_time: Duration,
+    pub lake_generation_time: Duration,
 }
+
+type LakeMeshGenerator<F> = fn(&F, TerrainMeshSpec) -> Result<Mesh, MeshingError>;
 
 /// Terrain generation queue ordered by visible generation priority.
 ///
@@ -501,6 +464,8 @@ pub struct TerrainMeshQueue<F> {
     #[cfg(target_arch = "wasm32")]
     field: F,
     #[cfg(target_arch = "wasm32")]
+    lake_mesh_generator: Option<LakeMeshGenerator<F>>,
+    #[cfg(target_arch = "wasm32")]
     pending: BinaryHeap<Reverse<QueuedTerrainMesh>>,
     #[cfg(target_arch = "wasm32")]
     yield_after_mesh: bool,
@@ -518,17 +483,27 @@ where
     /// on the main thread because GitHub Pages does not provide the headers
     /// required for shared-memory WebAssembly threads.
     pub fn new(field: F) -> Self {
+        Self::with_optional_lake_mesh(field, None)
+    }
+
+    /// Starts terrain workers that also build the separate equilibrium-lake
+    /// surface associated with each terrain mesh.
+    pub fn with_lake_mesh(field: F, generator: LakeMeshGenerator<F>) -> Self {
+        Self::with_optional_lake_mesh(field, Some(generator))
+    }
+
+    fn with_optional_lake_mesh(field: F, generator: Option<LakeMeshGenerator<F>>) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let available = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
             let worker_count =
                 NonZeroUsize::new(available.get().saturating_sub(1)).unwrap_or(NonZeroUsize::MIN);
-            Self::with_worker_count(field, worker_count)
+            Self::with_worker_count_and_lake_mesh(field, worker_count, generator)
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            Self::with_worker_count(field, NonZeroUsize::MIN)
+            Self::with_worker_count_and_lake_mesh(field, NonZeroUsize::MIN, generator)
         }
     }
 
@@ -536,10 +511,19 @@ where
     ///
     /// Browser builds ignore `worker_count` and use their incremental queue.
     pub fn with_worker_count(field: F, worker_count: NonZeroUsize) -> Self {
+        Self::with_worker_count_and_lake_mesh(field, worker_count, None)
+    }
+
+    fn with_worker_count_and_lake_mesh(
+        field: F,
+        worker_count: NonZeroUsize,
+        lake_mesh_generator: Option<LakeMeshGenerator<F>>,
+    ) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let shared = Arc::new(QueueState {
                 field,
+                lake_mesh_generator,
                 pending: Mutex::new(PendingJobs::default()),
                 wake_workers: Condvar::new(),
             });
@@ -565,6 +549,7 @@ where
             let _ = worker_count;
             Self {
                 field,
+                lake_mesh_generator,
                 pending: BinaryHeap::new(),
                 yield_after_mesh: false,
                 next_sequence: 0,
@@ -596,6 +581,26 @@ where
         self.pending.push(Reverse(job));
     }
 
+    /// Removes a job that has not yet started.
+    ///
+    /// Jobs already owned by a worker may still complete and are rejected by
+    /// the request-generation check at integration time.
+    pub fn cancel(&mut self, spec: TerrainMeshSpec) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let jobs = &mut self
+            .shared
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .jobs;
+        #[cfg(target_arch = "wasm32")]
+        let jobs = &mut self.pending;
+
+        let previous_len = jobs.len();
+        jobs.retain(|queued| queued.0.spec != spec);
+        jobs.len() != previous_len
+    }
+
     /// Returns one completed mesh without waiting for a worker.
     pub fn try_next(&mut self) -> Option<GeneratedTerrainMesh> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -610,17 +615,9 @@ where
                 return None;
             }
             let Reverse(job) = self.pending.pop()?;
-            let mesh = match job.spec {
-                TerrainMeshSpec::Far(spec) => far_terrain_mesh(&self.field, spec),
-                TerrainMeshSpec::Near(spec) => {
-                    transvoxel_chunk(&self.field, spec.chunk, spec.lod, spec.transition_faces)
-                }
-            };
+            let generated = generate_terrain_mesh(&self.field, self.lake_mesh_generator, job.spec);
             self.yield_after_mesh = true;
-            Some(GeneratedTerrainMesh {
-                spec: job.spec,
-                mesh,
-            })
+            Some(generated)
         }
     }
 }
@@ -650,6 +647,7 @@ impl<F> Drop for TerrainMeshQueue<F> {
 #[derive(Debug)]
 struct QueueState<F> {
     field: F,
+    lake_mesh_generator: Option<LakeMeshGenerator<F>>,
     pending: Mutex<PendingJobs>,
     wake_workers: Condvar,
 }
@@ -693,21 +691,43 @@ where
             };
             job
         };
-        let mesh = match job.spec {
-            TerrainMeshSpec::Far(spec) => far_terrain_mesh(&shared.field, spec),
-            TerrainMeshSpec::Near(spec) => {
-                transvoxel_chunk(&shared.field, spec.chunk, spec.lod, spec.transition_faces)
-            }
-        };
-        if ready
-            .send(GeneratedTerrainMesh {
-                spec: job.spec,
-                mesh,
-            })
-            .is_err()
-        {
+        let generated = generate_terrain_mesh(&shared.field, shared.lake_mesh_generator, job.spec);
+        if ready.send(generated).is_err() {
             return;
         }
+    }
+}
+
+fn generate_terrain_mesh<F>(
+    field: &F,
+    lake_mesh_generator: Option<LakeMeshGenerator<F>>,
+    spec: TerrainMeshSpec,
+) -> GeneratedTerrainMesh
+where
+    F: DensityField + SurfaceField,
+{
+    let terrain_started = Instant::now();
+    let mesh = match spec {
+        TerrainMeshSpec::Far(spec) => far_terrain_mesh(field, spec),
+        TerrainMeshSpec::Near(spec) => {
+            transvoxel_chunk(field, spec.chunk, spec.lod, spec.transition_faces)
+        }
+    };
+    let terrain_generation_time = terrain_started.elapsed();
+    let lake_started = Instant::now();
+    let lake_mesh = lake_mesh_generator.map(|generator| generator(field, spec));
+    let lake_generation_time = if lake_mesh_generator.is_some() {
+        lake_started.elapsed()
+    } else {
+        Duration::ZERO
+    };
+
+    GeneratedTerrainMesh {
+        spec,
+        mesh,
+        lake_mesh,
+        terrain_generation_time,
+        lake_generation_time,
     }
 }
 
@@ -810,17 +830,6 @@ impl FarTileIndex {
         let edge = Self::edge_meters();
         (i64_as_f64(self.x) * edge, i64_as_f64(self.z) * edge)
     }
-
-    fn intersects(self, cutout: NearTerrainCutout) -> bool {
-        let (tile_min_x, tile_min_z) = self.origin();
-        let tile_max_x = tile_min_x + Self::edge_meters();
-        let tile_max_z = tile_min_z + Self::edge_meters();
-        let bounds = cutout.world_bounds();
-        tile_min_x < bounds.max_x
-            && tile_max_x > bounds.min_x
-            && tile_min_z < bounds.max_z
-            && tile_max_z > bounds.min_z
-    }
 }
 
 /// Half-open chunk rectangle covered by a complete near-terrain residency set.
@@ -848,38 +857,23 @@ impl NearTerrainCutout {
             ),
         })
     }
-
-    fn world_bounds(self) -> SurfaceCutout {
-        let edge = ChunkIndex::edge_meters();
-        SurfaceCutout::new(
-            i64_as_f64(self.min.x) * edge,
-            i64_as_f64(self.max_exclusive.x) * edge,
-            i64_as_f64(self.min.z) * edge,
-            i64_as_f64(self.max_exclusive.z) * edge,
-        )
-    }
 }
 
 /// Complete deterministic inputs for one coarse, surface-only terrain tile.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FarTerrainMeshSpec {
     pub tile: FarTileIndex,
-    pub near_cutout: Option<NearTerrainCutout>,
 }
 
 impl FarTerrainMeshSpec {
     fn surface_grid(self) -> SurfaceGridSpec {
         let (origin_x, origin_z) = self.tile.origin();
-        let mut grid = SurfaceGridSpec::new(
+        SurfaceGridSpec::new(
             origin_x,
             origin_z,
             [FarTileIndex::CELLS_PER_EDGE; 2],
             FarTileIndex::edge_meters() / usize_as_f64(FarTileIndex::CELLS_PER_EDGE),
-        );
-        if let Some(cutout) = self.near_cutout {
-            grid = grid.with_cutout(cutout.world_bounds());
-        }
-        grid
+        )
     }
 }
 
@@ -947,7 +941,6 @@ impl FarTerrainStreamer {
         self,
         player_position: WorldPosition,
         loaded: &BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
-        near_cutout: Option<NearTerrainCutout>,
     ) -> Option<FarTerrainStreamingPlan> {
         let center = FarTileIndex::containing(player_position)?;
         let load_radius = i64::try_from(self.config.load_radius).ok()?;
@@ -959,14 +952,12 @@ impl FarTerrainStreamer {
                     center.x.checked_add(x_offset)?,
                     center.z.checked_add(z_offset)?,
                 );
-                desired.insert(tile, far_spec(tile, near_cutout));
+                desired.insert(tile, FarTerrainMeshSpec { tile });
             }
         }
         for &tile in loaded.keys() {
             if tile.chebyshev_distance(center) <= self.config.retain_radius {
-                desired
-                    .entry(tile)
-                    .or_insert_with(|| far_spec(tile, near_cutout));
+                desired.entry(tile).or_insert(FarTerrainMeshSpec { tile });
             }
         }
 
@@ -993,13 +984,6 @@ impl FarTerrainStreamer {
             load,
             unload,
         })
-    }
-}
-
-fn far_spec(tile: FarTileIndex, near_cutout: Option<NearTerrainCutout>) -> FarTerrainMeshSpec {
-    FarTerrainMeshSpec {
-        tile,
-        near_cutout: near_cutout.filter(|cutout| tile.intersects(*cutout)),
     }
 }
 
@@ -1451,11 +1435,38 @@ mod tests {
     }
 
     #[test]
+    fn queued_generation_can_include_worker_built_lake_meshes() {
+        let terrain = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
+        let spec = ChunkMeshSpec {
+            chunk: ChunkIndex::new(0, 0),
+            lod: ChunkIndex::MAX_LOD,
+            transition_faces: TransitionFaces::none(),
+        };
+        let mut queue = TerrainMeshQueue::with_worker_count_and_lake_mesh(
+            terrain,
+            NonZeroUsize::MIN,
+            Some(empty_lake_mesh),
+        );
+        queue.enqueue(GenerationPriority::NearTerrain, TerrainMeshSpec::Near(spec));
+        let generated = queue
+            .ready
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker completes terrain and lake meshes");
+
+        assert_eq!(
+            generated
+                .lake_mesh
+                .expect("lake generation configured")
+                .expect("valid lake mesh"),
+            Mesh::default()
+        );
+    }
+
+    #[test]
     fn queued_far_mesh_matches_direct_surface_generation() {
         let terrain = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
         let spec = FarTerrainMeshSpec {
             tile: FarTileIndex::new(-1, 2),
-            near_cutout: None,
         };
         let expected = far_terrain_mesh(&terrain, spec).expect("direct far mesh");
         let mut queue = TerrainMeshQueue::with_worker_count(terrain, NonZeroUsize::MIN);
@@ -1511,11 +1522,7 @@ mod tests {
     fn far_tiles_handle_negative_boundaries_and_load_horizon_first() {
         let streamer = FarTerrainStreamer::new(FarTerrainStreamingConfig::new(2, 3).unwrap());
         let plan = streamer
-            .plan(
-                WorldPosition::new(-0.01, 0.0, -0.01),
-                &BTreeMap::new(),
-                None,
-            )
+            .plan(WorldPosition::new(-0.01, 0.0, -0.01), &BTreeMap::new())
             .expect("finite position");
 
         assert_eq!(plan.center, FarTileIndex::new(-1, -1));
@@ -1528,43 +1535,25 @@ mod tests {
     }
 
     #[test]
-    fn complete_near_bounds_cut_only_intersecting_far_tiles() {
+    fn moving_between_near_chunks_does_not_rebuild_far_tiles() {
         let streamer = FarTerrainStreamer::new(FarTerrainStreamingConfig::new(1, 1).unwrap());
-        let cutout = NearTerrainCutout::around(ChunkIndex::new(0, 0), 4).expect("valid bounds");
-        let plan = streamer
+        let initial = streamer
+            .plan(WorldPosition::new(0.0, 0.0, 0.0), &BTreeMap::new())
+            .expect("finite position");
+        let loaded = initial
+            .load
+            .into_iter()
+            .map(|spec| (spec.tile, spec))
+            .collect::<BTreeMap<_, _>>();
+        let moved = streamer
             .plan(
-                WorldPosition::new(0.0, 0.0, 0.0),
-                &BTreeMap::new(),
-                Some(cutout),
+                WorldPosition::new(ChunkIndex::edge_meters(), 0.0, 0.0),
+                &loaded,
             )
             .expect("finite position");
 
-        assert_eq!(
-            plan.load
-                .iter()
-                .filter(|spec| spec.near_cutout.is_some())
-                .map(|spec| spec.tile)
-                .collect::<Vec<_>>(),
-            vec![
-                FarTileIndex::new(-1, -1),
-                FarTileIndex::new(0, -1),
-                FarTileIndex::new(-1, 0),
-                FarTileIndex::new(0, 0),
-            ]
-        );
-        assert!(
-            plan.load
-                .iter()
-                .filter(|spec| spec.near_cutout.is_some())
-                .all(|spec| far_terrain_mesh(
-                    &RollingHills::new(WorldIdentity::new(0x5eed, 1, 0)),
-                    *spec
-                )
-                .expect("cut mesh")
-                .indices
-                .len()
-                    < FarTileIndex::CELLS_PER_EDGE * FarTileIndex::CELLS_PER_EDGE * 6)
-        );
+        assert!(moved.load.is_empty());
+        assert!(moved.unload.is_empty());
     }
 
     #[test]
@@ -1679,6 +1668,14 @@ mod tests {
 
     fn specs_by_chunk(specs: Vec<ChunkMeshSpec>) -> BTreeMap<ChunkIndex, ChunkMeshSpec> {
         specs.into_iter().map(|spec| (spec.chunk, spec)).collect()
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn empty_lake_mesh(
+        _terrain: &RollingHills,
+        _spec: TerrainMeshSpec,
+    ) -> Result<Mesh, MeshingError> {
+        Ok(Mesh::default())
     }
 
     fn generated_lake_point(terrain: &GeneratedWorldTerrain) -> (f64, f64, LakeSurfaceSample) {
