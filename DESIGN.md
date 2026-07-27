@@ -2232,12 +2232,14 @@ The world generator is the game.
       deterministic; the client renders their generated trunks, branches, and
       crowns, and Generator Lab inspection explains nearby individuals.
 - [ ] **PARTIAL** — Distant forest LOD. Near terrain renders full procedural
-      trees, a distinct mid-range keeps simplified individual trees, and an
-      outer silhouette ring streams the same deterministic individuals to ten
-      times the near-terrain radius. Continuous canopy surfaces were removed:
-      forest depth now comes from actual trunks and crowns blocking sightlines.
-      GPU instancing, occlusion-aware culling, and dithered transitions between
-      representation tiers remain.
+      trees, the individual-tree ring through five times the near-terrain radius
+      also uses full procedural geometry, a simplified individual-tree ring
+      continues through ten times the radius, and an outer silhouette ring
+      streams the same deterministic individuals from there to twenty times the
+      radius. Continuous canopy surfaces were removed: forest depth now comes
+      from actual trunks and crowns blocking sightlines. GPU instancing,
+      occlusion-aware culling, and dithered transitions between representation
+      tiers remain.
 - [x] Surface rocks. Continuous geology-, erosion-, slope-, and soil-driven
       rock distributions feed globally anchored rounded boulders, angular
       blocks, weathered slabs, and scree fragments. Individuals have
