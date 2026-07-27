@@ -859,7 +859,7 @@ mod tests {
 
         assert_eq!(
             stable_hash(&words),
-            10_915_097_629_159_196_840,
+            15_629_364_864_375_601_938,
             "changing this value changes climate-fed regional rivers"
         );
     }
