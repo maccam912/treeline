@@ -665,7 +665,8 @@ impl ProceduralTrees {
     /// and jitters those stems inside the cell. Filtering after generation makes
     /// adjacent requests share exact boundary behavior and keeps output
     /// independent of request or job order. IEEE-754 arithmetic and stable hashes
-    /// are part of the generator-version-10 contract.
+    /// are part of the generator-version-10 contract. Direction normalization
+    /// uses an explicitly sequenced square root instead of platform `hypot`.
     pub fn trees_in(self, bounds: TreeBounds) -> Option<Vec<ProceduralTree>> {
         if self.world.generator_version < TREE_GENERATOR_VERSION {
             return None;
@@ -976,7 +977,9 @@ fn tree_genotype(group: TreeFunctionalGroup, id: u64) -> TreeGenotype {
 }
 
 fn normalized_direction(direction: [f64; 2]) -> [f64; 2] {
-    let length = direction[0].hypot(direction[1]);
+    // Keep these operations separate and ordered. `f64::hypot` may use
+    // platform-specific implementations whose last-bit rounding differs.
+    let length = f64::sqrt((direction[0] * direction[0]) + (direction[1] * direction[1]));
     if length <= f64::EPSILON {
         [1.0, 0.0]
     } else {
@@ -1406,6 +1409,14 @@ mod tests {
     }
 
     #[test]
+    fn tree_direction_normalization_has_stable_bits() {
+        let direction = normalized_direction([0.61, -0.92]);
+
+        assert_eq!(direction[0].to_bits(), 4_603_152_668_769_828_234);
+        assert_eq!(direction[1].to_bits(), 13_829_054_229_001_015_622);
+    }
+
+    #[test]
     fn tree_generation_requires_its_versioned_contract() {
         let old_world = WorldIdentity::new(0x5eed, TREE_GENERATOR_VERSION - 1, 0);
         let bounds = TreeBounds::new(0.0, 0.0, 32.0, 32.0).expect("valid bounds");
@@ -1484,7 +1495,7 @@ mod tests {
         );
 
         assert_eq!(
-            fingerprint, 4_748_501_871_403_592_086,
+            fingerprint, 6_490_163_336_085_404_248,
             "changing this value changes generated procedural trees"
         );
     }
