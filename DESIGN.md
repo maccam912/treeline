@@ -2175,7 +2175,9 @@ Nothing else.
 - [x] Transvoxel terrain seams
 - [x] Distance-selected terrain LOD
 - [x] Surface-only far terrain extending beyond 20 km
-- [x] Prioritized asynchronous terrain jobs
+- [x] Prioritized asynchronous terrain jobs with native-thread and
+      message-passing Web Worker pools, direction-aware prewarming, and a
+      bounded exact-mesh cache for smooth chunk crossings
 - [x] Deterministic world identity and seeds
 
 Target:

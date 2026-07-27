@@ -1,7 +1,8 @@
 //! Streaming-world lifecycle and deterministic terrain-LOD planning.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::mem::size_of;
 use std::num::NonZeroUsize;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -421,8 +422,36 @@ pub enum GenerationPriority {
     Horizon,
     FarTerrain,
     NearTerrain,
+    PrefetchTerrain,
     Vegetation,
     SurfaceDetail,
+}
+
+impl GenerationPriority {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::PlayerTerrain => 0,
+            Self::Horizon => 1,
+            Self::FarTerrain => 2,
+            Self::NearTerrain => 3,
+            Self::PrefetchTerrain => 4,
+            Self::Vegetation => 5,
+            Self::SurfaceDetail => 6,
+        }
+    }
+
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::PlayerTerrain),
+            1 => Some(Self::Horizon),
+            2 => Some(Self::FarTerrain),
+            3 => Some(Self::NearTerrain),
+            4 => Some(Self::PrefetchTerrain),
+            5 => Some(Self::Vegetation),
+            6 => Some(Self::SurfaceDetail),
+            _ => None,
+        }
+    }
 }
 
 /// Complete inputs needed to regenerate either terrain representation.
@@ -433,16 +462,132 @@ pub enum TerrainMeshSpec {
 }
 
 /// Completed output from one asynchronous terrain-mesh job.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GeneratedTerrainMesh {
     pub spec: TerrainMeshSpec,
+    pub priority: GenerationPriority,
     pub mesh: Result<Mesh, MeshingError>,
     pub lake_mesh: Option<Result<Mesh, MeshingError>>,
     pub terrain_generation_time: Duration,
     pub lake_generation_time: Duration,
+    pub cache_hit: bool,
 }
 
 type LakeMeshGenerator<F> = fn(&F, TerrainMeshSpec) -> Result<Mesh, MeshingError>;
+
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_TERRAIN_MESH_CACHE_BYTES: usize = 192 * 1024 * 1024;
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_TERRAIN_MESH_CACHE_BYTES: usize = 48 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_TERRAIN_MESH_CACHE_ENTRIES: usize = 2_048;
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_TERRAIN_MESH_CACHE_ENTRIES: usize = 512;
+
+#[derive(Clone, Debug)]
+struct CachedTerrainMesh {
+    generated: GeneratedTerrainMesh,
+    bytes: usize,
+    last_used: u64,
+}
+
+#[derive(Debug)]
+struct TerrainMeshCache {
+    entries: BTreeMap<TerrainMeshSpec, CachedTerrainMesh>,
+    used_bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
+    clock: u64,
+}
+
+impl TerrainMeshCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            used_bytes: 0,
+            max_bytes,
+            max_entries: DEFAULT_TERRAIN_MESH_CACHE_ENTRIES,
+            clock: 0,
+        }
+    }
+
+    fn contains(&self, spec: TerrainMeshSpec) -> bool {
+        self.entries.contains_key(&spec)
+    }
+
+    fn get(
+        &mut self,
+        spec: TerrainMeshSpec,
+        priority: GenerationPriority,
+    ) -> Option<GeneratedTerrainMesh> {
+        self.clock = self.clock.wrapping_add(1);
+        let cached = self.entries.get_mut(&spec)?;
+        cached.last_used = self.clock;
+        let mut generated = cached.generated.clone();
+        generated.priority = priority;
+        generated.terrain_generation_time = Duration::ZERO;
+        generated.lake_generation_time = Duration::ZERO;
+        generated.cache_hit = true;
+        Some(generated)
+    }
+
+    fn insert(&mut self, generated: &GeneratedTerrainMesh) {
+        if generated.mesh.is_err() || generated.lake_mesh.as_ref().is_some_and(Result::is_err) {
+            return;
+        }
+        let bytes = generated_terrain_mesh_bytes(generated);
+        if bytes > self.max_bytes {
+            return;
+        }
+
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(previous) = self.entries.remove(&generated.spec) {
+            self.used_bytes = self.used_bytes.saturating_sub(previous.bytes);
+        }
+        self.used_bytes = self.used_bytes.saturating_add(bytes);
+        self.entries.insert(
+            generated.spec,
+            CachedTerrainMesh {
+                generated: generated.clone(),
+                bytes,
+                last_used: self.clock,
+            },
+        );
+
+        while self.used_bytes > self.max_bytes || self.entries.len() > self.max_entries {
+            let Some((&oldest_spec, _)) = self
+                .entries
+                .iter()
+                .min_by_key(|(spec, cached)| (cached.last_used, *spec))
+            else {
+                break;
+            };
+            let Some(removed) = self.entries.remove(&oldest_spec) else {
+                break;
+            };
+            self.used_bytes = self.used_bytes.saturating_sub(removed.bytes);
+        }
+    }
+}
+
+fn generated_terrain_mesh_bytes(generated: &GeneratedTerrainMesh) -> usize {
+    fn mesh_bytes(mesh: &Mesh) -> usize {
+        mesh.positions
+            .len()
+            .saturating_mul(size_of::<[f32; 3]>())
+            .saturating_add(mesh.normals.len().saturating_mul(size_of::<[f32; 3]>()))
+            .saturating_add(mesh.colors.len().saturating_mul(size_of::<[f32; 4]>()))
+            .saturating_add(mesh.indices.len().saturating_mul(size_of::<u32>()))
+    }
+
+    let terrain = generated.mesh.as_ref().map_or(0, mesh_bytes);
+    let lake = generated
+        .lake_mesh
+        .as_ref()
+        .and_then(|mesh| mesh.as_ref().ok())
+        .map_or(0, mesh_bytes);
+    terrain.saturating_add(lake)
+}
 
 /// Terrain generation queue ordered by visible generation priority.
 ///
@@ -450,8 +595,8 @@ type LakeMeshGenerator<F> = fn(&F, TerrainMeshSpec) -> Result<Mesh, MeshingError
 /// start in priority order, with submission order breaking ties. Completion
 /// order is deliberately not observable by generation itself: every mesh is a
 /// pure function of its field and [`ChunkMeshSpec`]. Native builds use worker
-/// threads; browser builds complete one queued mesh at a time between event-loop
-/// turns.
+/// threads. This type retains an incremental Wasm fallback; the player client
+/// implements the same queue contract with independent Web Workers.
 #[derive(Debug)]
 pub struct TerrainMeshQueue<F> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -467,7 +612,10 @@ pub struct TerrainMeshQueue<F> {
     #[cfg(target_arch = "wasm32")]
     pending: BinaryHeap<Reverse<QueuedTerrainMesh>>,
     #[cfg(target_arch = "wasm32")]
+    cache: TerrainMeshCache,
+    #[cfg(target_arch = "wasm32")]
     yield_after_mesh: bool,
+    cached_ready: VecDeque<GeneratedTerrainMesh>,
     next_sequence: u64,
 }
 
@@ -478,9 +626,9 @@ where
     /// Starts native workers while reserving one available hardware thread for
     /// the window, rendering, and simulation work.
     ///
-    /// Browser builds retain the same priority queue but generate incrementally
-    /// on the main thread because GitHub Pages does not provide the headers
-    /// required for shared-memory WebAssembly threads.
+    /// This queue's Wasm fallback generates incrementally on the calling thread.
+    /// The player client instead uses independent message-passing Wasm workers,
+    /// which do not require shared-memory response headers.
     pub fn new(field: F) -> Self {
         Self::with_optional_lake_mesh(field, None)
     }
@@ -524,6 +672,7 @@ where
                 field,
                 lake_mesh_generator,
                 pending: Mutex::new(PendingJobs::default()),
+                cache: Mutex::new(TerrainMeshCache::new(DEFAULT_TERRAIN_MESH_CACHE_BYTES)),
                 wake_workers: Condvar::new(),
             });
             let (ready_sender, ready) = mpsc::channel();
@@ -539,6 +688,7 @@ where
                 shared,
                 ready,
                 workers,
+                cached_ready: VecDeque::new(),
                 next_sequence: 0,
             }
         }
@@ -550,7 +700,9 @@ where
                 field,
                 lake_mesh_generator,
                 pending: BinaryHeap::new(),
+                cache: TerrainMeshCache::new(DEFAULT_TERRAIN_MESH_CACHE_BYTES),
                 yield_after_mesh: false,
+                cached_ready: VecDeque::new(),
                 next_sequence: 0,
             }
         }
@@ -558,26 +710,119 @@ where
 
     /// Adds a deterministic chunk request without blocking for generation.
     pub fn enqueue(&mut self, priority: GenerationPriority, spec: TerrainMeshSpec) {
+        if let Some(generated) = self.cached(spec, priority) {
+            self.cached_ready.push_back(generated);
+            return;
+        }
+        self.queue_if_missing(priority, spec);
+    }
+
+    /// Schedules low-priority generation only when the exact mesh is not
+    /// already cached, queued, or being generated.
+    ///
+    /// Unlike [`Self::enqueue`], a cache hit does not emit a completion. This
+    /// makes the method safe to call every frame for predictive prewarming.
+    pub fn prewarm(&mut self, spec: TerrainMeshSpec) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self
+            .shared
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(spec)
+        {
+            return false;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.cache.contains(spec) {
+            return false;
+        }
+
+        self.queue_if_missing(GenerationPriority::PrefetchTerrain, spec)
+    }
+
+    /// Drops obsolete speculative jobs while preserving visible and in-flight
+    /// work.
+    pub fn retain_prewarm(&mut self, desired: &BTreeSet<TerrainMeshSpec>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.shared
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .jobs
+            .retain(|queued| {
+                queued.0.priority != GenerationPriority::PrefetchTerrain
+                    || desired.contains(&queued.0.spec)
+            });
+
+        #[cfg(target_arch = "wasm32")]
+        self.pending.retain(|queued| {
+            queued.0.priority != GenerationPriority::PrefetchTerrain
+                || desired.contains(&queued.0.spec)
+        });
+    }
+
+    fn cached(
+        &mut self,
+        spec: TerrainMeshSpec,
+        priority: GenerationPriority,
+    ) -> Option<GeneratedTerrainMesh> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.shared
+                .cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(spec, priority)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.cache.get(spec, priority)
+        }
+    }
+
+    fn queue_if_missing(&mut self, priority: GenerationPriority, spec: TerrainMeshSpec) -> bool {
         let job = QueuedTerrainMesh {
             priority,
             sequence: self.next_sequence,
             spec,
         };
-        self.next_sequence = self.next_sequence.wrapping_add(1);
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.shared
+            let mut pending = self
+                .shared
                 .pending
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .jobs
-                .push(Reverse(job));
+                .unwrap_or_else(PoisonError::into_inner);
+            if pending.in_flight.contains(&spec) {
+                return false;
+            }
+            if let Some(existing) = pending.jobs.iter().find(|queued| queued.0.spec == spec) {
+                if existing.0.priority <= priority {
+                    return false;
+                }
+                pending.jobs.retain(|queued| queued.0.spec != spec);
+            }
+            pending.jobs.push(Reverse(job));
+            drop(pending);
             self.shared.wake_workers.notify_one();
         }
 
         #[cfg(target_arch = "wasm32")]
-        self.pending.push(Reverse(job));
+        {
+            if let Some(existing) = self.pending.iter().find(|queued| queued.0.spec == spec) {
+                if existing.0.priority <= priority {
+                    return false;
+                }
+                self.pending.retain(|queued| queued.0.spec != spec);
+            }
+            self.pending.push(Reverse(job));
+        }
+
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        true
     }
 
     /// Removes a job that has not yet started.
@@ -602,6 +847,10 @@ where
 
     /// Returns one completed mesh without waiting for a worker.
     pub fn try_next(&mut self) -> Option<GeneratedTerrainMesh> {
+        if let Some(generated) = self.cached_ready.pop_front() {
+            return Some(generated);
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.ready.try_recv().ok()
@@ -614,7 +863,13 @@ where
                 return None;
             }
             let Reverse(job) = self.pending.pop()?;
-            let generated = generate_terrain_mesh(&self.field, self.lake_mesh_generator, job.spec);
+            let generated = generate_terrain_mesh(
+                &self.field,
+                self.lake_mesh_generator,
+                job.priority,
+                job.spec,
+            );
+            self.cache.insert(&generated);
             self.yield_after_mesh = true;
             Some(generated)
         }
@@ -648,6 +903,7 @@ struct QueueState<F> {
     field: F,
     lake_mesh_generator: Option<LakeMeshGenerator<F>>,
     pending: Mutex<PendingJobs>,
+    cache: Mutex<TerrainMeshCache>,
     wake_workers: Condvar,
 }
 
@@ -655,6 +911,7 @@ struct QueueState<F> {
 #[derive(Debug, Default)]
 struct PendingJobs {
     jobs: BinaryHeap<Reverse<QueuedTerrainMesh>>,
+    in_flight: BTreeSet<TerrainMeshSpec>,
     closed: bool,
 }
 
@@ -688,9 +945,26 @@ where
             let Some(Reverse(job)) = pending.jobs.pop() else {
                 continue;
             };
+            pending.in_flight.insert(job.spec);
             job
         };
-        let generated = generate_terrain_mesh(&shared.field, shared.lake_mesh_generator, job.spec);
+        let generated = generate_terrain_mesh(
+            &shared.field,
+            shared.lake_mesh_generator,
+            job.priority,
+            job.spec,
+        );
+        shared
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(&generated);
+        shared
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .in_flight
+            .remove(&job.spec);
         if ready.send(generated).is_err() {
             return;
         }
@@ -700,6 +974,7 @@ where
 fn generate_terrain_mesh<F>(
     field: &F,
     lake_mesh_generator: Option<LakeMeshGenerator<F>>,
+    priority: GenerationPriority,
     spec: TerrainMeshSpec,
 ) -> GeneratedTerrainMesh
 where
@@ -723,11 +998,28 @@ where
 
     GeneratedTerrainMesh {
         spec,
+        priority,
         mesh,
         lake_mesh,
         terrain_generation_time,
         lake_generation_time,
+        cache_hit: false,
     }
+}
+
+/// Generates one complete terrain result for a browser worker or an explicit
+/// synchronous caller using the same native queue contract.
+pub fn generate_world_terrain_mesh(
+    field: &GeneratedWorldTerrain,
+    priority: GenerationPriority,
+    spec: TerrainMeshSpec,
+) -> GeneratedTerrainMesh {
+    generate_terrain_mesh(
+        field,
+        Some(GeneratedWorldTerrain::lake_surface_mesh),
+        priority,
+        spec,
+    )
 }
 
 /// Validated near-terrain residency radii measured in chunks.
@@ -1088,6 +1380,79 @@ impl ChunkStreamer {
             unload,
         })
     }
+
+    /// Returns exact mesh variants worth generating before a likely chunk
+    /// crossing.
+    ///
+    /// A moving player prewarms up to `centers_ahead` future residency centers
+    /// in the quantized travel direction. An idle player prewarms the four
+    /// immediately adjacent centers so initial loading can use otherwise idle
+    /// workers without guessing a preferred direction.
+    pub fn prefetch_specs(
+        self,
+        player_position: WorldPosition,
+        travel_direction: [f64; 2],
+        centers_ahead: u64,
+    ) -> Option<Vec<ChunkMeshSpec>> {
+        if centers_ahead == 0 {
+            return Some(Vec::new());
+        }
+        let center = ChunkIndex::containing(player_position)?;
+        if !travel_direction.into_iter().all(f64::is_finite) {
+            return None;
+        }
+
+        let magnitude = travel_direction[0].abs().max(travel_direction[1].abs());
+        let mut future_centers = Vec::new();
+        if magnitude <= f64::EPSILON {
+            for (x_offset, z_offset) in [(-1_i64, 0_i64), (1, 0), (0, -1), (0, 1)] {
+                future_centers.push(ChunkIndex::new(
+                    center.x.checked_add(x_offset)?,
+                    center.z.checked_add(z_offset)?,
+                ));
+            }
+        } else {
+            let dominant = travel_direction[0].abs().max(travel_direction[1].abs());
+            let x_step: i64 = if travel_direction[0].abs() >= dominant * 0.5 {
+                if travel_direction[0].is_sign_negative() {
+                    -1
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
+            let z_step: i64 = if travel_direction[1].abs() >= dominant * 0.5 {
+                if travel_direction[1].is_sign_negative() {
+                    -1
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
+            let centers_ahead = i64::try_from(centers_ahead).ok()?;
+            for distance in 1..=centers_ahead {
+                future_centers.push(ChunkIndex::new(
+                    center.x.checked_add(x_step.checked_mul(distance)?)?,
+                    center.z.checked_add(z_step.checked_mul(distance)?)?,
+                ));
+            }
+        }
+
+        let mut specs = BTreeSet::new();
+        for future_center in future_centers {
+            let origin = future_center.sample_origin();
+            let future_position = WorldPosition::new(
+                origin.x + (ChunkIndex::edge_meters() * 0.5),
+                player_position.y,
+                origin.z + (ChunkIndex::edge_meters() * 0.5),
+            );
+            let plan = self.plan(future_position, &BTreeMap::new())?;
+            specs.extend(plan.load);
+        }
+        Some(specs.into_iter().collect())
+    }
 }
 
 fn transition_faces(
@@ -1409,7 +1774,23 @@ mod tests {
     #[test]
     fn visible_terrain_priorities_sort_before_detail() {
         assert!(GenerationPriority::PlayerTerrain < GenerationPriority::Horizon);
-        assert!(GenerationPriority::Horizon < GenerationPriority::SurfaceDetail);
+        assert!(GenerationPriority::NearTerrain < GenerationPriority::PrefetchTerrain);
+        assert!(GenerationPriority::PrefetchTerrain < GenerationPriority::Vegetation);
+        for priority in [
+            GenerationPriority::PlayerTerrain,
+            GenerationPriority::Horizon,
+            GenerationPriority::FarTerrain,
+            GenerationPriority::NearTerrain,
+            GenerationPriority::PrefetchTerrain,
+            GenerationPriority::Vegetation,
+            GenerationPriority::SurfaceDetail,
+        ] {
+            assert_eq!(
+                GenerationPriority::from_code(priority.code()),
+                Some(priority)
+            );
+        }
+        assert_eq!(GenerationPriority::from_code(u8::MAX), None);
     }
 
     #[test]
@@ -1477,6 +1858,33 @@ mod tests {
 
         assert_eq!(generated.spec, TerrainMeshSpec::Far(spec));
         assert_eq!(generated.mesh.expect("queued far mesh"), expected);
+    }
+
+    #[test]
+    fn completed_meshes_are_reused_without_regeneration() {
+        let terrain = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
+        let spec = TerrainMeshSpec::Near(ChunkMeshSpec {
+            chunk: ChunkIndex::new(2, -1),
+            lod: ChunkIndex::MAX_LOD,
+            transition_faces: TransitionFaces::none(),
+        });
+        let mut queue = TerrainMeshQueue::with_worker_count(terrain, NonZeroUsize::MIN);
+        queue.enqueue(GenerationPriority::NearTerrain, spec);
+        let first = queue
+            .ready
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker completes mesh");
+        assert!(!first.cache_hit);
+
+        queue.enqueue(GenerationPriority::PlayerTerrain, spec);
+        let cached = queue.try_next().expect("cached completion");
+
+        assert_eq!(cached.spec, spec);
+        assert_eq!(cached.priority, GenerationPriority::PlayerTerrain);
+        assert!(cached.cache_hit);
+        assert_eq!(cached.terrain_generation_time, Duration::ZERO);
+        assert_eq!(cached.lake_generation_time, Duration::ZERO);
+        assert_eq!(cached.mesh, first.mesh);
     }
 
     #[test]
@@ -1619,6 +2027,59 @@ mod tests {
             .expect("finite position");
         assert!(moved.load.len() >= 9);
         assert!(moved.unload.is_empty());
+    }
+
+    #[test]
+    fn directional_prefetch_matches_the_next_residency_center() {
+        let streamer = ChunkStreamer::new(ChunkStreamingConfig::default());
+        let current = WorldPosition::new(-0.01, 0.0, -0.01);
+        let prefetched = streamer
+            .prefetch_specs(current, [1.0, 0.0], 1)
+            .expect("finite prediction")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let next_center = ChunkIndex::new(0, -1);
+        let next_origin = next_center.sample_origin();
+        let expected = streamer
+            .plan(
+                WorldPosition::new(
+                    next_origin.x + (ChunkIndex::edge_meters() * 0.5),
+                    0.0,
+                    next_origin.z + (ChunkIndex::edge_meters() * 0.5),
+                ),
+                &BTreeMap::new(),
+            )
+            .expect("finite next center")
+            .load
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(prefetched, expected);
+    }
+
+    #[test]
+    fn idle_prefetch_covers_each_adjacent_center_and_can_be_disabled() {
+        let streamer = ChunkStreamer::new(ChunkStreamingConfig::new(1, 2).expect("valid radii"));
+        let position = WorldPosition::new(0.0, 0.0, 0.0);
+        let prefetched = streamer
+            .prefetch_specs(position, [0.0, 0.0], 1)
+            .expect("finite prediction");
+
+        for center in [
+            ChunkIndex::new(-1, 0),
+            ChunkIndex::new(1, 0),
+            ChunkIndex::new(0, -1),
+            ChunkIndex::new(0, 1),
+        ] {
+            assert!(
+                prefetched.iter().any(|spec| spec.chunk == center),
+                "adjacent center {center:?} should be prewarmed"
+            );
+        }
+        assert_eq!(
+            streamer.prefetch_specs(position, [1.0, 0.0], 0),
+            Some(Vec::new())
+        );
     }
 
     #[test]

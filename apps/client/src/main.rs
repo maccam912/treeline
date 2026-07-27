@@ -4,6 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(target_arch = "wasm32")]
+mod browser_terrain;
+
+#[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
@@ -14,11 +17,12 @@ use treeline_ecology::{ProceduralTrees, TreeBounds};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
+#[cfg(not(target_arch = "wasm32"))]
+use treeline_world::TerrainMeshQueue;
 use treeline_world::{
     CURRENT_GENERATOR_VERSION, ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig,
     FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig, FarTileIndex,
-    GeneratedWorldTerrain, GenerationPriority, NearTerrainCutout, TerrainMeshQueue,
-    TerrainMeshSpec,
+    GeneratedWorldTerrain, GenerationPriority, NearTerrainCutout, TerrainMeshSpec,
 };
 use web_time::Instant;
 use winit::application::ApplicationHandler;
@@ -41,6 +45,15 @@ const START_X: f32 = 46_392.0;
 const START_Z: f32 = -23_211.0;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
+#[cfg(not(target_arch = "wasm32"))]
+const TERRAIN_PREFETCH_CENTERS_AHEAD: u64 = 2;
+#[cfg(target_arch = "wasm32")]
+const TERRAIN_PREFETCH_CENTERS_AHEAD: u64 = 2;
+
+#[cfg(not(target_arch = "wasm32"))]
+type ClientTerrainMeshQueue = TerrainMeshQueue<GeneratedWorldTerrain>;
+#[cfg(target_arch = "wasm32")]
+type ClientTerrainMeshQueue = browser_terrain::BrowserTerrainMeshQueue;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn Error>> {
@@ -186,14 +199,14 @@ impl ApplicationHandler for TreelineApp {
         let _ = event_loop;
 
         #[cfg(target_arch = "wasm32")]
-        if self.game.is_none() {
-            if let Some(result) = self.pending_game.borrow_mut().take() {
-                match result {
-                    Ok(game) => self.game = Some(game),
-                    Err(error) => {
-                        eprintln!("failed to start Treeline: {error}");
-                        event_loop.exit();
-                    }
+        if self.game.is_none()
+            && let Some(result) = self.pending_game.borrow_mut().take()
+        {
+            match result {
+                Ok(game) => self.game = Some(game),
+                Err(error) => {
+                    eprintln!("failed to start Treeline: {error}");
+                    event_loop.exit();
                 }
             }
         }
@@ -216,7 +229,7 @@ struct Game {
     far_terrain_tiles: BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
     requested_chunks: BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far_tiles: BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
-    terrain_jobs: TerrainMeshQueue<GeneratedWorldTerrain>,
+    terrain_jobs: ClientTerrainMeshQueue,
     chunk_streamer: ChunkStreamer,
     far_terrain_streamer: FarTerrainStreamer,
     terrain: GeneratedWorldTerrain,
@@ -311,10 +324,13 @@ impl Game {
         let mut far_terrain_tiles = BTreeMap::new();
         let mut requested_chunks = BTreeMap::new();
         let mut requested_far_tiles = BTreeMap::new();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut terrain_jobs = TerrainMeshQueue::with_lake_mesh(
             terrain.clone(),
             GeneratedWorldTerrain::lake_surface_mesh,
         );
+        #[cfg(target_arch = "wasm32")]
+        let mut terrain_jobs = browser_terrain::BrowserTerrainMeshQueue::new(WORLD)?;
 
         let spawn_preparation_started = Instant::now();
         let start_y = surface_height(&terrain, START_X, START_Z) + EYE_HEIGHT;
@@ -324,6 +340,7 @@ impl Game {
             chunk_streamer,
             far_terrain_streamer,
             camera.world_position(),
+            [0.0, 0.0],
             &mut terrain_chunks,
             &mut far_terrain_tiles,
             &mut requested_chunks,
@@ -431,6 +448,7 @@ impl Game {
         self.previous_frame = now;
         self.camera
             .look_with_stick(self.input.look_axis(), delta_seconds);
+        let travel_direction = self.camera.travel_direction(&self.input);
         self.camera.walk(&self.input, &self.terrain, delta_seconds);
         if let Err(error) = update_terrain(
             &self.device,
@@ -439,6 +457,7 @@ impl Game {
             self.chunk_streamer,
             self.far_terrain_streamer,
             self.camera.world_position(),
+            travel_direction,
             &mut self.terrain_chunks,
             &mut self.far_terrain_tiles,
             &mut self.requested_chunks,
@@ -698,9 +717,7 @@ impl Camera {
     }
 
     fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f32) {
-        let forward = Vec3::new(libm::cosf(self.yaw), 0.0, libm::sinf(self.yaw));
-        let right = forward.cross(Vec3::Y);
-        let movement = (forward * input.forward_axis()) + (right * input.right_axis());
+        let movement = self.movement(input);
         if movement.length_squared() > 0.0 {
             let speed = if input.sprint() {
                 SPRINT_SPEED
@@ -711,6 +728,22 @@ impl Camera {
             self.position += movement.normalize() * intensity * speed * delta_seconds;
         }
         self.position.y = surface_height(terrain, self.position.x, self.position.z) + EYE_HEIGHT;
+    }
+
+    fn movement(&self, input: &InputState) -> Vec3 {
+        let forward = Vec3::new(libm::cosf(self.yaw), 0.0, libm::sinf(self.yaw));
+        let right = forward.cross(Vec3::Y);
+        (forward * input.forward_axis()) + (right * input.right_axis())
+    }
+
+    fn travel_direction(&self, input: &InputState) -> [f64; 2] {
+        let movement = self.movement(input);
+        if movement.length_squared() <= f32::EPSILON {
+            [0.0, 0.0]
+        } else {
+            let direction = movement.normalize();
+            [f64::from(direction.x), f64::from(direction.z)]
+        }
     }
 
     fn world_position(&self) -> WorldPosition {
@@ -948,11 +981,12 @@ fn update_terrain(
     chunk_streamer: ChunkStreamer,
     far_streamer: FarTerrainStreamer,
     player_position: WorldPosition,
+    travel_direction: [f64; 2],
     chunks: &mut BTreeMap<ChunkIndex, ResidentTerrainChunk>,
     far_tiles: &mut BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
     requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
-    jobs: &mut TerrainMeshQueue<GeneratedWorldTerrain>,
+    jobs: &mut ClientTerrainMeshQueue,
     initial_generation: &mut InitialGenerationProgress,
 ) -> Result<(), Box<dyn Error>> {
     let frame_integration_started = Instant::now();
@@ -968,12 +1002,15 @@ fn update_terrain(
         let spec = generated.spec;
         let terrain_generation_time = generated.terrain_generation_time;
         let lake_generation_time = generated.lake_generation_time;
+        let priority = generated.priority;
         let expected = match spec {
             TerrainMeshSpec::Near(spec) => requested.get(&spec.chunk) == Some(&spec),
             TerrainMeshSpec::Far(spec) => requested_far.get(&spec.tile) == Some(&spec),
         };
         if !expected {
-            initial_generation.record_stale(terrain_generation_time, lake_generation_time);
+            if priority != GenerationPriority::PrefetchTerrain {
+                initial_generation.record_stale(terrain_generation_time, lake_generation_time);
+            }
             continue;
         }
         let mesh = generated.mesh?;
@@ -1024,6 +1061,7 @@ fn update_terrain(
         chunk_streamer,
         far_streamer,
         player_position,
+        travel_direction,
         chunks,
         far_tiles,
         requested,
@@ -1065,11 +1103,12 @@ fn schedule_terrain(
     chunk_streamer: ChunkStreamer,
     far_streamer: FarTerrainStreamer,
     player_position: WorldPosition,
+    travel_direction: [f64; 2],
     chunks: &mut BTreeMap<ChunkIndex, ResidentTerrainChunk>,
     far_tiles: &mut BTreeMap<FarTileIndex, ResidentFarTerrainTile>,
     requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
     requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
-    jobs: &mut TerrainMeshQueue<GeneratedWorldTerrain>,
+    jobs: &mut ClientTerrainMeshQueue,
 ) -> Result<(), Box<dyn Error>> {
     let mut tracked_chunks = chunks
         .iter()
@@ -1144,15 +1183,24 @@ fn schedule_terrain(
         );
     }
 
+    let prefetched = schedule_prefetch(
+        chunk_streamer,
+        player_position,
+        travel_direction,
+        &tracked_chunks,
+        jobs,
+    )?;
+
     if chunk_plan.load.is_empty()
         && chunk_plan.unload.is_empty()
         && far_plan.load.is_empty()
         && far_plan.unload.is_empty()
+        && prefetched == 0
     {
         return Ok(());
     }
     eprintln!(
-        "streaming center ({}, {}): queued {} far tiles and {} chunks [LOD2 {}, LOD3 {}, LOD4 {}], unloaded {} far / {} near, resident {} far / {} near",
+        "streaming center ({}, {}): queued {} far tiles, {} chunks [LOD2 {}, LOD3 {}, LOD4 {}], and {} predictive meshes; unloaded {} far / {} near, resident {} far / {} near",
         chunk_plan.center.x,
         chunk_plan.center.z,
         far_plan.load.len(),
@@ -1160,12 +1208,40 @@ fn schedule_terrain(
         lod_counts[0],
         lod_counts[1],
         lod_counts[2],
+        prefetched,
         far_plan.unload.len(),
         chunk_plan.unload.len(),
         far_tiles.len(),
         chunks.len()
     );
     Ok(())
+}
+
+fn schedule_prefetch(
+    chunk_streamer: ChunkStreamer,
+    player_position: WorldPosition,
+    travel_direction: [f64; 2],
+    tracked_chunks: &BTreeMap<ChunkIndex, ChunkMeshSpec>,
+    jobs: &mut ClientTerrainMeshQueue,
+) -> Result<usize, Box<dyn Error>> {
+    let specs = chunk_streamer
+        .prefetch_specs(
+            player_position,
+            travel_direction,
+            TERRAIN_PREFETCH_CENTERS_AHEAD,
+        )
+        .ok_or_else(|| std::io::Error::other("terrain prefetch exceeds chunk index range"))?;
+    let desired = specs
+        .iter()
+        .copied()
+        .map(TerrainMeshSpec::Near)
+        .collect::<BTreeSet<_>>();
+    jobs.retain_prewarm(&desired);
+    Ok(specs
+        .into_iter()
+        .filter(|spec| tracked_chunks.get(&spec.chunk) != Some(spec))
+        .filter(|spec| jobs.prewarm(TerrainMeshSpec::Near(*spec)))
+        .count())
 }
 
 #[allow(clippy::cast_possible_truncation)]
