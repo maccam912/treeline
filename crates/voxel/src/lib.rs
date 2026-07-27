@@ -28,7 +28,7 @@ impl LodLevel {
     }
 
     pub fn spacing_meters(self) -> f64 {
-        Self::BASE_SPACING_METERS * 2.0_f64.powi(i32::from(self.0))
+        Self::BASE_SPACING_METERS * libm::scalbn(1.0, i32::from(self.0))
     }
 
     /// Snaps a coordinate to this LOD's sample lattice.
@@ -37,7 +37,7 @@ impl LodLevel {
             return None;
         }
         let spacing = self.spacing_meters();
-        Some((coordinate / spacing).floor() * spacing)
+        Some(libm::floor(coordinate / spacing) * spacing)
     }
 }
 

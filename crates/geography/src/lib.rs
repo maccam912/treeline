@@ -145,9 +145,9 @@ pub struct MacroTerrainSample {
 ///
 /// Each 64 km cell owns one compactly supported ridge segment. Sampling checks
 /// the surrounding cells and evaluates their features analytically, so the
-/// result has no generation-order dependency or region-edge seam. The square
-/// root in segment normalization is the only non-integer operation that shapes
-/// feature identity; supported targets are required to use IEEE-754 `f64`.
+/// result has no generation-order dependency or region-edge seam. Non-basic
+/// floating-point operations use the workspace's architecture-independent
+/// `libm` configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MacroElevation {
     pub world: WorldIdentity,
@@ -214,9 +214,8 @@ impl Climate {
     /// Version 7 adds a broad repeating latitude-like field and fixed
     /// world-space macro-elevation samples as an explainable ocean-proximity
     /// proxy. Wind normalization and all latitude, continentality, and
-    /// seasonal `f64` operations are part of the generation contract. Wind
-    /// normalization deliberately uses the same explicitly sequenced square
-    /// root on every target rather than the platform `hypot` implementation.
+    /// seasonal `f64` operations are part of the generation contract.
+    /// Normalization uses `libm` instead of platform math implementations.
     pub fn sample(self, x: f64, z: f64) -> Option<ClimateSample> {
         let profile = RegionalProfile::sample(self.world, x, z)?;
         let elevation_meters = MacroElevation::new(self.world)
@@ -857,7 +856,7 @@ impl MountainRidge {
         ];
         let direction_index = usize::try_from((key >> 32) & 7).ok()?;
         let (direction_x, direction_z) = directions[direction_index];
-        let direction_length = f64::sqrt((direction_x * direction_x) + (direction_z * direction_z));
+        let direction_length = libm::hypot(direction_x, direction_z);
         let extent_x = direction_x * half_length / direction_length;
         let extent_z = direction_z * half_length / direction_length;
         let center_x = center_x + jitter_x;
@@ -1062,9 +1061,7 @@ fn snow_cycle(
 fn prevailing_wind(world: WorldIdentity, x: f64, z: f64) -> Option<[f64; 2]> {
     let wind_x = (value_field(world, DOMAIN_WIND_X, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
     let wind_z = (value_field(world, DOMAIN_WIND_Z, x, z, WIND_CELL_EDGE_METERS)? * 2.0) - 1.0;
-    // Keep these operations separate and ordered. `f64::hypot` may use
-    // platform-specific implementations whose last-bit rounding differs.
-    let length = f64::sqrt((wind_x * wind_x) + (wind_z * wind_z));
+    let length = libm::hypot(wind_x, wind_z);
     if length <= 0.000_001 {
         return Some([1.0, 0.0]);
     }
@@ -1172,7 +1169,9 @@ mod tests {
         let precipitation_multiplier = first.annual_precipitation_millimeters
             / first.baseline_annual_precipitation_millimeters;
         assert!((0.2..=1.8).contains(&precipitation_multiplier));
-        assert!((first.prevailing_wind[0].hypot(first.prevailing_wind[1]) - 1.0).abs() < 1.0e-12);
+        assert!(
+            (libm::hypot(first.prevailing_wind[0], first.prevailing_wind[1]) - 1.0).abs() < 1.0e-12
+        );
         assert!((0.0..=1.0).contains(&first.precipitation_fraction()));
         assert!((0.0..=1.0).contains(&first.warmth_fraction()));
     }

@@ -3,6 +3,9 @@
 const I64_MIN_AS_F64: f64 = -9_223_372_036_854_775_808.0;
 const I64_MAX_EXCLUSIVE_AS_F64: f64 = 9_223_372_036_854_775_808.0;
 
+/// Generator version that standardizes non-basic float math on pure-Rust `libm`.
+pub const DETERMINISTIC_MATH_GENERATOR_VERSION: u32 = 11;
+
 /// Identifies a procedural world and the algorithm contract used to generate it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct WorldIdentity {
@@ -75,9 +78,9 @@ impl CellIndex {
             return None;
         }
 
-        let edge = base_edge_meters * 2.0_f64.powi(i32::from(level));
-        let cell_x = (x / edge).floor();
-        let cell_z = (z / edge).floor();
+        let edge = base_edge_meters * libm::scalbn(1.0, i32::from(level));
+        let cell_x = libm::floor(x / edge);
+        let cell_z = libm::floor(z / edge);
         let valid_index_range = I64_MIN_AS_F64..I64_MAX_EXCLUSIVE_AS_F64;
         if !valid_index_range.contains(&cell_x) || !valid_index_range.contains(&cell_z) {
             return None;

@@ -202,7 +202,7 @@ impl WildernessTerrain {
         let sample_span = EROSION_SLOPE_SAMPLE_RADIUS_METERS * 2.0;
         let slope_x = (right - left) / sample_span;
         let slope_z = (up - down) / sample_span;
-        let slope = slope_x.hypot(slope_z);
+        let slope = libm::hypot(slope_x, slope_z);
 
         let softness = 1.0 - profile.rock_hardness;
         let macro_weathering_meters = macro_sample.mountain_uplift_meters
@@ -328,7 +328,7 @@ impl DensityField for Sphere {
         let offset_x = position.x - self.center.x;
         let offset_y = position.y - self.center.y;
         let offset_z = position.z - self.center.z;
-        let distance = offset_x.hypot(offset_y).hypot(offset_z);
+        let distance = libm::hypot(libm::hypot(offset_x, offset_y), offset_z);
         TerrainSample::new(distance - self.radius, self.material)
     }
 }

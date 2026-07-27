@@ -430,7 +430,7 @@ fn chunk_surface_bounds(
 }
 
 fn vertical_layer(height: f64, edge_meters: f64) -> Result<i64, MeshingError> {
-    let layer = ((height - ChunkIndex::MIN_Y_METERS) / edge_meters).floor();
+    let layer = libm::floor((height - ChunkIndex::MIN_Y_METERS) / edge_meters);
     if !layer.is_finite() || layer < i64_as_f64(i64::MIN) || layer >= i64_as_f64(i64::MAX) {
         return Err(MeshingError::InvalidGrid);
     }
@@ -506,12 +506,11 @@ fn validate_surface_grid(spec: SurfaceGridSpec) -> Result<(), MeshingError> {
 }
 
 fn normalize(vector: [f32; 3]) -> [f32; 3] {
-    let length = vector[0]
-        .mul_add(
-            vector[0],
-            vector[1].mul_add(vector[1], vector[2] * vector[2]),
-        )
-        .sqrt();
+    let length = libm::sqrtf(libm::fmaf(
+        vector[0],
+        vector[0],
+        libm::fmaf(vector[1], vector[1], vector[2] * vector[2]),
+    ));
     [vector[0] / length, vector[1] / length, vector[2] / length]
 }
 

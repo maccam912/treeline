@@ -255,7 +255,7 @@ impl SpeciesPreference {
         .into_iter()
         .map(|delta| delta * delta)
         .sum::<f64>();
-        (1.0 - (squared_distance.sqrt() / self.tolerance)).clamp(0.0, 1.0)
+        (1.0 - (libm::sqrt(squared_distance) / self.tolerance)).clamp(0.0, 1.0)
     }
 }
 
@@ -664,9 +664,9 @@ impl ProceduralTrees {
     /// the forest field once, then stochastically rounds its expected stem count
     /// and jitters those stems inside the cell. Filtering after generation makes
     /// adjacent requests share exact boundary behavior and keeps output
-    /// independent of request or job order. IEEE-754 arithmetic and stable hashes
-    /// are part of the generator-version-10 contract. Direction normalization
-    /// uses an explicitly sequenced square root instead of platform `hypot`.
+    /// independent of request or job order. Generator version 11 standardizes
+    /// non-basic floating-point operations on the pure-Rust `libm`
+    /// implementation across native and WebAssembly targets.
     pub fn trees_in(self, bounds: TreeBounds) -> Option<Vec<ProceduralTree>> {
         if self.world.generator_version < TREE_GENERATOR_VERSION {
             return None;
@@ -801,7 +801,7 @@ fn tree_individual(
         forest.dominant_disturbance,
         forest.disturbance_severity,
     );
-    let maturity = (age_years / 90.0).clamp(0.0, 1.0).sqrt();
+    let maturity = libm::sqrt((age_years / 90.0).clamp(0.0, 1.0));
     let condition_height = match condition {
         TreeCondition::Sapling => 0.28,
         TreeCondition::StormBroken => 0.62,
@@ -977,9 +977,7 @@ fn tree_genotype(group: TreeFunctionalGroup, id: u64) -> TreeGenotype {
 }
 
 fn normalized_direction(direction: [f64; 2]) -> [f64; 2] {
-    // Keep these operations separate and ordered. `f64::hypot` may use
-    // platform-specific implementations whose last-bit rounding differs.
-    let length = f64::sqrt((direction[0] * direction[0]) + (direction[1] * direction[1]));
+    let length = libm::hypot(direction[0], direction[1]);
     if length <= f64::EPSILON {
         [1.0, 0.0]
     } else {
@@ -1145,7 +1143,11 @@ mod tests {
 
     const TEST_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, SOIL_GENERATOR_VERSION, 0);
     const FOREST_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, FOREST_GENERATOR_VERSION, 0);
-    const TREE_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, TREE_GENERATOR_VERSION, 0);
+    const TREE_WORLD: WorldIdentity = WorldIdentity::new(
+        0x5eed,
+        treeline_coordinates::DETERMINISTIC_MATH_GENERATOR_VERSION,
+        0,
+    );
 
     #[test]
     fn soil_is_deterministic_bounded_and_composition_is_conserved() {
@@ -1381,7 +1383,8 @@ mod tests {
                 && tree.crown_radius_meters >= 0.25
                 && (0.0..=1.0).contains(&tree.damage_fraction)
                 && (0.0..=0.96).contains(&tree.lean_fraction)
-                && (tree.lean_direction[0].hypot(tree.lean_direction[1]) - 1.0).abs() < 1.0e-12
+                && (libm::hypot(tree.lean_direction[0], tree.lean_direction[1]) - 1.0).abs()
+                    < 1.0e-12
         }));
         assert!(first.windows(2).all(|pair| pair[0].id <= pair[1].id));
     }
@@ -1495,7 +1498,7 @@ mod tests {
         );
 
         assert_eq!(
-            fingerprint, 6_490_163_336_085_404_248,
+            fingerprint, 14_498_776_166_268_426_461,
             "changing this value changes generated procedural trees"
         );
     }
