@@ -49,8 +49,9 @@ const START_YAW: f32 = 0.164;
 const START_PITCH: f32 = -0.08;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
-const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 10;
-const DISTANT_TREE_SIMPLIFIED_DISTANCE_MULTIPLIER: u64 = 4;
+const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 20;
+const DISTANT_TREE_HIGH_QUALITY_DISTANCE_MULTIPLIER: u64 = 5;
+const DISTANT_TREE_SIMPLIFIED_DISTANCE_MULTIPLIER: u64 = 10;
 const DISTANT_TREE_TILE_CHUNKS_PER_EDGE: u64 = 4;
 #[cfg(not(target_arch = "wasm32"))]
 const TERRAIN_PREFETCH_CENTERS_AHEAD: u64 = 2;
@@ -1212,6 +1213,10 @@ fn desired_distant_tree_tiles(
 ) -> Result<BTreeMap<DistantTreeTileIndex, TreeMeshDetail>, Box<dyn Error>> {
     let load_radius = distant_tree_load_radius(config);
     let load_radius_i64 = i64::try_from(load_radius)?;
+    let high_quality_radius = config
+        .load_radius()
+        .saturating_mul(DISTANT_TREE_HIGH_QUALITY_DISTANCE_MULTIPLIER)
+        .div_ceil(DISTANT_TREE_TILE_CHUNKS_PER_EDGE);
     let simplified_radius = config
         .load_radius()
         .saturating_mul(DISTANT_TREE_SIMPLIFIED_DISTANCE_MULTIPLIER)
@@ -1229,7 +1234,9 @@ fn desired_distant_tree_tiles(
                     .checked_add(z_offset)
                     .ok_or_else(|| std::io::Error::other("tree tile z index overflow"))?,
             };
-            let detail = if tile.chebyshev_distance(center) <= simplified_radius {
+            let detail = if tile.chebyshev_distance(center) <= high_quality_radius {
+                TreeMeshDetail::Full
+            } else if tile.chebyshev_distance(center) <= simplified_radius {
                 TreeMeshDetail::Simplified
             } else {
                 TreeMeshDetail::Silhouette
@@ -1601,20 +1608,28 @@ mod tests {
     }
 
     #[test]
-    fn distant_tree_plan_extends_ten_times_farther_with_a_visible_middle_ring() {
+    fn distant_tree_plan_uses_full_simplified_and_silhouette_twenty_times_out() {
         let config = ChunkStreamingConfig::new(4, 5).expect("valid terrain radii");
         let center = DistantTreeTileIndex { x: 0, z: 0 };
         let desired = desired_distant_tree_tiles(center, config).expect("distant tree plan");
         let load_radius = distant_tree_load_radius(config);
 
-        assert_eq!(load_radius, 10);
-        assert_eq!(desired.len(), 441);
+        assert_eq!(load_radius, 20);
+        assert_eq!(desired.len(), 1_681);
         assert_eq!(
-            desired.get(&DistantTreeTileIndex { x: 4, z: 0 }),
+            desired.get(&DistantTreeTileIndex { x: 5, z: 0 }),
+            Some(&TreeMeshDetail::Full)
+        );
+        assert_eq!(
+            desired.get(&DistantTreeTileIndex { x: 6, z: 0 }),
             Some(&TreeMeshDetail::Simplified)
         );
         assert_eq!(
-            desired.get(&DistantTreeTileIndex { x: 5, z: 0 }),
+            desired.get(&DistantTreeTileIndex { x: 10, z: 0 }),
+            Some(&TreeMeshDetail::Simplified)
+        );
+        assert_eq!(
+            desired.get(&DistantTreeTileIndex { x: 11, z: 0 }),
             Some(&TreeMeshDetail::Silhouette)
         );
         assert_eq!(
