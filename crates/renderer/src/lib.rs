@@ -364,13 +364,15 @@ impl TerrainRenderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                // Reverse-Z preserves precision from nearby ground cover through
+                // the horizon instead of spending most depth values near 0.1 m.
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -645,7 +647,7 @@ impl TerrainRenderer {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth.view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(0.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -1076,8 +1078,8 @@ fn append_surface_rock(
         let next = (side + 1) % SIDES;
         indices.extend_from_slice(&[
             base_index,
-            first_ring + usize_as_u32(next)?,
             first_ring + usize_as_u32(side)?,
+            first_ring + usize_as_u32(next)?,
         ]);
     }
     for ring in 0..(RINGS.len() - 1) {
@@ -1089,11 +1091,11 @@ fn append_surface_rock(
             let next = usize_as_u32(next)?;
             indices.extend_from_slice(&[
                 lower + side,
-                lower + next,
                 upper + side,
                 lower + next,
+                lower + next,
+                upper + side,
                 upper + next,
-                upper + side,
             ]);
         }
     }
@@ -1103,8 +1105,8 @@ fn append_surface_rock(
         let next = (side + 1) % SIDES;
         indices.extend_from_slice(&[
             last_ring + usize_as_u32(side)?,
-            last_ring + usize_as_u32(next)?,
             top,
+            last_ring + usize_as_u32(next)?,
         ]);
     }
     Ok(())
@@ -1586,13 +1588,21 @@ fn append_conical_crown(
     });
     let apex_index =
         base_index + u32::try_from(sides).map_err(|_| RendererError::TooManyIndices)?;
+    vertices.push(TerrainVertex {
+        position: base.to_array(),
+        normal: (-axis).to_array(),
+        color,
+        snow_coverage: 0.0,
+    });
+    let base_center_index = apex_index + 1;
     for side in 0..sides {
         let next = (side + 1) % sides;
-        indices.extend_from_slice(&[
-            base_index + u32::try_from(side).map_err(|_| RendererError::TooManyIndices)?,
-            base_index + u32::try_from(next).map_err(|_| RendererError::TooManyIndices)?,
-            apex_index,
-        ]);
+        let side_index =
+            base_index + u32::try_from(side).map_err(|_| RendererError::TooManyIndices)?;
+        let next_index =
+            base_index + u32::try_from(next).map_err(|_| RendererError::TooManyIndices)?;
+        indices.extend_from_slice(&[side_index, next_index, apex_index]);
+        indices.extend_from_slice(&[base_center_index, next_index, side_index]);
     }
     Ok(())
 }
@@ -1622,14 +1632,14 @@ fn append_octahedral_crown(
         });
     }
     for triangle in [
-        [0, 1, 2],
-        [0, 2, 3],
-        [0, 3, 4],
-        [0, 4, 1],
-        [5, 2, 1],
-        [5, 3, 2],
-        [5, 4, 3],
-        [5, 1, 4],
+        [0, 2, 1],
+        [0, 3, 2],
+        [0, 4, 3],
+        [0, 1, 4],
+        [5, 1, 2],
+        [5, 2, 3],
+        [5, 3, 4],
+        [5, 4, 1],
     ] {
         indices.extend(triangle.map(|index| base_index + index));
     }
@@ -1761,6 +1771,7 @@ mod tests {
                 && vertex.normal.into_iter().all(f32::is_finite)
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
+        assert_front_facing_geometry(&vertices, &indices);
     }
 
     #[test]
@@ -1834,6 +1845,7 @@ mod tests {
                     .all(|channel| (0.0..=1.0).contains(channel))
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
+        assert_front_facing_geometry(&vertices, &indices);
     }
 
     #[test]
@@ -1865,12 +1877,39 @@ mod tests {
                     .all(|channel| (0.0..=1.0).contains(channel))
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
+        assert_front_facing_geometry(&vertices, &indices);
         assert!(
             vertices.iter().any(|vertex| {
                 vertex.color[0] > vertex.color[1] * 1.35 || vertex.color[2] > vertex.color[1] * 1.35
             }),
             "flowering forbs should add a visible non-green accent"
         );
+    }
+
+    fn assert_front_facing_geometry(vertices: &[TerrainVertex], indices: &[u32]) {
+        for (triangle_index, triangle) in indices.chunks_exact(3).enumerate() {
+            let positions = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                Vec3::from_array(
+                    vertices[usize::try_from(index).expect("test index fits usize")].position,
+                )
+            });
+            let geometric_normal = (positions[1] - positions[0]).cross(positions[2] - positions[0]);
+            if geometric_normal.length_squared() <= f32::EPSILON {
+                continue;
+            }
+            let vertex_normal = triangle
+                .iter()
+                .map(|&index| {
+                    Vec3::from_array(
+                        vertices[usize::try_from(index).expect("test index fits usize")].normal,
+                    )
+                })
+                .sum::<Vec3>();
+            assert!(
+                geometric_normal.dot(vertex_normal) > 0.0,
+                "triangle {triangle_index} faces away from its vertex normals"
+            );
+        }
     }
 
     fn ground_plant_fixture(id: u64, group: GroundCoverGroup) -> GroundPlant {

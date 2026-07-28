@@ -523,11 +523,6 @@ impl Game {
                     self.far_terrain_tiles
                         .values()
                         .filter_map(|resident| resident.lake_mesh.as_ref()),
-                )
-                .chain(
-                    self.distant_tree_tiles
-                        .values()
-                        .filter_map(|resident| resident.mesh.as_ref()),
                 ),
             self.terrain_chunks
                 .values()
@@ -538,9 +533,9 @@ impl Game {
                         .filter_map(|resident| resident.lake_mesh.as_ref()),
                 )
                 .chain(
-                    self.terrain_chunks
+                    self.distant_tree_tiles
                         .values()
-                        .filter_map(|resident| resident.tree_mesh.as_ref()),
+                        .filter_map(|resident| resident.mesh.as_ref()),
                 )
                 .chain(
                     self.terrain_chunks
@@ -563,7 +558,6 @@ struct ResidentTerrainChunk {
     spec: ChunkMeshSpec,
     mesh: TerrainMesh,
     lake_mesh: Option<TerrainMesh>,
-    tree_mesh: Option<TerrainMesh>,
     rock_mesh: Option<TerrainMesh>,
     ground_vegetation_mesh: Option<TerrainMesh>,
 }
@@ -838,7 +832,9 @@ impl Camera {
 
     fn view_projection(&self, width: u32, height: u32) -> [[f32; 4]; 4] {
         let aspect = u32_as_f32(width) / u32_as_f32(height.max(1));
-        let projection = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 50_000.0);
+        // An infinite reverse-Z projection keeps the 32-bit depth buffer useful
+        // for both nearby vegetation and the long-distance terrain horizon.
+        let projection = Mat4::perspective_infinite_reverse_rh(60.0_f32.to_radians(), aspect, 0.1);
         let view = Mat4::look_to_rh(self.position, self.direction(), Vec3::Y);
         (projection * view).to_cols_array_2d()
     }
@@ -1100,7 +1096,6 @@ fn update_terrain(
         match spec {
             TerrainMeshSpec::Near(spec) => {
                 requested.remove(&spec.chunk);
-                let tree_mesh = tree_mesh_for_chunk(device, renderer, terrain, spec)?;
                 let rock_mesh = rock_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
                 let ground_vegetation_mesh =
                     ground_vegetation_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
@@ -1118,7 +1113,6 @@ fn update_terrain(
                             .filter(|lake_mesh| !lake_mesh.indices.is_empty())
                             .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
                             .transpose()?,
-                        tree_mesh,
                         rock_mesh,
                         ground_vegetation_mesh,
                     },
@@ -1183,18 +1177,33 @@ fn update_distant_trees(
     tiles.retain(|tile, _| tile.chebyshev_distance(center) <= retain_radius);
     pending.retain(|spec| desired.get(&spec.tile) == Some(&spec.detail));
 
+    enqueue_distant_tree_replacements(center, &desired, tiles, pending, |resident| resident.spec);
+
+    if let Some(spec) = pending.pop_front() {
+        let mesh = distant_tree_mesh_for_tile(device, renderer, terrain, spec)?;
+        tiles.insert(spec.tile, ResidentDistantTreeTile { spec, mesh });
+    }
+    Ok(())
+}
+
+fn enqueue_distant_tree_replacements<V>(
+    center: DistantTreeTileIndex,
+    desired: &BTreeMap<DistantTreeTileIndex, TreeMeshDetail>,
+    tiles: &BTreeMap<DistantTreeTileIndex, V>,
+    pending: &mut VecDeque<DistantTreeMeshSpec>,
+    mut resident_spec: impl FnMut(&V) -> DistantTreeMeshSpec,
+) {
     let mut missing = desired
         .iter()
         .filter_map(|(&tile, &detail)| {
             let spec = DistantTreeMeshSpec { tile, detail };
             if tiles
                 .get(&tile)
-                .is_some_and(|resident| resident.spec == spec)
+                .is_some_and(|resident| resident_spec(resident) == spec)
                 || pending.contains(&spec)
             {
                 None
             } else {
-                tiles.remove(&tile);
                 Some(spec)
             }
         })
@@ -1207,12 +1216,6 @@ fn update_distant_trees(
         )
     });
     pending.extend(missing);
-
-    if let Some(spec) = pending.pop_front() {
-        let mesh = distant_tree_mesh_for_tile(device, renderer, terrain, spec)?;
-        tiles.insert(spec.tile, ResidentDistantTreeTile { spec, mesh });
-    }
-    Ok(())
 }
 
 fn desired_distant_tree_tiles(
@@ -1285,38 +1288,6 @@ fn distant_tree_mesh_for_tile(
         spec.detail,
         |x, z| terrain.surface_height(x, z),
     )?))
-}
-
-fn tree_mesh_for_chunk(
-    device: &wgpu::Device,
-    renderer: &TerrainRenderer,
-    terrain: &GeneratedWorldTerrain,
-    spec: ChunkMeshSpec,
-) -> Result<Option<TerrainMesh>, Box<dyn Error>> {
-    let chunk = spec.chunk;
-    let origin = chunk.sample_origin();
-    let edge = ChunkIndex::edge_meters();
-    let bounds = TreeBounds::new(origin.x, origin.z, origin.x + edge, origin.z + edge)
-        .ok_or_else(|| std::io::Error::other("tree chunk bounds are invalid"))?;
-    let mut trees = ProceduralTrees::new(terrain.world())
-        .trees_in(bounds)
-        .ok_or_else(|| std::io::Error::other("tree generation is unavailable"))?;
-    trees.retain(|tree| surface_feature_has_dry_ground(terrain, tree.x, tree.z));
-    if trees.is_empty() {
-        return Ok(None);
-    }
-    let mesh = renderer.upload_trees(device, &trees, tree_mesh_detail(spec), |x, z| {
-        terrain.surface_height(x, z)
-    })?;
-    Ok(Some(mesh))
-}
-
-fn tree_mesh_detail(spec: ChunkMeshSpec) -> TreeMeshDetail {
-    match spec.lod.get().saturating_sub(ChunkIndex::NEAR_LOD.get()) {
-        0 => TreeMeshDetail::Full,
-        1 => TreeMeshDetail::Simplified,
-        _ => TreeMeshDetail::Silhouette,
-    }
 }
 
 fn rock_mesh_for_chunk(
@@ -1592,27 +1563,24 @@ mod tests {
     }
 
     #[test]
-    fn tree_mesh_detail_follows_terrain_lod_rings() {
-        let spec = |lod| ChunkMeshSpec {
-            chunk: ChunkIndex::new(0, 0),
-            lod,
-            transition_faces: treeline_voxel::TransitionFaces::none(),
+    fn distant_tree_replacement_keeps_the_resident_mesh_until_successor_is_ready() {
+        let tile = DistantTreeTileIndex { x: 0, z: 0 };
+        let old_spec = DistantTreeMeshSpec {
+            tile,
+            detail: TreeMeshDetail::Simplified,
         };
+        let new_spec = DistantTreeMeshSpec {
+            tile,
+            detail: TreeMeshDetail::Full,
+        };
+        let desired = BTreeMap::from([(tile, new_spec.detail)]);
+        let resident = BTreeMap::from([(tile, old_spec)]);
+        let mut pending = VecDeque::new();
 
-        assert_eq!(
-            tree_mesh_detail(spec(ChunkIndex::NEAR_LOD)),
-            TreeMeshDetail::Full
-        );
-        assert_eq!(
-            tree_mesh_detail(spec(treeline_voxel::LodLevel::new(
-                ChunkIndex::NEAR_LOD.get() + 1
-            ))),
-            TreeMeshDetail::Simplified
-        );
-        assert_eq!(
-            tree_mesh_detail(spec(ChunkIndex::MAX_LOD)),
-            TreeMeshDetail::Silhouette
-        );
+        enqueue_distant_tree_replacements(tile, &desired, &resident, &mut pending, |spec| *spec);
+
+        assert_eq!(resident.get(&tile), Some(&old_spec));
+        assert_eq!(pending, VecDeque::from([new_spec]));
     }
 
     #[test]

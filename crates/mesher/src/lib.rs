@@ -568,6 +568,7 @@ mod tests {
                 .all(|position| (position[1] - 0.25).abs() < f32::EPSILON)
         );
         assert!(mesh.normals.iter().all(|normal| normal[1] > 0.99));
+        assert_front_facing(&mesh);
     }
 
     #[test]
@@ -592,6 +593,7 @@ mod tests {
         assert!(first.is_well_formed());
         assert_eq!(first.indices.len(), 8 * 8 * 6);
         assert!(first.normals.iter().all(|normal| normal[1] > 0.0));
+        assert_front_facing(&first);
     }
 
     #[test]
@@ -704,6 +706,8 @@ mod tests {
         assert!(coarse.is_well_formed());
         assert!(!fine.indices.is_empty());
         assert!(coarse.indices.len() < fine.indices.len());
+        assert_front_facing(&fine);
+        assert_front_facing(&coarse);
     }
 
     #[test]
@@ -813,6 +817,50 @@ mod tests {
         };
         left.iter().all(|position| contains(right, position))
             && right.iter().all(|position| contains(left, position))
+    }
+
+    fn assert_front_facing(mesh: &Mesh) {
+        for (triangle_index, triangle) in mesh.indices.chunks_exact(3).enumerate() {
+            let positions = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                mesh.positions[usize::try_from(index).expect("test index fits usize")]
+            });
+            let first = [
+                positions[1][0] - positions[0][0],
+                positions[1][1] - positions[0][1],
+                positions[1][2] - positions[0][2],
+            ];
+            let second = [
+                positions[2][0] - positions[0][0],
+                positions[2][1] - positions[0][1],
+                positions[2][2] - positions[0][2],
+            ];
+            let geometric_normal = [
+                (first[1] * second[2]) - (first[2] * second[1]),
+                (first[2] * second[0]) - (first[0] * second[2]),
+                (first[0] * second[1]) - (first[1] * second[0]),
+            ];
+            if geometric_normal
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                <= f32::EPSILON
+            {
+                continue;
+            }
+            let vertex_normal = triangle.iter().fold([0.0; 3], |sum, &index| {
+                let normal = mesh.normals[usize::try_from(index).expect("test index fits usize")];
+                [sum[0] + normal[0], sum[1] + normal[1], sum[2] + normal[2]]
+            });
+            let agreement = geometric_normal
+                .into_iter()
+                .zip(vertex_normal)
+                .map(|(geometric, vertex)| geometric * vertex)
+                .sum::<f32>();
+            assert!(
+                agreement > 0.0,
+                "triangle {triangle_index} faces away from its vertex normals"
+            );
+        }
     }
 
     fn mesh_fingerprint(mesh: &Mesh) -> u64 {
