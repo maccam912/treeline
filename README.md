@@ -105,7 +105,8 @@ cargo run -p client
 
 Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
 to sprint. Press Escape to release the cursor; click the window to capture it
-again.
+again. Press `R` to warp to random dry ground 1,000–5,000 km away; mobile
+browsers expose the same action as a **Random warp** button.
 
 Build the browser version with [Trunk](https://trunk-rs.dev/):
 
