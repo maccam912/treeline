@@ -1110,7 +1110,7 @@ fn update_terrain(
                         spec,
                         mesh: renderer.upload_snowy_mesh(device, &mesh, |x, z| {
                             terrain
-                                .snow_coverage_at(x, z, Season::Winter)
+                                .snow_coverage_for_slope(x, z, Season::Winter, 0.0)
                                 .map(|snow| snow.coverage_fraction)
                         })?,
                         lake_mesh: lake_mesh
@@ -1132,7 +1132,7 @@ fn update_terrain(
                         spec,
                         mesh: renderer.upload_snowy_mesh(device, &mesh, |x, z| {
                             terrain
-                                .snow_coverage_at(x, z, Season::Winter)
+                                .snow_coverage_for_slope(x, z, Season::Winter, 0.0)
                                 .map(|snow| snow.coverage_fraction)
                         })?,
                         lake_mesh: lake_mesh

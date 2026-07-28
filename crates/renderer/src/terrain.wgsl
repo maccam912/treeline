@@ -32,12 +32,16 @@ struct VertexOutput {
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
+    let normal = normalize(input.normal);
+    let horizontal_normal = length(normal.xz);
+    let terrain_slope = horizontal_normal / max(normal.y, 0.000001);
+    let slope_retention = 1.0 - smoothstep(0.32, 1.15, terrain_slope);
     output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
-    output.world_normal = normalize(input.normal);
+    output.world_normal = normal;
     output.elevation = input.position.y;
     output.color = input.color;
     output.world_position = input.position;
-    output.snow_coverage = input.snow_coverage;
+    output.snow_coverage = input.snow_coverage * slope_retention;
     return output;
 }
 

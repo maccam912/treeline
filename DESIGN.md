@@ -2253,11 +2253,14 @@ The world generator is the game.
       flowering traits; the client renders their generated low-poly forms, and
       Generator Lab maps the distribution and explains nearby individuals.
 - [x] Snow terrain coverage and rendering. Seasonal climate snowpack now
-      produces deterministic terrain-surface coverage retained by a fixed
-      world-space slope sample, so near and far terrain stay aligned. The
-      client renders the representative winter surface and Generator Lab's
-      season control updates the terrain view; this does not yet simulate
-      active snow deformation or accumulation from live weather.
+      produces deterministic terrain-surface coverage. Mesh rendering
+      interpolates snow depth from a bounded 3×3 climate lattice and derives
+      slope retention from the already-generated surface normals at each LOD,
+      avoiding per-vertex world queries during render-thread uploads;
+      mesh-independent inspection retains a fixed world-space slope sample.
+      The client renders the representative winter surface and Generator Lab's
+      season control updates the terrain view; this does not yet simulate active
+      snow deformation or accumulation from live weather.
 - [ ] **NEXT** — Wetlands
 - [ ] Reefs
 
