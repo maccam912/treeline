@@ -103,7 +103,6 @@ impl GeneratedWorldTerrain {
     /// terrain. This is a renderable surface layer; it does not alter the
     /// signed density field or collision surface.
     pub fn snow_coverage_at(&self, x: f64, z: f64, season: Season) -> Option<SnowCoverageSample> {
-        let climate = Climate::new(self.world()).sample_season(x, z, season)?;
         let left = self
             .shaped_height(x - SNOW_SLOPE_SAMPLE_RADIUS_METERS, z)?
             .height;
@@ -118,6 +117,28 @@ impl GeneratedWorldTerrain {
             .height;
         let span = SNOW_SLOPE_SAMPLE_RADIUS_METERS * 2.0;
         let terrain_slope = libm::hypot((right - left) / span, (up - down) / span);
+        self.snow_coverage_for_slope(x, z, season, terrain_slope)
+    }
+
+    /// Samples seasonal snow cover using a slope already available to the
+    /// caller.
+    ///
+    /// Render meshes already carry surface normals derived while generating
+    /// their geometry. Reusing that slope avoids four additional composed
+    /// terrain queries per vertex on the render thread. Call
+    /// [`Self::snow_coverage_at`] when a mesh-independent fixed-scale sample is
+    /// required instead.
+    pub fn snow_coverage_for_slope(
+        &self,
+        x: f64,
+        z: f64,
+        season: Season,
+        terrain_slope: f64,
+    ) -> Option<SnowCoverageSample> {
+        if !terrain_slope.is_finite() || terrain_slope < 0.0 {
+            return None;
+        }
+        let climate = Climate::new(self.world()).sample_season(x, z, season)?;
         let snowpack = climate.snowpack_water_equivalent_millimeters;
         let depth_cover = smoothstep(8.0, 240.0, snowpack);
         let slope_retention = 1.0 - smoothstep(0.32, 1.15, terrain_slope);
@@ -1877,6 +1898,10 @@ mod tests {
         let repeated_winter = reverse
             .snow_coverage_at(x, z, Season::Winter)
             .expect("repeated winter snow coverage");
+        let render_sample = GeneratedWorldTerrain::new(world);
+        let reused_slope = render_sample
+            .snow_coverage_for_slope(x, z, Season::Winter, winter.terrain_slope)
+            .expect("snow coverage from existing mesh slope");
 
         assert!(winter.snowpack_water_equivalent_millimeters > 0.0);
         assert!(winter.coverage_fraction > summer.coverage_fraction);
@@ -1887,6 +1912,31 @@ mod tests {
         assert_eq!(
             winter.terrain_slope.to_bits(),
             repeated_winter.terrain_slope.to_bits()
+        );
+        assert_eq!(
+            winter.coverage_fraction.to_bits(),
+            reused_slope.coverage_fraction.to_bits()
+        );
+        assert!(
+            render_sample
+                .river_networks
+                .read()
+                .expect("cache lock")
+                .is_empty()
+        );
+        assert!(
+            render_sample
+                .gully_networks
+                .read()
+                .expect("cache lock")
+                .is_empty()
+        );
+        assert!(
+            render_sample
+                .lake_networks
+                .read()
+                .expect("cache lock")
+                .is_empty()
         );
     }
 
@@ -1902,6 +1952,41 @@ mod tests {
             0.0_f64.to_bits()
         );
         assert_eq!(snow.coverage_fraction.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn render_snow_depth_grid_avoids_composed_terrain_queries() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0));
+        for z in 0..3 {
+            for x in 0..3 {
+                let snow = terrain
+                    .snow_coverage_for_slope(
+                        f64::from(x) * 1_024.0,
+                        f64::from(z) * 1_024.0,
+                        Season::Winter,
+                        0.0,
+                    )
+                    .expect("render snow depth");
+                assert!(snow.coverage_fraction.is_finite());
+            }
+        }
+
+        assert!(
+            terrain
+                .river_networks
+                .read()
+                .expect("cache lock")
+                .is_empty()
+        );
+        assert!(
+            terrain
+                .gully_networks
+                .read()
+                .expect("cache lock")
+                .is_empty()
+        );
+        assert!(terrain.lake_networks.read().expect("cache lock").is_empty());
     }
 
     #[test]

@@ -1099,7 +1099,7 @@ fn upload_lab_mesh(
     let snow_terrain = GeneratedWorldTerrain::new(WorldIdentity::new(seed, GENERATOR_VERSION, 0));
     renderer.upload_snowy_mesh(device, mesh, |x, z| {
         snow_terrain
-            .snow_coverage_at(x, z, season)
+            .snow_coverage_for_slope(x, z, season, 0.0)
             .map(|snow| snow.coverage_fraction)
     })
 }

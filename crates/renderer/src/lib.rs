@@ -73,6 +73,92 @@ impl TerrainVertex {
     }
 }
 
+const SNOW_GRID_SAMPLES_PER_EDGE: usize = 3;
+
+#[derive(Clone, Copy, Debug)]
+struct SnowDepthGrid {
+    min_x: f64,
+    min_z: f64,
+    span_x: f64,
+    span_z: f64,
+    samples: [f64; SNOW_GRID_SAMPLES_PER_EDGE * SNOW_GRID_SAMPLES_PER_EDGE],
+}
+
+impl SnowDepthGrid {
+    fn sample(mesh: &Mesh, mut snow_depth_at: impl FnMut(f64, f64) -> Option<f64>) -> Self {
+        let Some((&first, remaining)) = mesh.positions.split_first() else {
+            return Self {
+                min_x: 0.0,
+                min_z: 0.0,
+                span_x: 0.0,
+                span_z: 0.0,
+                samples: [0.0; SNOW_GRID_SAMPLES_PER_EDGE * SNOW_GRID_SAMPLES_PER_EDGE],
+            };
+        };
+        let ([min_x, min_z], [max_x, max_z]) = remaining.iter().fold(
+            (
+                [f64::from(first[0]), f64::from(first[2])],
+                [f64::from(first[0]), f64::from(first[2])],
+            ),
+            |(min, max), position| {
+                let point = [f64::from(position[0]), f64::from(position[2])];
+                (
+                    [min[0].min(point[0]), min[1].min(point[1])],
+                    [max[0].max(point[0]), max[1].max(point[1])],
+                )
+            },
+        );
+        let span_x = max_x - min_x;
+        let span_z = max_z - min_z;
+        let samples = std::array::from_fn(|index| {
+            let grid_x = index % SNOW_GRID_SAMPLES_PER_EDGE;
+            let grid_z = index / SNOW_GRID_SAMPLES_PER_EDGE;
+            let grid_offsets = [0.0, 0.5, 1.0];
+            let x = min_x + (span_x * grid_offsets[grid_x]);
+            let z = min_z + (span_z * grid_offsets[grid_z]);
+            snow_depth_at(x, z).unwrap_or(0.0).clamp(0.0, 1.0)
+        });
+
+        Self {
+            min_x,
+            min_z,
+            span_x,
+            span_z,
+            samples,
+        }
+    }
+
+    fn coverage_at(self, position: [f32; 3]) -> f64 {
+        let (cell_x, blend_x) = snow_grid_axis(f64::from(position[0]), self.min_x, self.span_x);
+        let (cell_z, blend_z) = snow_grid_axis(f64::from(position[2]), self.min_z, self.span_z);
+        let low = cell_z * SNOW_GRID_SAMPLES_PER_EDGE + cell_x;
+        let bottom = lerp_f64(self.samples[low], self.samples[low + 1], blend_x);
+        let top = lerp_f64(
+            self.samples[low + SNOW_GRID_SAMPLES_PER_EDGE],
+            self.samples[low + SNOW_GRID_SAMPLES_PER_EDGE + 1],
+            blend_x,
+        );
+        lerp_f64(bottom, top, blend_z)
+    }
+}
+
+fn snow_grid_axis(value: f64, minimum: f64, span: f64) -> (usize, f64) {
+    let normalized = if span <= f64::EPSILON {
+        0.0
+    } else {
+        ((value - minimum) / span).clamp(0.0, 1.0)
+    };
+    if normalized <= 0.5 {
+        (0, normalized * 2.0)
+    } else {
+        (1, (normalized - 0.5) * 2.0)
+    }
+}
+
+fn lerp_f64(start: f64, end: f64, amount: f64) -> f64 {
+    start + ((end - start) * amount)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct CameraUniform {
@@ -350,9 +436,11 @@ impl TerrainRenderer {
         })
     }
 
-    /// Uploads terrain with a deterministic snow-coverage value at every
-    /// surface vertex. The caller owns generation semantics; this keeps the
-    /// renderer independent from world and climate crates.
+    /// Uploads terrain with a deterministic snow-depth value interpolated
+    /// across every surface vertex. The callback is evaluated on a bounded
+    /// three-by-three lattice, keeping render-thread work independent of mesh
+    /// density. The caller owns generation semantics; this keeps the renderer
+    /// independent from world and climate crates.
     ///
     /// # Errors
     ///
@@ -362,8 +450,9 @@ impl TerrainRenderer {
         &self,
         device: &wgpu::Device,
         mesh: &Mesh,
-        mut snow_coverage_at: impl FnMut(f64, f64) -> Option<f64>,
+        snow_depth_at: impl FnMut(f64, f64) -> Option<f64>,
     ) -> Result<TerrainMesh, RendererError> {
+        let snow_depth = SnowDepthGrid::sample(mesh, snow_depth_at);
         let vertices = mesh
             .positions
             .iter()
@@ -377,11 +466,7 @@ impl TerrainRenderer {
                     .get(index)
                     .copied()
                     .unwrap_or([1.0, 1.0, 1.0, 0.0]),
-                snow_coverage: f64_as_f32(
-                    snow_coverage_at(f64::from(position[0]), f64::from(position[2]))
-                        .unwrap_or(0.0)
-                        .clamp(0.0, 1.0),
-                ),
+                snow_coverage: f64_as_f32(snow_depth.coverage_at(position)),
             })
             .collect::<Vec<_>>();
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1605,6 +1690,30 @@ mod tests {
     #[test]
     fn distant_mountains_do_not_require_voxel_interiors() {
         assert_eq!(terrain_tier(30_000.0), TerrainRenderTier::Horizon);
+    }
+
+    #[test]
+    fn snow_depth_uses_a_bounded_grid_independent_of_mesh_density() {
+        let mesh = Mesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, 2.0],
+                [0.0, 0.0, 2.0],
+                [1.0, 0.0, 1.0],
+            ],
+            normals: vec![[0.0, 1.0, 0.0]; 5],
+            colors: Vec::new(),
+            indices: vec![0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4],
+        };
+        let mut query_count = 0;
+        let grid = SnowDepthGrid::sample(&mesh, |x, z| {
+            query_count += 1;
+            Some((x + z) * 0.25)
+        });
+
+        assert_eq!(query_count, 9);
+        assert!((grid.coverage_at([1.0, 0.0, 1.0]) - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
