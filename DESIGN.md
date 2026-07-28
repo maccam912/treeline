@@ -2237,9 +2237,12 @@ The world generator is the game.
       continues through ten times the radius, and an outer silhouette ring
       streams the same deterministic individuals from there to twenty times the
       radius. Continuous canopy surfaces were removed: forest depth now comes
-      from actual trunks and crowns blocking sightlines. GPU instancing,
-      occlusion-aware culling, and dithered transitions between representation
-      tiers remain.
+      from actual trunks and crowns blocking sightlines. A single streamed mesh
+      now owns each tree across near/distant overlap, and tier replacements keep
+      the resident mesh visible until its successor is uploaded. Opaque
+      vegetation uses back-face/depth rejection with reverse-Z precision. GPU
+      instancing, object-level occlusion-aware culling, and dithered transitions
+      between representation tiers remain.
 - [x] Surface rocks. Continuous geology-, erosion-, slope-, and soil-driven
       rock distributions feed globally anchored rounded boulders, angular
       blocks, weathered slabs, and scree fragments. Individuals have
