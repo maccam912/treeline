@@ -313,7 +313,7 @@ impl GeneratorLab {
             mode,
             Season::default(),
         )?;
-        let mesh = renderer.upload_mesh(&device, &mesh_data)?;
+        let mesh = upload_lab_mesh(&renderer, &device, &mesh_data, seed, Season::default())?;
         let cursor = PhysicalPosition::new(
             f64::from(surface_config.width) * 0.5,
             f64::from(surface_config.height) * 0.5,
@@ -483,7 +483,13 @@ impl GeneratorLab {
             self.mode,
             self.season,
         )?;
-        self.mesh = self.renderer.upload_mesh(&self.device, &mesh_data)?;
+        self.mesh = upload_lab_mesh(
+            &self.renderer,
+            &self.device,
+            &mesh_data,
+            self.seed,
+            self.season,
+        )?;
         self.update_camera();
         self.update_title();
         self.window.request_redraw();
@@ -1081,6 +1087,21 @@ fn generate_mesh(
             spacing,
         ),
     )?)
+}
+
+fn upload_lab_mesh(
+    renderer: &TerrainRenderer,
+    device: &wgpu::Device,
+    mesh: &Mesh,
+    seed: u64,
+    season: Season,
+) -> Result<TerrainMesh, treeline_renderer::RendererError> {
+    let snow_terrain = GeneratedWorldTerrain::new(WorldIdentity::new(seed, GENERATOR_VERSION, 0));
+    renderer.upload_snowy_mesh(device, mesh, |x, z| {
+        snow_terrain
+            .snow_coverage_at(x, z, season)
+            .map(|snow| snow.coverage_fraction)
+    })
 }
 
 fn generate_drainage_mesh(

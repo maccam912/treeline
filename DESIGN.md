@@ -2252,10 +2252,13 @@ The world generator is the game.
       have deterministic height, spread, foliage, wind lean, color, and
       flowering traits; the client renders their generated low-poly forms, and
       Generator Lab maps the distribution and explains nearby individuals.
-- [ ] **NEXT** — Snow terrain coverage and rendering. **PARTIAL:** Climate
-      already generates seasonal snowfall, accumulation, permanent snowpack,
-      and meltwater runoff.
-- [ ] Wetlands
+- [x] Snow terrain coverage and rendering. Seasonal climate snowpack now
+      produces deterministic terrain-surface coverage retained by a fixed
+      world-space slope sample, so near and far terrain stay aligned. The
+      client renders the representative winter surface and Generator Lab's
+      season control updates the terrain view; this does not yet simulate
+      active snow deformation or accumulation from live weather.
+- [ ] **NEXT** — Wetlands
 - [ ] Reefs
 
 Target:

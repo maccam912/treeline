@@ -24,7 +24,7 @@ use treeline_world::TerrainMeshQueue;
 use treeline_world::{
     CURRENT_GENERATOR_VERSION, ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig,
     FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig, FarTileIndex,
-    GeneratedWorldTerrain, GenerationPriority, NearTerrainCutout, TerrainMeshSpec,
+    GeneratedWorldTerrain, GenerationPriority, NearTerrainCutout, Season, TerrainMeshSpec,
 };
 use web_time::Instant;
 use winit::application::ApplicationHandler;
@@ -1108,7 +1108,11 @@ fn update_terrain(
                     spec.chunk,
                     ResidentTerrainChunk {
                         spec,
-                        mesh: renderer.upload_mesh(device, &mesh)?,
+                        mesh: renderer.upload_snowy_mesh(device, &mesh, |x, z| {
+                            terrain
+                                .snow_coverage_at(x, z, Season::Winter)
+                                .map(|snow| snow.coverage_fraction)
+                        })?,
                         lake_mesh: lake_mesh
                             .as_ref()
                             .filter(|lake_mesh| !lake_mesh.indices.is_empty())
@@ -1126,7 +1130,11 @@ fn update_terrain(
                     spec.tile,
                     ResidentFarTerrainTile {
                         spec,
-                        mesh: renderer.upload_mesh(device, &mesh)?,
+                        mesh: renderer.upload_snowy_mesh(device, &mesh, |x, z| {
+                            terrain
+                                .snow_coverage_at(x, z, Season::Winter)
+                                .map(|snow| snow.coverage_fraction)
+                        })?,
                         lake_mesh: lake_mesh
                             .as_ref()
                             .filter(|lake_mesh| !lake_mesh.indices.is_empty())

@@ -53,11 +53,16 @@ struct TerrainVertex {
     position: [f32; 3],
     normal: [f32; 3],
     color: [f32; 4],
+    snow_coverage: f32,
 }
 
 impl TerrainVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        0 => Float32x3,
+        1 => Float32x3,
+        2 => Float32x4,
+        3 => Float32,
+    ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -322,10 +327,65 @@ impl TerrainRenderer {
                     .get(index)
                     .copied()
                     .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+                snow_coverage: 0.0,
             })
             .collect::<Vec<_>>();
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("terrain vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("terrain indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let index_count =
+            u32::try_from(mesh.indices.len()).map_err(|_| RendererError::TooManyIndices)?;
+
+        Ok(TerrainMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count,
+        })
+    }
+
+    /// Uploads terrain with a deterministic snow-coverage value at every
+    /// surface vertex. The caller owns generation semantics; this keeps the
+    /// renderer independent from world and climate crates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RendererError::TooManyIndices`] when the mesh cannot be
+    /// addressed using the renderer's `u32` draw count.
+    pub fn upload_snowy_mesh(
+        &self,
+        device: &wgpu::Device,
+        mesh: &Mesh,
+        mut snow_coverage_at: impl FnMut(f64, f64) -> Option<f64>,
+    ) -> Result<TerrainMesh, RendererError> {
+        let vertices = mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .enumerate()
+            .map(|(index, (&position, &normal))| TerrainVertex {
+                position,
+                normal,
+                color: mesh
+                    .colors
+                    .get(index)
+                    .copied()
+                    .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+                snow_coverage: f64_as_f32(
+                    snow_coverage_at(f64::from(position[0]), f64::from(position[2]))
+                        .unwrap_or(0.0)
+                        .clamp(0.0, 1.0),
+                ),
+            })
+            .collect::<Vec<_>>();
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("snow-covered terrain vertices"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
@@ -798,6 +858,7 @@ fn append_leaf_blade(
             position: position.to_array(),
             normal: normal.to_array(),
             color,
+            snow_coverage: 0.0,
         });
     }
     indices.extend_from_slice(&[
@@ -982,6 +1043,7 @@ fn push_rock_vertex(
         position: (center + (rotation * local)).to_array(),
         normal: (rotation * normalized).to_array(),
         color: rock_color(rock, ordinal),
+        snow_coverage: 0.0,
     });
 }
 
@@ -1382,6 +1444,7 @@ fn append_tapered_cylinder(
                 position: position.to_array(),
                 normal: radial.to_array(),
                 color: spec.color,
+                snow_coverage: 0.0,
             });
         }
     }
@@ -1427,12 +1490,14 @@ fn append_conical_crown(
             position: (base + (radial * radius)).to_array(),
             normal: (radial + (axis * 0.35)).normalize_or_zero().to_array(),
             color,
+            snow_coverage: 0.0,
         });
     }
     vertices.push(TerrainVertex {
         position: apex.to_array(),
         normal: axis.to_array(),
         color,
+        snow_coverage: 0.0,
     });
     let apex_index =
         base_index + u32::try_from(sides).map_err(|_| RendererError::TooManyIndices)?;
@@ -1468,6 +1533,7 @@ fn append_octahedral_crown(
             position: (center + offset).to_array(),
             normal: offset.normalize_or_zero().to_array(),
             color,
+            snow_coverage: 0.0,
         });
     }
     for triangle in [
