@@ -7,11 +7,15 @@ use std::time::Duration;
 mod browser_terrain;
 
 #[cfg(target_arch = "wasm32")]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use glam::{Mat4, Vec2, Vec3};
+#[cfg(not(target_arch = "wasm32"))]
+use treeline_coordinates::stable_hash;
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_ecology::{
     GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds,
@@ -47,6 +51,10 @@ const START_X: f32 = 78_481.44;
 const START_Z: f32 = -50_125.98;
 const START_YAW: f32 = 0.164;
 const START_PITCH: f32 = -0.08;
+const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
+const RANDOM_WARP_MAX_DISTANCE_METERS: f64 = 5_000_000.0;
+const RANDOM_WARP_COORDINATE_LIMIT_METERS: f64 = 5_000_000.0;
+const RANDOM_WARP_SITE_ATTEMPTS: usize = 64;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
 const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 20;
@@ -166,6 +174,10 @@ impl ApplicationHandler for TreelineApp {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape && event.state == ElementState::Pressed {
                         game.set_cursor_captured(false);
+                    } else if code == KeyCode::KeyR {
+                        if event.state == ElementState::Pressed && !event.repeat {
+                            game.request_random_warp();
+                        }
                     } else {
                         game.input
                             .set_key(code, event.state == ElementState::Pressed);
@@ -248,6 +260,9 @@ struct Game {
     cursor_captured: bool,
     previous_frame: Instant,
     initial_generation: InitialGenerationProgress,
+    random_warp_requested: bool,
+    #[cfg(target_arch = "wasm32")]
+    browser_actions: BrowserActions,
 }
 
 struct InitializedGpu {
@@ -372,6 +387,8 @@ impl Game {
             far_terrain_streamer,
             camera.world_position(),
         )?;
+        #[cfg(target_arch = "wasm32")]
+        let browser_actions = BrowserActions::new()?;
 
         let game = Self {
             window,
@@ -396,6 +413,9 @@ impl Game {
             cursor_captured: false,
             previous_frame: Instant::now(),
             initial_generation,
+            random_warp_requested: false,
+            #[cfg(target_arch = "wasm32")]
+            browser_actions,
         };
         Ok(game)
     }
@@ -453,7 +473,81 @@ impl Game {
         self.input.sticks.set_radius(stick_radius);
     }
 
+    fn request_random_warp(&mut self) {
+        self.random_warp_requested = true;
+    }
+
+    fn random_warp(&mut self) -> Result<(), Box<dyn Error>> {
+        let started = Instant::now();
+        let previous = self.camera.world_position();
+        let [destination_x, destination_z] = random_warp_site(&self.terrain, previous)
+            .ok_or_else(|| std::io::Error::other("could not find dry ground for a random warp"))?;
+        let destination_x = f64_as_f32(destination_x);
+        let destination_z = f64_as_f32(destination_z);
+        let destination_y =
+            surface_height(&self.terrain, destination_x, destination_z) + EYE_HEIGHT;
+        let destination = Vec3::new(destination_x, destination_y, destination_z);
+        let preparation_time = started.elapsed();
+
+        for (_, spec) in std::mem::take(&mut self.requested_chunks) {
+            self.terrain_jobs.cancel(TerrainMeshSpec::Near(spec));
+        }
+        for (_, spec) in std::mem::take(&mut self.requested_far_tiles) {
+            self.terrain_jobs.cancel(TerrainMeshSpec::Far(spec));
+        }
+        self.terrain_jobs.retain_prewarm(&BTreeSet::new());
+        self.terrain_chunks.clear();
+        self.far_terrain_tiles.clear();
+        self.distant_tree_tiles.clear();
+        self.pending_distant_tree_tiles.clear();
+
+        self.camera.position = destination;
+        self.input.clear();
+        self.previous_frame = Instant::now();
+        schedule_terrain(
+            self.chunk_streamer,
+            self.far_terrain_streamer,
+            self.camera.world_position(),
+            [0.0, 0.0],
+            &mut self.terrain_chunks,
+            &mut self.far_terrain_tiles,
+            &mut self.requested_chunks,
+            &mut self.requested_far_tiles,
+            &mut self.terrain_jobs,
+        )?;
+        self.initial_generation = start_initial_progress(
+            &self.window,
+            &self.renderer,
+            &self.queue,
+            started,
+            preparation_time,
+            &self.requested_chunks,
+            &self.requested_far_tiles,
+            self.chunk_streamer,
+            self.far_terrain_streamer,
+            self.camera.world_position(),
+        )?;
+
+        let current = self.camera.world_position();
+        let distance_kilometers = (current.x - previous.x).hypot(current.z - previous.z) / 1_000.0;
+        eprintln!(
+            "random warp: ({:.0}, {:.0}) → ({destination_x:.0}, {destination_z:.0}), {distance_kilometers:.0} km",
+            previous.x, previous.z
+        );
+        Ok(())
+    }
+
     fn update(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.browser_actions.take_random_warp_request() {
+            self.request_random_warp();
+        }
+        if std::mem::take(&mut self.random_warp_requested)
+            && let Err(error) = self.random_warp()
+        {
+            eprintln!("random warp failed: {error}");
+        }
+
         let now = Instant::now();
         let delta_seconds = (now - self.previous_frame).as_secs_f32().min(0.1);
         self.previous_frame = now;
@@ -983,6 +1077,98 @@ impl VirtualSticks {
         self.movement = None;
         self.look = None;
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct BrowserActions {
+    random_warp_requested: Rc<Cell<bool>>,
+    random_warp_listener: Closure<dyn FnMut(web_sys::Event)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl BrowserActions {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        let window =
+            web_sys::window().ok_or_else(|| std::io::Error::other("browser window unavailable"))?;
+        let random_warp_requested = Rc::new(Cell::new(false));
+        let requested = Rc::clone(&random_warp_requested);
+        let random_warp_listener = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            requested.set(true);
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        window
+            .add_event_listener_with_callback(
+                "treeline-random-warp",
+                random_warp_listener.as_ref().unchecked_ref(),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("could not register random warp button: {error:?}"))
+            })?;
+        Ok(Self {
+            random_warp_requested,
+            random_warp_listener,
+        })
+    }
+
+    fn take_random_warp_request(&self) -> bool {
+        self.random_warp_requested.replace(false)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for BrowserActions {
+    fn drop(&mut self) {
+        if let Some(window) = web_sys::window() {
+            let _ = window.remove_event_listener_with_callback(
+                "treeline-random-warp",
+                self.random_warp_listener.as_ref().unchecked_ref(),
+            );
+        }
+    }
+}
+
+fn random_warp_site(terrain: &GeneratedWorldTerrain, current: WorldPosition) -> Option<[f64; 2]> {
+    for _ in 0..RANDOM_WARP_SITE_ATTEMPTS {
+        let candidate = random_warp_destination(random_unit_interval(), random_unit_interval());
+        if random_warp_distance_is_eligible(current, candidate)
+            && surface_feature_has_dry_ground(terrain, candidate[0], candidate[1])
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn random_warp_destination(x_fraction: f64, z_fraction: f64) -> [f64; 2] {
+    let coordinate = |fraction: f64| {
+        ((fraction.clamp(0.0, 1.0) * 2.0) - 1.0) * RANDOM_WARP_COORDINATE_LIMIT_METERS
+    };
+    [coordinate(x_fraction), coordinate(z_fraction)]
+}
+
+fn random_warp_distance_is_eligible(current: WorldPosition, candidate: [f64; 2]) -> bool {
+    let distance = (candidate[0] - current.x).hypot(candidate[1] - current.z);
+    (RANDOM_WARP_MIN_DISTANCE_METERS..=RANDOM_WARP_MAX_DISTANCE_METERS).contains(&distance)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn random_unit_interval() -> f64 {
+    js_sys::Math::random()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::cast_precision_loss)]
+fn random_unit_interval() -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let entropy = elapsed.as_secs() ^ u64::from(elapsed.subsec_nanos()).rotate_left(32);
+    let mixed = stable_hash(&[WORLD.seed, entropy, NONCE.fetch_add(1, Ordering::Relaxed)]);
+    ((mixed >> 11) as f64) / 9_007_199_254_740_991.0
 }
 
 fn surface_height(terrain: &impl SurfaceField, x: f32, z: f32) -> f32 {
@@ -1560,6 +1746,39 @@ mod tests {
                 .zip([160.0, 160.0])
                 .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
         );
+    }
+
+    #[test]
+    fn random_warp_distance_accepts_one_to_five_thousand_kilometers() {
+        let current = WorldPosition::new(0.0, 0.0, 0.0);
+
+        assert!(!random_warp_distance_is_eligible(
+            current,
+            [RANDOM_WARP_MIN_DISTANCE_METERS - 1.0, 0.0]
+        ));
+        assert!(random_warp_distance_is_eligible(
+            current,
+            [RANDOM_WARP_MIN_DISTANCE_METERS, 0.0]
+        ));
+        assert!(random_warp_distance_is_eligible(
+            current,
+            [RANDOM_WARP_MAX_DISTANCE_METERS, 0.0]
+        ));
+        assert!(!random_warp_distance_is_eligible(
+            current,
+            [RANDOM_WARP_MAX_DISTANCE_METERS + 1.0, 0.0]
+        ));
+    }
+
+    #[test]
+    fn random_warp_destination_clamps_to_the_precise_coordinate_budget() {
+        let minimum = random_warp_destination(-1.0, -1.0);
+        let center = random_warp_destination(0.5, 0.5);
+        let maximum = random_warp_destination(2.0, 2.0);
+
+        assert_eq!(minimum, [-RANDOM_WARP_COORDINATE_LIMIT_METERS; 2]);
+        assert_eq!(center, [0.0; 2]);
+        assert_eq!(maximum, [RANDOM_WARP_COORDINATE_LIMIT_METERS; 2]);
     }
 
     #[test]

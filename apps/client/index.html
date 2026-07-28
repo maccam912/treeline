@@ -126,6 +126,29 @@
         right: max(1.35rem, env(safe-area-inset-right));
       }
 
+      .warp-button {
+        position: absolute;
+        top: max(1rem, env(safe-area-inset-top));
+        right: max(1rem, env(safe-area-inset-right));
+        padding: 0.7rem 0.9rem;
+        border: 1px solid rgb(242 240 223 / 32%);
+        border-radius: 999px;
+        background: rgb(9 17 13 / 78%);
+        color: #f2f0df;
+        font: inherit;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        pointer-events: auto;
+        touch-action: manipulation;
+        text-transform: uppercase;
+        backdrop-filter: blur(0.4rem);
+      }
+
+      .warp-button:active {
+        background: rgb(72 101 76 / 88%);
+      }
+
       @media (max-height: 500px) {
         .stick {
           width: 6rem;
@@ -135,8 +158,13 @@
     </style>
   </head>
   <body>
-    <div class="desktop-controls">Click to look · WASD to walk · Shift to sprint · Esc to release</div>
-    <div class="mobile-controls" aria-hidden="true">
+    <div class="desktop-controls">
+      Click to look · WASD to walk · Shift to sprint · R to random warp · Esc to release
+    </div>
+    <div class="mobile-controls">
+      <button class="warp-button" type="button" aria-label="Warp to a random distant location">
+        Random warp
+      </button>
       <div class="stick move-stick" data-label="Move"></div>
       <div class="stick look-stick" data-label="Look"></div>
     </div>
@@ -152,6 +180,7 @@
           move: document.querySelector(".move-stick"),
           look: document.querySelector(".look-stick"),
         };
+        const warpButton = document.querySelector(".warp-button");
         const activeTouches = new Map();
         const stickRadius = 46;
 
@@ -212,6 +241,19 @@
         };
         window.addEventListener("touchend", releaseTouches, { passive: true });
         window.addEventListener("touchcancel", releaseTouches, { passive: true });
+        for (const eventName of ["touchstart", "touchmove", "touchend", "touchcancel"]) {
+          warpButton.addEventListener(
+            eventName,
+            (event) => event.stopPropagation(),
+            { passive: true },
+          );
+        }
+        warpButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          window.dispatchEvent(new Event("treeline-random-warp"));
+          warpButton.blur();
+        });
 
         updateMobileMode();
         updateViewport();
