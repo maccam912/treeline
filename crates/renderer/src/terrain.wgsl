@@ -17,6 +17,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) snow_coverage: f32,
 };
 
 struct VertexOutput {
@@ -25,6 +26,7 @@ struct VertexOutput {
     @location(1) elevation: f32,
     @location(2) color: vec4<f32>,
     @location(3) world_position: vec3<f32>,
+    @location(4) snow_coverage: f32,
 };
 
 @vertex
@@ -35,6 +37,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.elevation = input.position.y;
     output.color = input.color;
     output.world_position = input.position;
+    output.snow_coverage = input.snow_coverage;
     return output;
 }
 
@@ -74,7 +77,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let snow = vec3<f32>(0.82, 0.86, 0.88);
     let alpine = smoothstep(550.0, 950.0, input.elevation);
     let stone_amount = clamp(slope * 1.7 + alpine * 0.7, 0.0, 1.0);
-    let snow_amount = smoothstep(900.0, 1200.0, input.elevation) * (1.0 - slope * 0.75);
+    let snow_amount = input.snow_coverage;
     let rock_base = mix(grass, stone, stone_amount);
     let untextured_base = mix(rock_base, snow, clamp(snow_amount, 0.0, 1.0));
 

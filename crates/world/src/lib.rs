@@ -13,7 +13,8 @@ use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::{WorldIdentity, WorldPosition};
-use treeline_geography::{DrainageCellIndex, WatershedRegionIndex};
+pub use treeline_geography::Season;
+use treeline_geography::{Climate, DrainageCellIndex, WatershedRegionIndex};
 use treeline_hydrology::{
     GullyNetwork, GullyTerrainInfluence, Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
 };
@@ -32,6 +33,21 @@ pub const LAKE_GENERATOR_VERSION: u32 = 4;
 pub const EROSION_GENERATOR_VERSION: u32 = 5;
 /// Latest generator contract used for newly created prototype worlds.
 pub const CURRENT_GENERATOR_VERSION: u32 = 13;
+
+const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
+
+/// Deterministic snow retained by the generated terrain surface.
+///
+/// Coverage is sampled at a fixed world-space scale, rather than from mesh
+/// normals, so the same location receives the same snow treatment at every
+/// terrain LOD.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnowCoverageSample {
+    pub season: Season,
+    pub snowpack_water_equivalent_millimeters: f64,
+    pub terrain_slope: f64,
+    pub coverage_fraction: f64,
+}
 
 /// Equilibrium lake water at one horizontal world position.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +94,39 @@ impl GeneratedWorldTerrain {
 
     pub const fn world(&self) -> WorldIdentity {
         self.base.world
+    }
+
+    /// Samples seasonal snow cover for the composed terrain surface.
+    ///
+    /// Seasonal climate supplies the available snowpack. A fixed-radius slope
+    /// sample retains it on flats and sheltered inclines while exposing steep
+    /// terrain. This is a renderable surface layer; it does not alter the
+    /// signed density field or collision surface.
+    pub fn snow_coverage_at(&self, x: f64, z: f64, season: Season) -> Option<SnowCoverageSample> {
+        let climate = Climate::new(self.world()).sample_season(x, z, season)?;
+        let left = self
+            .shaped_height(x - SNOW_SLOPE_SAMPLE_RADIUS_METERS, z)?
+            .height;
+        let right = self
+            .shaped_height(x + SNOW_SLOPE_SAMPLE_RADIUS_METERS, z)?
+            .height;
+        let down = self
+            .shaped_height(x, z - SNOW_SLOPE_SAMPLE_RADIUS_METERS)?
+            .height;
+        let up = self
+            .shaped_height(x, z + SNOW_SLOPE_SAMPLE_RADIUS_METERS)?
+            .height;
+        let span = SNOW_SLOPE_SAMPLE_RADIUS_METERS * 2.0;
+        let terrain_slope = libm::hypot((right - left) / span, (up - down) / span);
+        let snowpack = climate.snowpack_water_equivalent_millimeters;
+        let depth_cover = smoothstep(8.0, 240.0, snowpack);
+        let slope_retention = 1.0 - smoothstep(0.32, 1.15, terrain_slope);
+        Some(SnowCoverageSample {
+            season,
+            snowpack_water_equivalent_millimeters: snowpack,
+            terrain_slope,
+            coverage_fraction: (depth_cover * slope_retention).clamp(0.0, 1.0),
+        })
     }
 
     /// Returns the strongest nearby river contribution, if terrain carving is
@@ -291,6 +340,11 @@ fn network_slot<T>(cache: &NetworkCache<T>, region: WatershedRegionIndex) -> Net
             .entry(region)
             .or_insert_with(|| Arc::new(OnceLock::new())),
     )
+}
+
+fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - (2.0 * t))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1793,6 +1847,61 @@ mod tests {
 
         assert!(terrain.lake_surface_at(-31_000.0, 17_000.0).is_none());
         assert!(terrain.lake_networks.read().expect("cache lock").is_empty());
+    }
+
+    #[test]
+    fn snow_coverage_is_seasonal_and_independent_of_sampling_order() {
+        let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+        let forward = GeneratedWorldTerrain::new(world);
+        let reverse = GeneratedWorldTerrain::new(world);
+        let mut positions = (-8_i32..=8).flat_map(|z| {
+            (-8_i32..=8).map(move |x| [f64::from(x) * 16_000.0, f64::from(z) * 16_000.0])
+        });
+        let [x, z] = positions
+            .find(|&[x, z]| {
+                let winter = forward
+                    .snow_coverage_at(x, z, Season::Winter)
+                    .expect("winter snow coverage");
+                let summer = forward
+                    .snow_coverage_at(x, z, Season::Summer)
+                    .expect("summer snow coverage");
+                winter.coverage_fraction > summer.coverage_fraction + 0.05
+            })
+            .expect("a generated world should contain seasonal snow cover");
+        let winter = forward
+            .snow_coverage_at(x, z, Season::Winter)
+            .expect("winter snow coverage");
+        let summer = reverse
+            .snow_coverage_at(x, z, Season::Summer)
+            .expect("summer snow coverage");
+        let repeated_winter = reverse
+            .snow_coverage_at(x, z, Season::Winter)
+            .expect("repeated winter snow coverage");
+
+        assert!(winter.snowpack_water_equivalent_millimeters > 0.0);
+        assert!(winter.coverage_fraction > summer.coverage_fraction);
+        assert_eq!(
+            winter.coverage_fraction.to_bits(),
+            repeated_winter.coverage_fraction.to_bits()
+        );
+        assert_eq!(
+            winter.terrain_slope.to_bits(),
+            repeated_winter.terrain_slope.to_bits()
+        );
+    }
+
+    #[test]
+    fn snow_coverage_is_absent_before_the_seasonal_climate_contract() {
+        let terrain = GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, 6, 0));
+        let snow = terrain
+            .snow_coverage_at(0.0, 0.0, Season::Winter)
+            .expect("snow coverage sample");
+
+        assert_eq!(
+            snow.snowpack_water_equivalent_millimeters.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(snow.coverage_fraction.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]
