@@ -1989,7 +1989,10 @@ checksum = "31c8adc977f8b18a6894d2dea6c300b73cdd1f653b3adaf0c32749ed5a633a34"
 name = "treeline-caves"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "treeline-coordinates",
+ "treeline-geography",
+ "treeline-terrain",
 ]
 
 [[package]]
@@ -2088,6 +2091,7 @@ name = "treeline-world"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "treeline-caves",
  "treeline-coordinates",
  "treeline-ecology",
  "treeline-geography",

@@ -429,6 +429,21 @@ fn chunk_surface_bounds(
             maximum = maximum.max(height);
         }
     }
+    if let Some((volume_minimum, volume_maximum)) = field.volume_bounds(
+        origin.x,
+        origin.z,
+        origin.x + edge_meters,
+        origin.z + edge_meters,
+    ) {
+        if !volume_minimum.is_finite()
+            || !volume_maximum.is_finite()
+            || volume_minimum > volume_maximum
+        {
+            return Err(MeshingError::InvalidGrid);
+        }
+        minimum = minimum.min(volume_minimum);
+        maximum = maximum.max(volume_maximum);
+    }
     Ok((minimum, maximum))
 }
 

@@ -23,7 +23,7 @@ use treeline_ecology::{
     GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds,
 };
 use treeline_renderer::{TerrainMesh, TerrainRenderer, TreeMeshDetail};
-use treeline_terrain::SurfaceField;
+use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::ChunkIndex;
 #[cfg(not(target_arch = "wasm32"))]
 use treeline_world::TerrainMeshQueue;
@@ -49,9 +49,9 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f64 = 1.72;
 const WALK_SPEED: f64 = 8.0;
 const SPRINT_SPEED: f64 = 16.0;
-const START_X: f64 = -80_074.19;
-const START_Z: f64 = -79_986.31;
-const START_YAW: f64 = 0.164;
+const START_X: f64 = -80_062.19;
+const START_Z: f64 = -79_950.31;
+const START_YAW: f64 = 0.956_442;
 const START_PITCH: f64 = -0.08;
 const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
 const RANDOM_WARP_MAX_DISTANCE_METERS: f64 = 5_000_000.0;
@@ -180,6 +180,10 @@ impl ApplicationHandler for TreelineApp {
                         if event.state == ElementState::Pressed && !event.repeat {
                             game.request_random_warp();
                         }
+                    } else if code == KeyCode::KeyC {
+                        if event.state == ElementState::Pressed && !event.repeat {
+                            game.request_cave_warp();
+                        }
                     } else {
                         game.input
                             .set_key(code, event.state == ElementState::Pressed);
@@ -263,6 +267,7 @@ struct Game {
     previous_frame: Instant,
     initial_generation: InitialGenerationProgress,
     random_warp_requested: bool,
+    cave_warp_requested: bool,
     #[cfg(target_arch = "wasm32")]
     browser_actions: BrowserActions,
 }
@@ -421,6 +426,7 @@ impl Game {
             previous_frame: Instant::now(),
             initial_generation,
             random_warp_requested: false,
+            cave_warp_requested: false,
             #[cfg(target_arch = "wasm32")]
             browser_actions,
         };
@@ -484,6 +490,10 @@ impl Game {
         self.random_warp_requested = true;
     }
 
+    fn request_cave_warp(&mut self) {
+        self.cave_warp_requested = true;
+    }
+
     fn random_warp(&mut self) -> Result<(), Box<dyn Error>> {
         let started = Instant::now();
         let previous = self.camera.world_position();
@@ -493,7 +503,52 @@ impl Game {
             surface_height(&self.terrain, destination_x, destination_z) + EYE_HEIGHT;
         let destination = DVec3::new(destination_x, destination_y, destination_z);
         let preparation_time = started.elapsed();
+        self.relocate(destination, started, preparation_time)?;
 
+        let current = self.camera.world_position();
+        let distance_kilometers = (current.x - previous.x).hypot(current.z - previous.z) / 1_000.0;
+        eprintln!(
+            "random warp: ({:.0}, {:.0}) → ({destination_x:.0}, {destination_z:.0}), {distance_kilometers:.0} km",
+            previous.x, previous.z
+        );
+        Ok(())
+    }
+
+    fn cave_warp(&mut self) -> Result<(), Box<dyn Error>> {
+        let started = Instant::now();
+        let previous = self.camera.world_position();
+        let entrance = self
+            .terrain
+            .nearest_cave_entrance(previous, 12)
+            .ok_or_else(|| std::io::Error::other("no cave entrance found in the search area"))?;
+        let surface = surface_height(&self.terrain, entrance.position.x, entrance.position.z);
+        let destination = DVec3::new(
+            entrance.position.x,
+            surface + EYE_HEIGHT,
+            entrance.position.z,
+        );
+        let preparation_time = started.elapsed();
+        self.relocate(destination, started, preparation_time)?;
+        eprintln!(
+            "cave warp: {} {} at ({:.0}, {:.0})",
+            entrance.family.label(),
+            match entrance.kind {
+                treeline_world::CaveNodeKind::Entrance => "entrance",
+                treeline_world::CaveNodeKind::Sinkhole => "sinkhole",
+                _ => "surface connection",
+            },
+            entrance.position.x,
+            entrance.position.z,
+        );
+        Ok(())
+    }
+
+    fn relocate(
+        &mut self,
+        destination: DVec3,
+        started: Instant,
+        preparation_time: Duration,
+    ) -> Result<(), Box<dyn Error>> {
         for (_, spec) in std::mem::take(&mut self.requested_chunks) {
             self.terrain_jobs.cancel(TerrainMeshSpec::Near(spec));
         }
@@ -532,13 +587,6 @@ impl Game {
             self.far_terrain_streamer,
             self.camera.world_position(),
         )?;
-
-        let current = self.camera.world_position();
-        let distance_kilometers = (current.x - previous.x).hypot(current.z - previous.z) / 1_000.0;
-        eprintln!(
-            "random warp: ({:.0}, {:.0}) → ({destination_x:.0}, {destination_z:.0}), {distance_kilometers:.0} km",
-            previous.x, previous.z
-        );
         Ok(())
     }
 
@@ -551,6 +599,11 @@ impl Game {
             && let Err(error) = self.random_warp()
         {
             eprintln!("random warp failed: {error}");
+        }
+        if std::mem::take(&mut self.cave_warp_requested)
+            && let Err(error) = self.cave_warp()
+        {
+            eprintln!("cave warp failed: {error}");
         }
 
         let now = Instant::now();
@@ -894,6 +947,7 @@ impl Camera {
     }
 
     fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f64) {
+        let previous_position = self.position;
         let movement = self.movement(input);
         if movement.length_squared() > 0.0 {
             let speed = if input.sprint() {
@@ -904,7 +958,23 @@ impl Camera {
             let intensity = movement.length().min(1.0);
             self.position += movement.normalize() * intensity * speed * delta_seconds;
         }
-        self.position.y = surface_height(terrain, self.position.x, self.position.z) + EYE_HEIGHT;
+        let current_floor = self.position.y - EYE_HEIGHT;
+        let floor = if let Some(floor) =
+            walkable_floor_height(terrain, self.position.x, self.position.z, current_floor)
+        {
+            floor
+        } else {
+            self.position.x = previous_position.x;
+            self.position.z = previous_position.z;
+            walkable_floor_height(
+                terrain,
+                self.position.x,
+                self.position.z,
+                previous_position.y - EYE_HEIGHT,
+            )
+            .unwrap_or_else(|| surface_height(terrain, self.position.x, self.position.z))
+        };
+        self.position.y = floor + EYE_HEIGHT;
     }
 
     fn movement(&self, input: &InputState) -> DVec3 {
@@ -1178,6 +1248,51 @@ fn surface_height(terrain: &impl SurfaceField, x: f64, z: f64) -> f64 {
     terrain
         .surface_height(x, z)
         .expect("finite player positions must have terrain")
+}
+
+fn walkable_floor_height(
+    terrain: &impl DensityField,
+    x: f64,
+    z: f64,
+    current_floor: f64,
+) -> Option<f64> {
+    const MAX_STEP_UP_METERS: f64 = 1.5;
+    const MAX_DESCENT_METERS: f64 = 160.0;
+    const SCAN_STEP_METERS: f64 = 0.5;
+    const REFINEMENT_STEPS: usize = 9;
+
+    if !x.is_finite() || !z.is_finite() || !current_floor.is_finite() {
+        return None;
+    }
+    let mut air_y = current_floor + MAX_STEP_UP_METERS;
+    let mut air_density = terrain.sample(WorldPosition::new(x, air_y, z)).density;
+    let minimum_y = current_floor - MAX_DESCENT_METERS;
+    let mut sample_y = air_y - SCAN_STEP_METERS;
+    while sample_y >= minimum_y {
+        let density = terrain.sample(WorldPosition::new(x, sample_y, z)).density;
+        if air_density > 0.0 && density <= 0.0 {
+            let mut solid_y = sample_y;
+            for _ in 0..REFINEMENT_STEPS {
+                let midpoint = (solid_y + air_y) * 0.5;
+                if terrain.sample(WorldPosition::new(x, midpoint, z)).density <= 0.0 {
+                    solid_y = midpoint;
+                } else {
+                    air_y = midpoint;
+                }
+            }
+            let floor = (solid_y + air_y) * 0.5;
+            let eye_clearance = terrain
+                .sample(WorldPosition::new(x, floor + EYE_HEIGHT, z))
+                .density;
+            if eye_clearance > 0.0 {
+                return Some(floor);
+            }
+        }
+        air_y = sample_y;
+        air_density = density;
+        sample_y -= SCAN_STEP_METERS;
+    }
+    None
 }
 
 fn chunk_streaming_config() -> ChunkStreamingConfig {
@@ -1519,7 +1634,13 @@ fn ground_vegetation_mesh_for_chunk(
 }
 
 fn surface_feature_has_dry_ground(terrain: &GeneratedWorldTerrain, x: f64, z: f64) -> bool {
-    terrain.lake_surface_at(x, z).is_none()
+    let has_support = terrain.surface_height(x, z).is_some_and(|surface| {
+        terrain
+            .sample(WorldPosition::new(x, surface - 0.35, z))
+            .is_solid()
+    });
+    has_support
+        && terrain.lake_surface_at(x, z).is_none()
         && terrain.ocean_surface_at(x, z).is_none()
         && !terrain
             .river_influence_at(x, z)
@@ -1686,12 +1807,43 @@ fn u32_as_f32(value: u32) -> f32 {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy, Debug)]
+    struct OpenSphericalCave;
+
+    impl DensityField for OpenSphericalCave {
+        fn sample(&self, position: WorldPosition) -> treeline_terrain::TerrainSample {
+            let cave_void =
+                5.5 - libm::hypot(libm::hypot(position.x, position.y + 5.0), position.z);
+            let density = position.y.max(cave_void);
+            treeline_terrain::TerrainSample::new(
+                density,
+                if density > 0.0 {
+                    treeline_terrain::Material::Air
+                } else {
+                    treeline_terrain::Material::Rock
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn walkable_floor_descends_through_an_open_cave_mouth() {
+        let floor = walkable_floor_height(&OpenSphericalCave, 0.0, 0.0, 0.0).expect("cave floor");
+        assert!((floor + 10.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn solid_cave_wall_has_no_walkable_floor() {
+        assert!(walkable_floor_height(&OpenSphericalCave, 8.0, 0.0, -10.5).is_none());
+    }
+
     #[test]
     fn walking_keeps_submeter_steps_at_the_random_warp_limit() {
         let terrain = GeneratedWorldTerrain::new(WORLD);
         let mut input = InputState::default();
         input.set_key(KeyCode::KeyW, true);
-        let mut camera = Camera::new(DVec3::new(5_000_000.0, 0.0, -5_000_000.0), 0.0, 0.0);
+        let y = surface_height(&terrain, 5_000_000.0, -5_000_000.0) + EYE_HEIGHT;
+        let mut camera = Camera::new(DVec3::new(5_000_000.0, y, -5_000_000.0), 0.0, 0.0);
         let previous_x = camera.position.x;
 
         camera.walk(&input, &terrain, 1.0 / 60.0);
@@ -1874,8 +2026,8 @@ mod tests {
 
     #[test]
     fn prototype_region_exposes_real_lake() {
-        const LAKE_X: f64 = 93_000.0;
-        const LAKE_Z: f64 = -121_000.0;
+        const LAKE_X: f64 = -163_000.0;
+        const LAKE_Z: f64 = -191_000.0;
         let terrain = GeneratedWorldTerrain::new(WORLD);
         for [x_offset, z_offset] in [[0.0, 0.0], [128.0, 0.0], [-128.0, 0.0], [0.0, 128.0]] {
             assert!(
