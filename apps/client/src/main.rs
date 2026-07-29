@@ -22,6 +22,7 @@ use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_ecology::{
     GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds,
 };
+use treeline_mesher::Mesh;
 use treeline_renderer::{TerrainMesh, TerrainRenderer, TreeMeshDetail};
 use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::ChunkIndex;
@@ -1391,49 +1392,44 @@ fn update_terrain(
             }
             continue;
         }
-        let mesh = generated.mesh?;
-        let lake_mesh = generated.lake_mesh.transpose()?;
+        // The job has already left the queue, so the outstanding request must
+        // be cleared before any fallible step. Leaving it in place would make
+        // the streamer treat this chunk as still pending and never ask for it
+        // again, leaving a permanent hole in the world.
+        clear_terrain_request(spec, requested, requested_far);
+        // A meshing failure must not abort the whole streaming update either;
+        // the cleared request lets a later frame retry this chunk.
+        let (mesh, lake_mesh) = match (generated.mesh, generated.lake_mesh.transpose()) {
+            (Ok(mesh), Ok(lake_mesh)) => (mesh, lake_mesh),
+            (Err(error), _) | (_, Err(error)) => {
+                eprintln!("terrain mesh generation failed, retrying later: {error}");
+                continue;
+            }
+        };
+        let (surface, water) =
+            upload_terrain_surface(device, renderer, terrain, &mesh, lake_mesh.as_ref())?;
         match spec {
             TerrainMeshSpec::Near(spec) => {
-                requested.remove(&spec.chunk);
-                let rock_mesh = rock_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
-                let ground_vegetation_mesh =
-                    ground_vegetation_mesh_for_chunk(device, renderer, terrain, spec.chunk)?;
                 chunks.insert(
                     spec.chunk,
                     ResidentTerrainChunk {
                         spec,
-                        mesh: renderer.upload_snowy_mesh(device, &mesh, |x, z| {
-                            terrain
-                                .snow_coverage_for_slope(x, z, Season::Winter, 0.0)
-                                .map(|snow| snow.coverage_fraction)
-                        })?,
-                        lake_mesh: lake_mesh
-                            .as_ref()
-                            .filter(|lake_mesh| !lake_mesh.indices.is_empty())
-                            .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
-                            .transpose()?,
-                        rock_mesh,
-                        ground_vegetation_mesh,
+                        mesh: surface,
+                        lake_mesh: water,
+                        rock_mesh: rock_mesh_for_chunk(device, renderer, terrain, spec.chunk)?,
+                        ground_vegetation_mesh: ground_vegetation_mesh_for_chunk(
+                            device, renderer, terrain, spec.chunk,
+                        )?,
                     },
                 );
             }
             TerrainMeshSpec::Far(spec) => {
-                requested_far.remove(&spec.tile);
                 far_tiles.insert(
                     spec.tile,
                     ResidentFarTerrainTile {
                         spec,
-                        mesh: renderer.upload_snowy_mesh(device, &mesh, |x, z| {
-                            terrain
-                                .snow_coverage_for_slope(x, z, Season::Winter, 0.0)
-                                .map(|snow| snow.coverage_fraction)
-                        })?,
-                        lake_mesh: lake_mesh
-                            .as_ref()
-                            .filter(|lake_mesh| !lake_mesh.indices.is_empty())
-                            .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
-                            .transpose()?,
+                        mesh: surface,
+                        lake_mesh: water,
                     },
                 );
             }
@@ -1457,6 +1453,44 @@ fn update_terrain(
         requested_far,
         jobs,
     )
+}
+
+/// Drops the outstanding request for a completed mesh, whichever tier it
+/// belongs to, so the streamer is free to schedule that footprint again.
+fn clear_terrain_request(
+    spec: TerrainMeshSpec,
+    requested: &mut BTreeMap<ChunkIndex, ChunkMeshSpec>,
+    requested_far: &mut BTreeMap<FarTileIndex, FarTerrainMeshSpec>,
+) {
+    match spec {
+        TerrainMeshSpec::Near(spec) => {
+            requested.remove(&spec.chunk);
+        }
+        TerrainMeshSpec::Far(spec) => {
+            requested_far.remove(&spec.tile);
+        }
+    }
+}
+
+/// Uploads a terrain surface and its optional water sheet with the shared snow
+/// treatment, so near chunks and far tiles cannot drift apart in appearance.
+fn upload_terrain_surface(
+    device: &wgpu::Device,
+    renderer: &TerrainRenderer,
+    terrain: &GeneratedWorldTerrain,
+    mesh: &Mesh,
+    lake_mesh: Option<&Mesh>,
+) -> Result<(TerrainMesh, Option<TerrainMesh>), Box<dyn Error>> {
+    let surface = renderer.upload_snowy_mesh(device, mesh, |x, z| {
+        terrain
+            .snow_coverage_for_slope(x, z, Season::Winter, 0.0)
+            .map(|snow| snow.coverage_fraction)
+    })?;
+    let water = lake_mesh
+        .filter(|lake_mesh| !lake_mesh.indices.is_empty())
+        .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
+        .transpose()?;
+    Ok((surface, water))
 }
 
 fn update_distant_trees(
@@ -1675,10 +1709,8 @@ fn schedule_terrain(
         }
     }
 
-    let mut lod_counts = [0_usize; 3];
+    let lod_counts = streamed_lod_counts(&chunk_plan.load);
     for spec in &chunk_plan.load {
-        let lod_index = usize::from(spec.lod.get() - ChunkIndex::NEAR_LOD.get());
-        lod_counts[lod_index] += 1;
         if let Some(previous) = requested.insert(spec.chunk, *spec) {
             jobs.cancel(TerrainMeshSpec::Near(previous));
         }
@@ -1764,6 +1796,25 @@ fn schedule_terrain(
         chunks.len()
     );
     Ok(())
+}
+
+/// Counts planned chunks per streamed LOD for the streaming report.
+///
+/// An LOD outside the streamed range is skipped rather than indexed, so
+/// widening the range can never panic the streamer.
+fn streamed_lod_counts(load: &[ChunkMeshSpec]) -> [usize; 3] {
+    let mut counts = [0_usize; 3];
+    for spec in load {
+        if let Some(count) = spec
+            .lod
+            .get()
+            .checked_sub(ChunkIndex::NEAR_LOD.get())
+            .and_then(|offset| counts.get_mut(usize::from(offset)))
+        {
+            *count += 1;
+        }
+    }
+    counts
 }
 
 fn schedule_prefetch(
