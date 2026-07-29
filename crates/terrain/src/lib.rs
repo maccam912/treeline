@@ -53,6 +53,22 @@ pub trait DensityField {
 /// are intentionally not evaluated.
 pub trait SurfaceField {
     fn surface_height(&self, x: f64, z: f64) -> Option<f64>;
+
+    /// Extends the vertical interval that a volumetric mesh must sample.
+    ///
+    /// The default heightfield implementation needs no layers away from the
+    /// visible surface. Fields with caves or overhangs can widen this interval
+    /// for one horizontal footprint without changing their far-surface
+    /// representation.
+    fn volume_bounds(
+        &self,
+        _min_x: f64,
+        _min_z: f64,
+        _max_x: f64,
+        _max_z: f64,
+    ) -> Option<(f64, f64)> {
+        None
+    }
 }
 
 /// A horizontal ground plane useful for tests and the first terrain prototype.

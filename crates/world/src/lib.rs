@@ -12,6 +12,10 @@ use std::sync::{Condvar, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
 
+pub use treeline_caves::{
+    CAVE_GENERATOR_VERSION, CaveEntrance, CaveFamily, CaveInfluence, CaveNode, CaveNodeKind,
+    CaveRegionIndex, CaveSystem, UndergroundRiver,
+};
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_ecology::{
     REEF_GENERATOR_VERSION, ReefDistribution, ReefSample, WETLAND_GENERATOR_VERSION,
@@ -36,9 +40,10 @@ pub const LAKE_GENERATOR_VERSION: u32 = 4;
 /// Generator version that first composes macro, meso, and micro erosion.
 pub const EROSION_GENERATOR_VERSION: u32 = 5;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = REEF_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = CAVE_GENERATOR_VERSION;
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
+const MAX_TERRAIN_SHAPE_CACHE_ENTRIES: usize = 131_072;
 
 /// Deterministic snow retained by the generated terrain surface.
 ///
@@ -69,6 +74,16 @@ pub struct OceanSurfaceSample {
     pub water_depth_meters: f64,
 }
 
+/// Top-down Generator Lab description of a subterranean system.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaveMapSample {
+    pub family: CaveFamily,
+    pub system_key: u64,
+    pub depth_below_surface_meters: f64,
+    pub horizontal_distance_meters: f64,
+    pub has_underground_river: bool,
+}
+
 /// Explainable contributors to the versioned multi-scale erosion surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldErosionSample {
@@ -90,10 +105,15 @@ pub struct GeneratedWorldTerrain {
     river_networks: Arc<NetworkCache<RiverNetwork>>,
     gully_networks: Arc<NetworkCache<GullyNetwork>>,
     lake_networks: Arc<NetworkCache<LakeNetwork>>,
+    cave_systems: Arc<CaveCache>,
+    cave_neighborhoods: Arc<CaveNeighborhoodCache>,
+    terrain_shapes: Arc<RwLock<BTreeMap<(u64, u64), TerrainShape>>>,
 }
 
 type NetworkSlot<T> = Arc<OnceLock<Option<Arc<T>>>>;
 type NetworkCache<T> = RwLock<BTreeMap<WatershedRegionIndex, NetworkSlot<T>>>;
+type CaveCache = RwLock<BTreeMap<CaveRegionIndex, NetworkSlot<CaveSystem>>>;
+type CaveNeighborhoodCache = RwLock<BTreeMap<CaveRegionIndex, Arc<Vec<Arc<CaveSystem>>>>>;
 
 impl GeneratedWorldTerrain {
     pub fn new(world: WorldIdentity) -> Self {
@@ -102,6 +122,9 @@ impl GeneratedWorldTerrain {
             river_networks: Arc::new(RwLock::new(BTreeMap::new())),
             gully_networks: Arc::new(RwLock::new(BTreeMap::new())),
             lake_networks: Arc::new(RwLock::new(BTreeMap::new())),
+            cave_systems: Arc::new(RwLock::new(BTreeMap::new())),
+            cave_neighborhoods: Arc::new(RwLock::new(BTreeMap::new())),
+            terrain_shapes: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -326,6 +349,184 @@ impl GeneratedWorldTerrain {
             .clone()
     }
 
+    fn cave_system(&self, region: CaveRegionIndex) -> Option<Arc<CaveSystem>> {
+        if self.world().generator_version < CAVE_GENERATOR_VERSION {
+            return None;
+        }
+        let slot = cave_slot(&self.cave_systems, region);
+        slot.get_or_init(|| {
+            let placement_surface = CavePlacementSurface {
+                base: self.base,
+                world: self.world(),
+            };
+            CaveSystem::generate(self.world(), region, &placement_surface).map(Arc::new)
+        })
+        .clone()
+    }
+
+    fn cave_systems_intersecting(
+        &self,
+        min_x: f64,
+        min_z: f64,
+        max_x: f64,
+        max_z: f64,
+    ) -> Vec<Arc<CaveSystem>> {
+        if self.world().generator_version < CAVE_GENERATOR_VERSION
+            || !min_x.is_finite()
+            || !min_z.is_finite()
+            || !max_x.is_finite()
+            || !max_z.is_finite()
+            || min_x > max_x
+            || min_z > max_z
+        {
+            return Vec::new();
+        }
+        let Some(minimum) = CaveRegionIndex::containing(min_x, min_z) else {
+            return Vec::new();
+        };
+        let Some(maximum) = CaveRegionIndex::containing(max_x, max_z) else {
+            return Vec::new();
+        };
+        let mut systems = BTreeMap::new();
+        for region_z in minimum.z.saturating_sub(1)..=maximum.z.saturating_add(1) {
+            for region_x in minimum.x.saturating_sub(1)..=maximum.x.saturating_add(1) {
+                let neighborhood = self.cave_neighborhood(CaveRegionIndex::new(region_x, region_z));
+                for system in neighborhood.iter() {
+                    if system
+                        .bounds
+                        .intersects_horizontal(min_x, min_z, max_x, max_z)
+                    {
+                        systems.insert(system.system_key, Arc::clone(system));
+                    }
+                }
+            }
+        }
+        systems.into_values().collect()
+    }
+
+    fn cave_neighborhood(&self, center: CaveRegionIndex) -> Arc<Vec<Arc<CaveSystem>>> {
+        if let Some(systems) = self
+            .cave_neighborhoods
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&center)
+            .cloned()
+        {
+            return systems;
+        }
+        let mut systems = Vec::new();
+        for z_offset in -1_i64..=1 {
+            for x_offset in -1_i64..=1 {
+                let region = CaveRegionIndex::new(
+                    center.x.saturating_add(x_offset),
+                    center.z.saturating_add(z_offset),
+                );
+                if let Some(system) = self.cave_system(region) {
+                    systems.push(system);
+                }
+            }
+        }
+        systems.sort_by_key(|system| system.system_key);
+        let systems = Arc::new(systems);
+        Arc::clone(
+            self.cave_neighborhoods
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(center)
+                .or_insert(systems),
+        )
+    }
+
+    /// Returns the strongest cave subtraction at a 3D world position.
+    pub fn cave_influence_at(&self, position: WorldPosition) -> Option<CaveInfluence> {
+        if self.world().generator_version < CAVE_GENERATOR_VERSION {
+            return None;
+        }
+        let region = CaveRegionIndex::containing(position.x, position.z)?;
+        self.cave_neighborhood(region)
+            .iter()
+            .filter(|system| {
+                const CAVE_SAMPLE_MARGIN_METERS: f64 = 4.0;
+                position.x >= system.bounds.min.x - CAVE_SAMPLE_MARGIN_METERS
+                    && position.x <= system.bounds.max.x + CAVE_SAMPLE_MARGIN_METERS
+                    && position.y >= system.bounds.min.y - CAVE_SAMPLE_MARGIN_METERS
+                    && position.y <= system.bounds.max.y + CAVE_SAMPLE_MARGIN_METERS
+                    && position.z >= system.bounds.min.z - CAVE_SAMPLE_MARGIN_METERS
+                    && position.z <= system.bounds.max.z + CAVE_SAMPLE_MARGIN_METERS
+            })
+            .map(|system| system.influence_at(position))
+            .max_by(|left, right| {
+                left.void_density
+                    .total_cmp(&right.void_density)
+                    .then_with(|| left.system_key.cmp(&right.system_key).reverse())
+            })
+    }
+
+    /// Describes a cave footprint below one top-down inspection position.
+    pub fn cave_map_at(&self, x: f64, z: f64) -> Option<CaveMapSample> {
+        let system = self
+            .cave_systems_intersecting(x, z, x, z)
+            .into_iter()
+            .filter_map(|system| {
+                let distance = system.horizontal_distance_at(x, z);
+                (distance <= 0.0).then_some((distance, system))
+            })
+            .min_by(|left, right| {
+                left.0
+                    .total_cmp(&right.0)
+                    .then_with(|| left.1.system_key.cmp(&right.1.system_key))
+            })?;
+        let surface = self.shaped_height(x, z)?.height;
+        let highest = system
+            .1
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| !matches!(node.kind, CaveNodeKind::Entrance | CaveNodeKind::Sinkhole))
+            .map(|node| node.position.y + node.radius_meters)
+            .fold(f64::NEG_INFINITY, f64::max);
+        Some(CaveMapSample {
+            family: system.1.family,
+            system_key: system.1.system_key,
+            depth_below_surface_meters: (surface - highest).max(0.0),
+            horizontal_distance_meters: system.0,
+            has_underground_river: !system.1.graph.underground_rivers.is_empty(),
+        })
+    }
+
+    /// Finds the nearest generated surface connection in a square region
+    /// search, used by inspection tools and the prototype's cave warp.
+    pub fn nearest_cave_entrance(
+        &self,
+        position: WorldPosition,
+        region_radius: u64,
+    ) -> Option<CaveEntrance> {
+        let center = CaveRegionIndex::containing(position.x, position.z)?;
+        let radius = i64::try_from(region_radius).ok()?;
+        let mut nearest = None;
+        for region_z in center.z.saturating_sub(radius)..=center.z.saturating_add(radius) {
+            for region_x in center.x.saturating_sub(radius)..=center.x.saturating_add(radius) {
+                let Some(system) = self.cave_system(CaveRegionIndex::new(region_x, region_z))
+                else {
+                    continue;
+                };
+                for entrance in system.entrances() {
+                    let distance_squared = ((entrance.position.x - position.x)
+                        * (entrance.position.x - position.x))
+                        + ((entrance.position.z - position.z) * (entrance.position.z - position.z));
+                    if nearest.is_none_or(|(current_distance, current): (f64, CaveEntrance)| {
+                        distance_squared < current_distance
+                            || (distance_squared.to_bits() == current_distance.to_bits()
+                                && entrance.system_key < current.system_key)
+                    }) {
+                        nearest = Some((distance_squared, entrance));
+                    }
+                }
+            }
+        }
+        nearest.map(|(_, entrance)| entrance)
+    }
+
     /// Builds the lake surface aligned with one near or far terrain mesh.
     ///
     /// Lake water remains a separate render surface; it never changes the
@@ -350,7 +551,35 @@ impl GeneratedWorldTerrain {
                 )
             }
         };
-        lake_surface_grid(self, grid)
+        let mut mesh = lake_surface_grid(self, grid)?;
+        if let TerrainMeshSpec::Near(near) = spec {
+            self.append_underground_rivers(&mut mesh, near.chunk)?;
+        }
+        Ok(mesh)
+    }
+
+    fn append_underground_rivers(
+        &self,
+        mesh: &mut Mesh,
+        chunk: ChunkIndex,
+    ) -> Result<(), MeshingError> {
+        let origin = chunk.sample_origin();
+        let edge_meters = ChunkIndex::edge_meters();
+        let max_x = origin.x + edge_meters;
+        let max_z = origin.z + edge_meters;
+        for system in self.cave_systems_intersecting(origin.x, origin.z, max_x, max_z) {
+            for river in &system.graph.underground_rivers {
+                let edge = system.graph.edges[river.edge_index];
+                let start = system.graph.nodes[edge.from];
+                let end = system.graph.nodes[edge.to];
+                if let Some((clipped_start, clipped_end)) =
+                    clip_cave_edge_to_chunk(start, end, origin.x, origin.z, max_x, max_z)
+                {
+                    append_underground_river_quad(mesh, clipped_start, clipped_end, *river)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Builds the visible terrain representation for the requested terrain
@@ -389,6 +618,19 @@ impl GeneratedWorldTerrain {
     }
 
     fn shaped_height(&self, x: f64, z: f64) -> Option<TerrainShape> {
+        if !x.is_finite() || !z.is_finite() {
+            return None;
+        }
+        let key = (x.to_bits(), z.to_bits());
+        if let Some(shape) = self
+            .terrain_shapes
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .copied()
+        {
+            return Some(shape);
+        }
         let erosion = (self.world().generator_version >= EROSION_GENERATOR_VERSION)
             .then(|| self.base.erosion_at(x, z))
             .flatten();
@@ -410,19 +652,38 @@ impl GeneratedWorldTerrain {
         });
         let reef = ReefDistribution::new(self.world()).sample(x, z);
         let height = hydrological_height + reef.map_or(0.0, |reef| reef.framework_height_meters);
-        Some(TerrainShape {
+        let shape = TerrainShape {
             height,
             erosion,
             gully,
             river,
             reef,
-        })
+        };
+        let mut cache = self
+            .terrain_shapes
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if cache.len() >= MAX_TERRAIN_SHAPE_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, shape);
+        Some(shape)
     }
 
     fn apply_ecosystem_surface_colors(&self, mesh: &mut Mesh) {
         mesh.colors.clear();
         mesh.colors.reserve(mesh.positions.len());
         for position in &mesh.positions {
+            let world_position = WorldPosition::new(position[0], position[1], position[2]);
+            if let Some(cave) = self.cave_influence_at(world_position)
+                && cave.void_density >= -2.5
+                && self
+                    .shaped_height(position[0], position[2])
+                    .is_some_and(|surface| position[1] < surface.height - 1.5)
+            {
+                mesh.colors.push(cave_wall_color(cave.family));
+                continue;
+            }
             let reef = self.reef_at(position[0], position[2]);
             let wetland = self.wetland_at(position[0], position[2]);
             mesh.colors
@@ -435,6 +696,25 @@ impl GeneratedWorldTerrain {
 }
 
 fn network_slot<T>(cache: &NetworkCache<T>, region: WatershedRegionIndex) -> NetworkSlot<T> {
+    if let Some(slot) = cache
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&region)
+        .cloned()
+    {
+        return slot;
+    }
+
+    Arc::clone(
+        cache
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(region)
+            .or_insert_with(|| Arc::new(OnceLock::new())),
+    )
+}
+
+fn cave_slot(cache: &CaveCache, region: CaveRegionIndex) -> NetworkSlot<CaveSystem> {
     if let Some(slot) = cache
         .read()
         .unwrap_or_else(PoisonError::into_inner)
@@ -493,6 +773,18 @@ fn ecosystem_surface_color(
     ])
 }
 
+const fn cave_wall_color(family: CaveFamily) -> [f32; 4] {
+    match family {
+        CaveFamily::Karst => [0.38, 0.36, 0.30, 0.92],
+        CaveFamily::LavaTube => [0.20, 0.18, 0.17, 0.94],
+        CaveFamily::Fault => [0.27, 0.27, 0.28, 0.93],
+        CaveFamily::Sea => [0.25, 0.32, 0.34, 0.90],
+        CaveFamily::Talus => [0.31, 0.29, 0.27, 0.90],
+        CaveFamily::Glacial => [0.34, 0.40, 0.44, 0.91],
+        CaveFamily::Erosional => [0.32, 0.28, 0.23, 0.91],
+    }
+}
+
 fn blend_color(start: [f32; 4], end: [f32; 4], amount: f32) -> [f32; 4] {
     std::array::from_fn(|channel| start[channel] + ((end[channel] - start[channel]) * amount))
 }
@@ -509,6 +801,26 @@ struct TerrainShape {
     gully: Option<GullyTerrainInfluence>,
     river: Option<RiverTerrainInfluence>,
     reef: Option<ReefSample>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CavePlacementSurface {
+    base: WildernessTerrain,
+    world: WorldIdentity,
+}
+
+impl SurfaceField for CavePlacementSurface {
+    fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
+        let base_height = if self.world.generator_version >= EROSION_GENERATOR_VERSION {
+            self.base.erosion_at(x, z)?.surface_height_meters()
+        } else {
+            self.base.height_at(x, z)?
+        };
+        let reef_height = ReefDistribution::new(self.world)
+            .sample(x, z)
+            .map_or(0.0, |reef| reef.framework_height_meters);
+        Some(base_height + reef_height)
+    }
 }
 
 impl DensityField for GeneratedWorldTerrain {
@@ -542,6 +854,15 @@ impl DensityField for GeneratedWorldTerrain {
         } else {
             Material::Rock
         };
+        if let Some(cave) = self.cave_influence_at(position) {
+            let carved_density = density.max(cave.void_density);
+            if carved_density > 0.0 {
+                return TerrainSample::new(carved_density, Material::Air);
+            }
+            if cave.void_density > density {
+                return TerrainSample::new(carved_density, Material::Rock);
+            }
+        }
         TerrainSample::new(density, material)
     }
 }
@@ -549,6 +870,21 @@ impl DensityField for GeneratedWorldTerrain {
 impl SurfaceField for GeneratedWorldTerrain {
     fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
         self.shaped_height(x, z).map(|shape| shape.height)
+    }
+
+    fn volume_bounds(&self, min_x: f64, min_z: f64, max_x: f64, max_z: f64) -> Option<(f64, f64)> {
+        let systems = self.cave_systems_intersecting(min_x, min_z, max_x, max_z);
+        let minimum = systems
+            .iter()
+            .filter_map(|system| system.vertical_bounds_in(min_x, min_z, max_x, max_z))
+            .map(|bounds| bounds.0)
+            .fold(f64::INFINITY, f64::min);
+        let maximum = systems
+            .iter()
+            .filter_map(|system| system.vertical_bounds_in(min_x, min_z, max_x, max_z))
+            .map(|bounds| bounds.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        minimum.is_finite().then_some((minimum, maximum))
     }
 }
 
@@ -644,6 +980,102 @@ fn lake_surface_grid(
         }
     }
     Ok(mesh)
+}
+
+fn append_underground_river_quad(
+    mesh: &mut Mesh,
+    start: CaveNode,
+    end: CaveNode,
+    river: UndergroundRiver,
+) -> Result<(), MeshingError> {
+    const CAVE_WATER_COLOR: [f32; 4] = [0.03, 0.24, 0.34, 1.0];
+    let direction_x = end.position.x - start.position.x;
+    let direction_z = end.position.z - start.position.z;
+    let horizontal_length = libm::hypot(direction_x, direction_z);
+    if horizontal_length <= f64::EPSILON {
+        return Ok(());
+    }
+    let half_width = river.width_meters * 0.5;
+    let side_x = (-direction_z / horizontal_length) * half_width;
+    let side_z = (direction_x / horizontal_length) * half_width;
+    let start_y = start.position.y - (start.radius_meters * 0.56);
+    let end_y = end.position.y - (end.radius_meters * 0.56);
+    let vertex_offset =
+        u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
+    mesh.positions.extend([
+        [
+            start.position.x - side_x,
+            start_y,
+            start.position.z - side_z,
+        ],
+        [
+            start.position.x + side_x,
+            start_y,
+            start.position.z + side_z,
+        ],
+        [end.position.x - side_x, end_y, end.position.z - side_z],
+        [end.position.x + side_x, end_y, end.position.z + side_z],
+    ]);
+    mesh.normals.extend([[0.0, 1.0, 0.0]; 4]);
+    if mesh.colors.is_empty() && vertex_offset > 0 {
+        let existing = usize::try_from(vertex_offset).map_err(|_| MeshingError::TooManyVertices)?;
+        mesh.colors.resize(existing, [1.0, 1.0, 1.0, 0.0]);
+    }
+    mesh.colors.extend([CAVE_WATER_COLOR; 4]);
+    mesh.indices.extend([
+        vertex_offset,
+        vertex_offset + 2,
+        vertex_offset + 1,
+        vertex_offset + 1,
+        vertex_offset + 2,
+        vertex_offset + 3,
+    ]);
+    Ok(())
+}
+
+fn clip_cave_edge_to_chunk(
+    start: CaveNode,
+    end: CaveNode,
+    min_x: f64,
+    min_z: f64,
+    max_x: f64,
+    max_z: f64,
+) -> Option<(CaveNode, CaveNode)> {
+    let delta = [
+        end.position.x - start.position.x,
+        end.position.y - start.position.y,
+        end.position.z - start.position.z,
+    ];
+    let mut minimum_amount = 0.0_f64;
+    let mut maximum_amount = 1.0_f64;
+    for (origin, direction, minimum, maximum) in [
+        (start.position.x, delta[0], min_x, max_x),
+        (start.position.z, delta[2], min_z, max_z),
+    ] {
+        if direction.abs() <= f64::EPSILON {
+            if origin < minimum || origin > maximum {
+                return None;
+            }
+            continue;
+        }
+        let first = (minimum - origin) / direction;
+        let second = (maximum - origin) / direction;
+        minimum_amount = minimum_amount.max(first.min(second));
+        maximum_amount = maximum_amount.min(first.max(second));
+        if minimum_amount > maximum_amount {
+            return None;
+        }
+    }
+    let interpolate = |amount: f64| CaveNode {
+        position: WorldPosition::new(
+            start.position.x + (delta[0] * amount),
+            start.position.y + (delta[1] * amount),
+            start.position.z + (delta[2] * amount),
+        ),
+        kind: CaveNodeKind::Passage,
+        radius_meters: start.radius_meters + ((end.radius_meters - start.radius_meters) * amount),
+    };
+    Some((interpolate(minimum_amount), interpolate(maximum_amount)))
 }
 
 /// Lifecycle of one region in an effectively infinite world.
@@ -2102,6 +2534,168 @@ mod tests {
     }
 
     #[test]
+    fn version_sixteen_subtracts_connected_caves_without_changing_far_surface() {
+        let world = WorldIdentity::new(0x5eed, CAVE_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let system = generated_cave_system(&terrain);
+        let passage = system
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == CaveNodeKind::Passage)
+            .expect("generated passage");
+        let unchanged_surface = terrain
+            .surface_height(passage.position.x, passage.position.z)
+            .expect("far surface");
+        let base_density = passage.position.y - unchanged_surface;
+        let carved = terrain.sample(passage.position);
+
+        assert!(base_density < 0.0);
+        assert!(carved.density > 0.0);
+        assert_eq!(carved.material, Material::Air);
+        assert_eq!(
+            terrain
+                .surface_height(passage.position.x, passage.position.z)
+                .expect("same far surface")
+                .to_bits(),
+            unchanged_surface.to_bits()
+        );
+        assert!(system.graph.is_connected());
+        assert!(system.graph.has_valid_edges());
+        let entrance = system.entrances().next().expect("surface connection");
+        let entrance_surface = terrain
+            .surface_height(entrance.position.x, entrance.position.z)
+            .expect("entrance surface");
+        assert!(
+            terrain
+                .sample(WorldPosition::new(
+                    entrance.position.x,
+                    entrance_surface,
+                    entrance.position.z,
+                ))
+                .density
+                > 0.0,
+            "the generated entrance must open through the composed surface"
+        );
+    }
+
+    #[test]
+    fn cave_generation_has_a_stable_golden_fingerprint_and_cache_order() {
+        let world = WorldIdentity::new(0x5eed, CAVE_GENERATOR_VERSION, 0);
+        let forward = GeneratedWorldTerrain::new(world);
+        let system = generated_cave_system(&forward);
+        let fingerprint = system.fingerprint();
+
+        let reverse = GeneratedWorldTerrain::new(world);
+        let _ = reverse.cave_system(CaveRegionIndex::new(7, -9));
+        let repeated = reverse
+            .cave_system(system.region)
+            .expect("same generated cave");
+
+        assert_eq!(system.as_ref(), repeated.as_ref());
+        assert_eq!(fingerprint, repeated.fingerprint());
+        assert_eq!(fingerprint, 6_610_453_046_115_402_670);
+    }
+
+    #[test]
+    fn cave_bounds_extend_near_voxel_meshing_and_underground_rivers_render() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, CAVE_GENERATOR_VERSION, 0));
+        let system = generated_cave_system(&terrain);
+        let river = system
+            .graph
+            .underground_rivers
+            .first()
+            .expect("generated system has underground water");
+        let edge = system.graph.edges[river.edge_index];
+        let start = system.graph.nodes[edge.from];
+        let end = system.graph.nodes[edge.to];
+        let midpoint = WorldPosition::new(
+            (start.position.x + end.position.x) * 0.5,
+            (start.position.y + end.position.y) * 0.5,
+            (start.position.z + end.position.z) * 0.5,
+        );
+        let chunk = ChunkIndex::containing(midpoint).expect("river chunk");
+        let origin = chunk.sample_origin();
+        let bounds = terrain
+            .volume_bounds(
+                origin.x,
+                origin.z,
+                origin.x + ChunkIndex::edge_meters(),
+                origin.z + ChunkIndex::edge_meters(),
+            )
+            .expect("cave bounds");
+        let surface = terrain
+            .surface_height(midpoint.x, midpoint.z)
+            .expect("surface");
+        assert!(bounds.0 < surface - 5.0);
+
+        let terrain_mesh = terrain
+            .render_mesh(TerrainMeshSpec::Near(ChunkMeshSpec {
+                chunk,
+                lod: ChunkIndex::NEAR_LOD,
+                transition_faces: TransitionFaces::none(),
+            }))
+            .expect("volumetric terrain mesh");
+        assert!(terrain_mesh.is_well_formed());
+        assert!(
+            terrain_mesh
+                .positions
+                .iter()
+                .any(|position| position[1] < surface - 5.0)
+        );
+
+        let water = terrain
+            .lake_surface_mesh(TerrainMeshSpec::Near(ChunkMeshSpec {
+                chunk,
+                lod: ChunkIndex::NEAR_LOD,
+                transition_faces: TransitionFaces::none(),
+            }))
+            .expect("water mesh");
+        assert!(water.is_well_formed());
+        assert!(water.positions.iter().any(|position| {
+            position[1] < surface - 5.0
+                && (position[0] - midpoint.x).abs() < 100.0
+                && (position[2] - midpoint.z).abs() < 100.0
+        }));
+    }
+
+    #[test]
+    fn pre_cave_worlds_do_not_generate_or_cache_caves() {
+        let terrain =
+            GeneratedWorldTerrain::new(WorldIdentity::new(0x5eed, CAVE_GENERATOR_VERSION - 1, 0));
+        assert!(
+            terrain
+                .cave_influence_at(WorldPosition::new(0.0, 0.0, 0.0))
+                .is_none()
+        );
+        assert!(terrain.cave_systems.read().expect("cache lock").is_empty());
+    }
+
+    #[test]
+    fn underground_river_ribbons_clip_to_chunk_ownership() {
+        let start = CaveNode {
+            position: WorldPosition::new(-8.0, 4.0, 16.0),
+            kind: CaveNodeKind::Passage,
+            radius_meters: 2.0,
+        };
+        let end = CaveNode {
+            position: WorldPosition::new(40.0, -2.0, 16.0),
+            kind: CaveNodeKind::Passage,
+            radius_meters: 4.0,
+        };
+        let (clipped_start, clipped_end) =
+            clip_cave_edge_to_chunk(start, end, 0.0, 0.0, 32.0, 32.0).expect("clipped edge");
+
+        assert!(clipped_start.position.x.abs() < f64::EPSILON);
+        assert!((clipped_end.position.x - 32.0).abs() < f64::EPSILON);
+        assert!(clipped_start.position.y < start.position.y);
+        assert!(clipped_end.position.y > end.position.y);
+        assert!(clipped_start.radius_meters > start.radius_meters);
+        assert!(clipped_end.radius_meters < end.radius_meters);
+    }
+
+    #[test]
     fn pre_ecosystem_versions_do_not_expose_wetlands_reefs_or_ocean() {
         let terrain = GeneratedWorldTerrain::new(WorldIdentity::new(
             0x5eed,
@@ -2689,6 +3283,21 @@ mod tests {
             }
         }
         panic!("test world should contain a visible generated lake");
+    }
+
+    fn generated_cave_system(terrain: &GeneratedWorldTerrain) -> Arc<CaveSystem> {
+        for radius in 0_i64..24 {
+            for z in -radius..=radius {
+                for x in -radius..=radius {
+                    if let Some(system) = terrain.cave_system(CaveRegionIndex::new(x, z))
+                        && !system.graph.underground_rivers.is_empty()
+                    {
+                        return system;
+                    }
+                }
+            }
+        }
+        panic!("test world should contain a wet cave system");
     }
 
     fn generated_incised_gully_point(

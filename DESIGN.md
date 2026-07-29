@@ -2214,7 +2214,7 @@ The world generator is the game.
 
 ## Phase 3 — Ecosystems
 
-**Phase status: In progress**
+**Phase status: Complete**
 
 - [x] Climate. Spatially correlated prevailing winds, latitude-like structure,
       continentality, elevation cooling, orographic precipitation, rain
@@ -2233,18 +2233,6 @@ The world generator is the game.
       trees, wind damage, fallen trees, standing deadwood, and storm breaks are
       deterministic; the client renders their generated trunks, branches, and
       crowns, and Generator Lab inspection explains nearby individuals.
-- [ ] **NEXT** — Distant forest LOD. **PARTIAL:** Near terrain renders full procedural
-      trees, the individual-tree ring through five times the near-terrain radius
-      also uses full procedural geometry, a simplified individual-tree ring
-      continues through ten times the radius, and an outer silhouette ring
-      streams the same deterministic individuals from there to twenty times the
-      radius. Continuous canopy surfaces were removed: forest depth now comes
-      from actual trunks and crowns blocking sightlines. A single streamed mesh
-      now owns each tree across near/distant overlap, and tier replacements keep
-      the resident mesh visible until its successor is uploaded. Opaque
-      vegetation uses back-face/depth rejection with reverse-Z precision. GPU
-      instancing, object-level occlusion-aware culling, and dithered transitions
-      between representation tiers remain.
 - [x] Surface rocks. Continuous geology-, erosion-, slope-, and soil-driven
       rock distributions feed globally anchored rounded boulders, angular
       blocks, weathered slabs, and scree fragments. Individuals have
@@ -2289,18 +2277,34 @@ Target:
 
 ## Phase 4 — Caves
 
-**Phase status: Not started; cave topology types have an early foundation**
+**Phase status: Complete**
 
-- [ ] Geological cave families
-- [ ] **PARTIAL** — cave graphs. Node, edge, and topology validation types
-      exist, but deterministic geological graph generation does not.
-- [ ] Underground rivers
-- [ ] Generated entrances
-- [ ] Sinkholes
-- [ ] Shafts
-- [ ] Cave-graph subtraction from terrain density
+- [x] Geological cave families. Karst, lava-tube, fault, sea, talus, glacial,
+      and erosional systems are selected from regional rock, karst,
+      permeability, fracture, volcanism, coastal position, temperature,
+      uplift, erosion, precipitation, and surface-drainage conditions.
+- [x] Deterministic cave graphs. Region-owned connected graphs contain
+      passages, chambers, shafts, sumps, entrances, and sinkholes with stable
+      topology fingerprints and generation-order-independent boundaries.
+- [x] Underground rivers. Permeability, recharge, inferred surface drainage,
+      and a generated water table create downhill subterranean reaches; their
+      water ribbons render with the near terrain.
+- [x] Generated entrances. Every system has a terrain-opening surface
+      connection, and the client can locate the nearest one with `C`.
+- [x] Sinkholes. Every system includes a deterministic sinkhole connection.
+- [x] Shafts. Vertical graph branches connect passage levels.
+- [x] Cave-graph subtraction from terrain density. Analytic node spheres and
+      passage capsules subtract from the signed density field; cave-aware
+      vertical bounds make deep interiors part of near Transvoxel meshes while
+      leaving far heightfield terrain unchanged. Cave walls have family-aware
+      treatment, unsupported vegetation is removed from openings, the player
+      floor query can descend into and follow cave interiors, and Generator Lab
+      maps and explains cave footprints.
 
 Connect subterranean systems to surface geology and hydrology.
+
+Generator version 16 introduces cave subtraction for newly created worlds.
+Earlier versions retain their cave-free pristine density contract.
 
 ---
 
@@ -2309,7 +2313,7 @@ Connect subterranean systems to surface geology and hydrology.
 **Phase status: Not started; basic traversal exists**
 
 - [x] Basic walking and sprinting over terrain
-- [ ] Climbing
+- [ ] **NEXT** — Climbing
 - [ ] Swimming
 - [ ] Temperature simulation
 - [ ] Weather

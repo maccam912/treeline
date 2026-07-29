@@ -18,7 +18,9 @@ use treeline_hydrology::{Lake, LakeNetwork, RiverNetwork, RiverSegment};
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::{SurfaceField, WildernessTerrain};
-use treeline_world::{CURRENT_GENERATOR_VERSION, GeneratedWorldTerrain, WorldErosionSample};
+use treeline_world::{
+    CURRENT_GENERATOR_VERSION, CaveFamily, CaveMapSample, GeneratedWorldTerrain, WorldErosionSample,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -50,10 +52,11 @@ enum ViewMode {
     SurfaceRocks,
     Wetlands,
     Reefs,
+    Caves,
 }
 
 impl ViewMode {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::Terrain,
         Self::Watersheds,
         Self::FlowAccumulation,
@@ -69,6 +72,7 @@ impl ViewMode {
         Self::SurfaceRocks,
         Self::Wetlands,
         Self::Reefs,
+        Self::Caves,
     ];
 
     const fn label(self) -> &'static str {
@@ -88,6 +92,7 @@ impl ViewMode {
             Self::SurfaceRocks => "surface rocks",
             Self::Wetlands => "wetlands",
             Self::Reefs => "reefs",
+            Self::Caves => "caves",
         }
     }
 
@@ -108,6 +113,7 @@ impl ViewMode {
             Self::SurfaceRocks => "G",
             Self::Wetlands => "M",
             Self::Reefs => "Q",
+            Self::Caves => "K",
         }
     }
 
@@ -123,6 +129,7 @@ impl ViewMode {
                 | Self::SurfaceRocks
                 | Self::Wetlands
                 | Self::Reefs
+                | Self::Caves
         )
     }
 }
@@ -144,6 +151,7 @@ fn view_mode_for_key(code: KeyCode) -> Option<ViewMode> {
         KeyCode::KeyG => Some(ViewMode::SurfaceRocks),
         KeyCode::KeyM => Some(ViewMode::Wetlands),
         KeyCode::KeyQ => Some(ViewMode::Reefs),
+        KeyCode::KeyK => Some(ViewMode::Caves),
         _ => None,
     }
 }
@@ -545,7 +553,8 @@ impl GeneratorLab {
         let Some(rock_distribution) = SurfaceRockDistribution::new(world).sample(x, z) else {
             return;
         };
-        let Some((wetland, reef)) = inspect_phase_three(&generated_terrain, x, z) else {
+        let Some((wetland, reef, cave)) = inspect_ecology_and_caves(&generated_terrain, x, z)
+        else {
             return;
         };
         let Some((tree_inspection, ground_vegetation_inspection, rock_inspection)) =
@@ -577,7 +586,7 @@ impl GeneratorLab {
         let ground_vegetation_summary = ground_vegetation_inspection.summary();
         let rock_summary = rock_inspection.summary();
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ground {:.0}% {}, {} nearby, nearest {ground_vegetation_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | wetland {:.0}% {} | reef {:.0}% {} | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ground {:.0}% {}, {} nearby, nearest {ground_vegetation_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | wetland {:.0}% {} | reef {:.0}% {} | {} | ridge +{:.0} m | {drainage_summary}",
             self.season.label(),
             seasonal_climate.mean_temperature_celsius,
             seasonal_climate.snowpack_water_equivalent_millimeters,
@@ -598,10 +607,11 @@ impl GeneratorLab {
             wetland.dominant_kind().label(),
             reef.coverage_fraction * 100.0,
             reef.dominant_form().label(),
+            describe_cave(cave),
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nground-vegetation distribution: {ground_vegetation:#?}\nsurface-rock distribution: {rock_distribution:#?}\nwetland: {wetland:#?}\nreef: {reef:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby ground-vegetation count: {}\nnearest ground plant: {nearest_ground_plant:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nground-vegetation distribution: {ground_vegetation:#?}\nsurface-rock distribution: {rock_distribution:#?}\nwetland: {wetland:#?}\nreef: {reef:#?}\ncave: {cave:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby ground-vegetation count: {}\nnearest ground plant: {nearest_ground_plant:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
             tree_inspection.count,
             ground_vegetation_inspection.count,
             rock_inspection.count,
@@ -609,6 +619,10 @@ impl GeneratorLab {
             nearest_ground_plant = ground_vegetation_inspection.nearest,
             nearest_rock = rock_inspection.nearest,
         );
+        self.show_inspection(summary);
+    }
+
+    fn show_inspection(&mut self, summary: String) {
         self.inspection = Some(summary);
         self.window.request_redraw();
     }
@@ -749,12 +763,34 @@ struct NearbyTreeInspection {
     nearest: Option<ProceduralTree>,
 }
 
-fn inspect_phase_three(
+fn inspect_ecology_and_caves(
     terrain: &GeneratedWorldTerrain,
     x: f64,
     z: f64,
-) -> Option<(WetlandSample, ReefSample)> {
-    Some((terrain.wetland_at(x, z)?, terrain.reef_at(x, z)?))
+) -> Option<(WetlandSample, ReefSample, Option<CaveMapSample>)> {
+    Some((
+        terrain.wetland_at(x, z)?,
+        terrain.reef_at(x, z)?,
+        terrain.cave_map_at(x, z),
+    ))
+}
+
+fn describe_cave(cave: Option<CaveMapSample>) -> String {
+    cave.map_or_else(
+        || "no cave footprint".to_owned(),
+        |cave| {
+            format!(
+                "{} cave {:.0} m deep{}",
+                cave.family.label(),
+                cave.depth_below_surface_meters,
+                if cave.has_underground_river {
+                    " with underground river"
+                } else {
+                    ""
+                }
+            )
+        },
+    )
 }
 
 fn inspect_nearby_surface_features(
@@ -1058,7 +1094,7 @@ fn draw_keyboard_help(ui: &mut egui::Ui) {
     ui.heading("Keyboard & mouse");
     for help in [
         "1–9  Select view layer",
-        "0 / F / V / G / M / Q  Soil / forest / ground / rocks / wetlands / reefs",
+        "0 / F / V / G / M / Q / K  Soil / forest / ground / rocks / wetlands / reefs / caves",
         "C  Advance climate season",
         "WASD / arrows  Pan",
         "+ / − / wheel  Zoom",
@@ -1241,6 +1277,7 @@ fn environment_layer_color(
         ViewMode::SurfaceRocks => Some(surface_rock_color(layers.surface_rocks.sample(x, z)?)),
         ViewMode::Wetlands => Some(wetland_color(layers.generated_terrain.wetland_at(x, z)?)),
         ViewMode::Reefs => Some(reef_color(layers.generated_terrain.reef_at(x, z)?)),
+        ViewMode::Caves => Some(cave_color(layers.generated_terrain.cave_map_at(x, z))),
         ViewMode::Terrain
         | ViewMode::Watersheds
         | ViewMode::FlowAccumulation
@@ -1350,7 +1387,8 @@ fn drainage_color(
         | ViewMode::GroundVegetation
         | ViewMode::SurfaceRocks
         | ViewMode::Wetlands
-        | ViewMode::Reefs => [1.0, 0.0, 1.0, 1.0],
+        | ViewMode::Reefs
+        | ViewMode::Caves => [1.0, 0.0, 1.0, 1.0],
     }
 }
 
@@ -1529,6 +1567,33 @@ fn reef_color(reef: ReefSample) -> [f32; 4] {
         lerp_f32(open_ocean[0], framework[0], visible_cover),
         lerp_f32(open_ocean[1], framework[1], visible_cover),
         lerp_f32(open_ocean[2], framework[2], visible_cover),
+        1.0,
+    ]
+}
+
+fn cave_color(cave: Option<CaveMapSample>) -> [f32; 4] {
+    let Some(cave) = cave else {
+        return [0.06, 0.07, 0.08, 1.0];
+    };
+    let family = match cave.family {
+        CaveFamily::Karst => [0.78, 0.72, 0.52],
+        CaveFamily::LavaTube => [0.55, 0.20, 0.13],
+        CaveFamily::Fault => [0.62, 0.60, 0.58],
+        CaveFamily::Sea => [0.18, 0.56, 0.66],
+        CaveFamily::Talus => [0.55, 0.42, 0.30],
+        CaveFamily::Glacial => [0.55, 0.78, 0.88],
+        CaveFamily::Erosional => [0.70, 0.48, 0.24],
+    };
+    let depth_fade = 1.0 - f64_as_f32((cave.depth_below_surface_meters / 120.0).clamp(0.0, 0.68));
+    let water_boost = if cave.has_underground_river {
+        [0.02, 0.13, 0.20]
+    } else {
+        [0.0; 3]
+    };
+    [
+        (family[0] * depth_fade + water_boost[0]).clamp(0.0, 1.0),
+        (family[1] * depth_fade + water_boost[1]).clamp(0.0, 1.0),
+        (family[2] * depth_fade + water_boost[2]).clamp(0.0, 1.0),
         1.0,
     ]
 }

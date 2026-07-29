@@ -52,10 +52,19 @@ test-backed foundations described in the design. The prototype provides:
   wind response, competition response, and life history;
 - near-client tree rendering generated from continuous trunk, branch, crown,
   bark, and foliage grammars rather than a fixed tree-model library;
+- deterministic surface rocks, ground vegetation, wetlands, reefs, and
+  seasonal snow surface treatment;
+- geology-, climate-, and drainage-driven karst, lava-tube, fault, sea, talus,
+  glacial, and erosional cave systems with connected passages, chambers,
+  entrances, sinkholes, shafts, sumps, and underground rivers;
+- cave subtraction and deep-layer near-terrain meshing, cave-aware traversal,
+  rendered subterranean water, and surface openings kept clear of unsupported
+  vegetation;
 - an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
   terrain/watershed/flow/river/lake/erosion/temperature/precipitation/snowpack
-  /soil/forest views, selectable seasons, and forest/tree parameter inspection;
-- hydrology and cave graph invariants;
+  /soil/forest/ground-vegetation/rock/wetland/reef/cave views, selectable
+  seasons, and explainable ecosystem and cave inspection;
+- hydrology and generated cave topology/determinism invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
 
@@ -71,8 +80,10 @@ version 7. Soil profiles begin with generator version 8, forest distribution
 with version 9, and procedural tree individuals with version 10. Generator
 version 11 standardizes non-basic floating-point operations on pure-Rust
 `libm`; version 10 and older worlds require their original executable to retain
-their previous platform-math behavior. Surface rocks, ground vegetation,
-survival, and networking have not been added yet.
+their previous platform-math behavior. Surface rocks begin with version 12,
+ground vegetation with version 13, wetlands with version 14, reefs with version
+15, and cave subtraction with version 16. Survival and networking have not
+been added yet.
 
 ## Getting started
 
@@ -95,7 +106,9 @@ to zoom, `R` to advance the seed, and `1` through `9` to view terrain,
 watersheds, flow accumulation, rivers, lakes, erosion, seasonal temperature,
 seasonal precipitation, or snowpack. Press `0` for soil and `F` for forest
 distribution. Press `C` to advance the displayed season. Left-click to inspect
-a location, and right-click to teleport the view.
+a location, and right-click to teleport the view. Additional ecosystem layers
+use `V` for ground vegetation, `G` for rocks, `M` for wetlands, `Q` for reefs,
+and `K` for caves.
 
 Run the playable terrain toy with:
 
@@ -106,7 +119,9 @@ cargo run -p client
 Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
 to sprint. Press Escape to release the cursor; click the window to capture it
 again. Press `R` to warp to random dry ground 1,000–5,000 km away; mobile
-browsers expose the same action as a **Random warp** button.
+browsers expose the same action as a **Random warp** button. Press `C` to find
+and warp to the nearest generated cave entrance; walking over the opening
+descends to the cave floor.
 
 Build the browser version with [Trunk](https://trunk-rs.dev/):
 
