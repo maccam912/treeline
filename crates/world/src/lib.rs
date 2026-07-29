@@ -43,7 +43,16 @@ pub const EROSION_GENERATOR_VERSION: u32 = 5;
 pub const CURRENT_GENERATOR_VERSION: u32 = CAVE_GENERATOR_VERSION;
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
-const MAX_TERRAIN_SHAPE_CACHE_ENTRIES: usize = 131_072;
+/// Terrain-shape cache budget, in entries.
+///
+/// Entries are large (roughly half a kilobyte each), and every browser terrain
+/// worker owns an independent cache, so the ceiling is multiplied by the worker
+/// count. Reuse is overwhelmingly within a single mesh job rather than across
+/// jobs: a far tile touches about 1,200 positions and a near chunk a few
+/// thousand. Measuring nine far tiles plus twenty-five near chunks showed no
+/// difference between this budget and one eight times larger, while budgets at
+/// or below 4,096 entries began recomputing inside a single job.
+const MAX_TERRAIN_SHAPE_CACHE_ENTRIES: usize = 16_384;
 
 /// Deterministic snow retained by the generated terrain surface.
 ///
@@ -201,7 +210,12 @@ impl GeneratedWorldTerrain {
                     containing.z.checked_add(z_offset)?,
                 );
                 let region = WatershedRegionIndex::containing_cell(source);
-                let network = self.river_network(region)?;
+                // Skip a region that cannot produce a network rather than
+                // discarding contributions from the neighbours that can, which
+                // would carve a discontinuity along the artifact boundary.
+                let Some(network) = self.river_network(region) else {
+                    continue;
+                };
                 let Some(influence) = network
                     .segment_from(source)
                     .and_then(|segment| segment.terrain_influence(x, z))
@@ -236,7 +250,12 @@ impl GeneratedWorldTerrain {
                     containing.z.checked_add(z_offset)?,
                 );
                 let region = WatershedRegionIndex::containing_cell(source);
-                let network = self.gully_network(region)?;
+                // Skip a region that cannot produce a network rather than
+                // discarding contributions from the neighbours that can, which
+                // would carve a discontinuity along the artifact boundary.
+                let Some(network) = self.gully_network(region) else {
+                    continue;
+                };
                 let Some(influence) = network
                     .segment_from(source)
                     .and_then(|segment| segment.terrain_influence(x, z))
@@ -438,6 +457,11 @@ impl GeneratedWorldTerrain {
     }
 
     /// Returns the strongest cave subtraction at a 3D world position.
+    ///
+    /// Samples that fall outside every passage's evaluated reach are reported
+    /// as absent rather than at the subtraction field's saturated floor, so
+    /// composing the result never clamps terrain density inside a system's
+    /// bounding box.
     pub fn cave_influence_at(&self, position: WorldPosition) -> Option<CaveInfluence> {
         if self.world().generator_version < CAVE_GENERATOR_VERSION {
             return None;
@@ -446,7 +470,7 @@ impl GeneratedWorldTerrain {
         self.cave_neighborhood(region)
             .iter()
             .filter(|system| {
-                const CAVE_SAMPLE_MARGIN_METERS: f64 = 4.0;
+                const CAVE_SAMPLE_MARGIN_METERS: f64 = CaveInfluence::REACH_METERS;
                 position.x >= system.bounds.min.x - CAVE_SAMPLE_MARGIN_METERS
                     && position.x <= system.bounds.max.x + CAVE_SAMPLE_MARGIN_METERS
                     && position.y >= system.bounds.min.y - CAVE_SAMPLE_MARGIN_METERS
@@ -455,6 +479,7 @@ impl GeneratedWorldTerrain {
                     && position.z <= system.bounds.max.z + CAVE_SAMPLE_MARGIN_METERS
             })
             .map(|system| system.influence_at(position))
+            .filter(|influence| influence.is_within_reach())
             .max_by(|left, right| {
                 left.void_density
                     .total_cmp(&right.void_density)
@@ -2137,7 +2162,7 @@ impl ChunkStreamer {
                 ));
             }
         } else {
-            let dominant = travel_direction[0].abs().max(travel_direction[1].abs());
+            let dominant = magnitude;
             let x_step: i64 = if travel_direction[0].abs() >= dominant * 0.5 {
                 if travel_direction[0].is_sign_negative() {
                     -1
@@ -2577,6 +2602,55 @@ mod tests {
                 > 0.0,
             "the generated entrance must open through the composed surface"
         );
+    }
+
+    #[test]
+    fn cave_bounding_boxes_do_not_clamp_distant_terrain_density() {
+        let world = WorldIdentity::new(0x5eed, CAVE_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let system = generated_cave_system(&terrain);
+        // A column inside the system's bounding box but well clear of every
+        // passage must report its true depth below the composed surface, not
+        // the subtraction field's saturated floor.
+        let steps = 16;
+        let (x, z) = (0..=steps)
+            .flat_map(|row| (0..=steps).map(move |column| (row, column)))
+            .map(|(row, column)| {
+                let fraction = |index: i32, min: f64, max: f64| {
+                    min + ((max - min) * f64::from(index) / f64::from(steps))
+                };
+                (
+                    fraction(column, system.bounds.min.x, system.bounds.max.x),
+                    fraction(row, system.bounds.min.z, system.bounds.max.z),
+                )
+            })
+            .max_by(|&(left_x, left_z), &(right_x, right_z)| {
+                system
+                    .horizontal_distance_at(left_x, left_z)
+                    .total_cmp(&system.horizontal_distance_at(right_x, right_z))
+            })
+            .expect("the bounding box has sample positions");
+        let surface = terrain.surface_height(x, z).expect("composed surface");
+        // Stay inside the system's vertical bounds so the sample still reaches
+        // the cave-composition path this test is guarding.
+        let probe_y = (surface - 40.0).clamp(system.bounds.min.y, system.bounds.max.y);
+        let probe = WorldPosition::new(x, probe_y, z);
+
+        assert!(
+            system.horizontal_distance_at(x, z) > CaveInfluence::REACH_METERS,
+            "the probe must sit outside every passage footprint"
+        );
+        assert!(
+            surface - probe_y > CaveInfluence::REACH_METERS,
+            "the probe must sit deeper than the saturated cave reach"
+        );
+        let sample = terrain.sample(probe);
+        assert!(
+            sample.density < -CaveInfluence::REACH_METERS,
+            "density {} was clamped to the cave reach floor",
+            sample.density
+        );
+        assert!((sample.density - (probe.y - surface)).abs() < 1.0e-9);
     }
 
     #[test]

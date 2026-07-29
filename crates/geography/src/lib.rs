@@ -733,6 +733,9 @@ fn identify_basins(
     parents: &[Option<usize>],
 ) -> Option<Vec<DrainageBasin>> {
     let mut assigned = vec![false; cells.len()];
+    // Reused across basins and cleared per component, so basin count no longer
+    // multiplies a full-grid allocation.
+    let mut in_component = vec![false; cells.len()];
     let mut basins = Vec::new();
     for start in 0..cells.len() {
         if assigned[start] || !cells[start].is_depression() {
@@ -756,7 +759,6 @@ fn identify_basins(
             }
         }
 
-        let mut in_component = vec![false; cells.len()];
         for &slot in &component {
             in_component[slot] = true;
         }
@@ -779,6 +781,7 @@ fn identify_basins(
             .generation_key(world, DOMAIN_DRAINAGE_BASIN);
         for &slot in &component {
             cells[slot].basin = Some(id);
+            in_component[slot] = false;
         }
         basins.push(DrainageBasin {
             id,

@@ -116,7 +116,7 @@ impl ChunkIndex {
         CellIndex::new(self.x, self.z, 0).generation_key(world, DOMAIN_TERRAIN_CHUNK)
     }
 
-    /// Squared Chebyshev distance, matching square streaming neighborhoods.
+    /// Chebyshev distance in chunks, matching square streaming neighborhoods.
     pub fn chebyshev_distance(self, other: Self) -> u64 {
         self.x.abs_diff(other.x).max(self.z.abs_diff(other.z))
     }
