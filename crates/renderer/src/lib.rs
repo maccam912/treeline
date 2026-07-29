@@ -50,18 +50,20 @@ pub fn terrain_tier(distance_meters: f64) -> TerrainRenderTier {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct TerrainVertex {
-    position: [f32; 3],
+    position_high: [f32; 3],
     normal: [f32; 3],
     color: [f32; 4],
     snow_coverage: f32,
+    position_low: [f32; 3],
 }
 
 impl TerrainVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x4,
         3 => Float32,
+        4 => Float32x3,
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -70,6 +72,61 @@ impl TerrainVertex {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRIBUTES,
         }
+    }
+}
+
+fn terrain_vertex(
+    position: [f64; 3],
+    normal: [f32; 3],
+    color: [f32; 4],
+    snow_coverage: f32,
+) -> TerrainVertex {
+    let (position_high, position_low) = split_position(position);
+    TerrainVertex {
+        position_high,
+        normal,
+        color,
+        snow_coverage,
+        position_low,
+    }
+}
+
+fn local_vertex(
+    position: Vec3,
+    normal: Vec3,
+    color: [f32; 4],
+    snow_coverage: f32,
+) -> TerrainVertex {
+    terrain_vertex(
+        position.as_dvec3().to_array(),
+        normal.to_array(),
+        color,
+        snow_coverage,
+    )
+}
+
+fn split_position(position: [f64; 3]) -> ([f32; 3], [f32; 3]) {
+    let split = position.map(split_f64);
+    (
+        [split[0][0], split[1][0], split[2][0]],
+        [split[0][1], split[1][1], split[2][1]],
+    )
+}
+
+fn split_f64(value: f64) -> [f32; 2] {
+    let high = f64_as_f32(value);
+    [high, f64_as_f32(value - f64::from(high))]
+}
+
+fn translate_local_vertices(vertices: &mut [TerrainVertex], origin: [f64; 3]) {
+    for vertex in vertices {
+        let local: [f64; 3] = std::array::from_fn(|axis| {
+            f64::from(vertex.position_high[axis]) + f64::from(vertex.position_low[axis])
+        });
+        let (position_high, position_low) =
+            split_position(std::array::from_fn(|axis| origin[axis] + local[axis]));
+        vertex.position_high = position_high;
+        vertex.position_low = position_low;
     }
 }
 
@@ -96,12 +153,9 @@ impl SnowDepthGrid {
             };
         };
         let ([min_x, min_z], [max_x, max_z]) = remaining.iter().fold(
-            (
-                [f64::from(first[0]), f64::from(first[2])],
-                [f64::from(first[0]), f64::from(first[2])],
-            ),
+            ([first[0], first[2]], [first[0], first[2]]),
             |(min, max), position| {
-                let point = [f64::from(position[0]), f64::from(position[2])];
+                let point = [position[0], position[2]];
                 (
                     [min[0].min(point[0]), min[1].min(point[1])],
                     [max[0].max(point[0]), max[1].max(point[1])],
@@ -128,9 +182,9 @@ impl SnowDepthGrid {
         }
     }
 
-    fn coverage_at(self, position: [f32; 3]) -> f64 {
-        let (cell_x, blend_x) = snow_grid_axis(f64::from(position[0]), self.min_x, self.span_x);
-        let (cell_z, blend_z) = snow_grid_axis(f64::from(position[2]), self.min_z, self.span_z);
+    fn coverage_at(self, position: [f64; 3]) -> f64 {
+        let (cell_x, blend_x) = snow_grid_axis(position[0], self.min_x, self.span_x);
+        let (cell_z, blend_z) = snow_grid_axis(position[2], self.min_z, self.span_z);
         let low = cell_z * SNOW_GRID_SAMPLES_PER_EDGE + cell_x;
         let bottom = lerp_f64(self.samples[low], self.samples[low + 1], blend_x);
         let top = lerp_f64(
@@ -163,13 +217,17 @@ fn lerp_f64(start: f64, end: f64, amount: f64) -> f64 {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct CameraUniform {
     view_projection: [[f32; 4]; 4],
+    render_origin_high: [f32; 4],
+    render_origin_low: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct TerrainCutoutUniform {
-    min_xz: [f32; 2],
-    max_xz: [f32; 2],
+    min_high: [f32; 2],
+    min_low: [f32; 2],
+    max_high: [f32; 2],
+    max_low: [f32; 2],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -210,6 +268,8 @@ impl TerrainBindings {
     fn new(device: &wgpu::Device) -> Self {
         let camera_uniform = CameraUniform {
             view_projection: [[0.0; 4]; 4],
+            render_origin_high: [0.0; 4],
+            render_origin_low: [0.0; 4],
         };
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform"),
@@ -217,8 +277,10 @@ impl TerrainBindings {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let no_cutout = TerrainCutoutUniform {
-            min_xz: [0.0; 2],
-            max_xz: [0.0; 2],
+            min_high: [0.0; 2],
+            min_low: [0.0; 2],
+            max_high: [0.0; 2],
+            max_low: [0.0; 2],
         };
         let far_cutout_buffer = cutout_buffer(
             device,
@@ -235,8 +297,8 @@ impl TerrainBindings {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera bind group layout"),
             entries: &[
-                uniform_layout_entry(0, wgpu::ShaderStages::VERTEX),
-                uniform_layout_entry(1, wgpu::ShaderStages::FRAGMENT),
+                uniform_layout_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                uniform_layout_entry(1, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
             ],
         });
         let far_bind_group = terrain_bind_group(
@@ -407,15 +469,16 @@ impl TerrainRenderer {
             .iter()
             .zip(&mesh.normals)
             .enumerate()
-            .map(|(index, (&position, &normal))| TerrainVertex {
-                position,
-                normal,
-                color: mesh
-                    .colors
-                    .get(index)
-                    .copied()
-                    .unwrap_or([1.0, 1.0, 1.0, 0.0]),
-                snow_coverage: 0.0,
+            .map(|(index, (&position, &normal))| {
+                terrain_vertex(
+                    position,
+                    normal,
+                    mesh.colors
+                        .get(index)
+                        .copied()
+                        .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+                    0.0,
+                )
             })
             .collect::<Vec<_>>();
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -460,15 +523,16 @@ impl TerrainRenderer {
             .iter()
             .zip(&mesh.normals)
             .enumerate()
-            .map(|(index, (&position, &normal))| TerrainVertex {
-                position,
-                normal,
-                color: mesh
-                    .colors
-                    .get(index)
-                    .copied()
-                    .unwrap_or([1.0, 1.0, 1.0, 0.0]),
-                snow_coverage: f64_as_f32(snow_depth.coverage_at(position)),
+            .map(|(index, (&position, &normal))| {
+                terrain_vertex(
+                    position,
+                    normal,
+                    mesh.colors
+                        .get(index)
+                        .copied()
+                        .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+                    f64_as_f32(snow_depth.coverage_at(position)),
+                )
             })
             .collect::<Vec<_>>();
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -605,20 +669,49 @@ impl TerrainRenderer {
         self.depth = DepthTarget::new(device, width, height);
     }
 
-    pub fn update_camera(&self, queue: &wgpu::Queue, view_projection: [[f32; 4]; 4]) {
+    pub fn update_camera(
+        &self,
+        queue: &wgpu::Queue,
+        view_projection: [[f32; 4]; 4],
+        render_origin: [f64; 3],
+    ) {
+        let (render_origin_high, render_origin_low) = split_position(render_origin);
         queue.write_buffer(
             &self.camera_buffer,
             0,
-            bytemuck::bytes_of(&CameraUniform { view_projection }),
+            bytemuck::bytes_of(&CameraUniform {
+                view_projection,
+                render_origin_high: [
+                    render_origin_high[0],
+                    render_origin_high[1],
+                    render_origin_high[2],
+                    0.0,
+                ],
+                render_origin_low: [
+                    render_origin_low[0],
+                    render_origin_low[1],
+                    render_origin_low[2],
+                    0.0,
+                ],
+            }),
         );
     }
 
     /// Updates the half-open world-space rectangle removed from coarse terrain.
-    pub fn update_far_cutout(&self, queue: &wgpu::Queue, min_xz: [f32; 2], max_xz: [f32; 2]) {
+    pub fn update_far_cutout(&self, queue: &wgpu::Queue, min_xz: [f64; 2], max_xz: [f64; 2]) {
+        let ([min_high_x, min_low_x], [min_high_z, min_low_z]) =
+            (split_f64(min_xz[0]), split_f64(min_xz[1]));
+        let ([max_high_x, max_low_x], [max_high_z, max_low_z]) =
+            (split_f64(max_xz[0]), split_f64(max_xz[1]));
         queue.write_buffer(
             &self.far_cutout_buffer,
             0,
-            bytemuck::bytes_of(&TerrainCutoutUniform { min_xz, max_xz }),
+            bytemuck::bytes_of(&TerrainCutoutUniform {
+                min_high: [min_high_x, min_high_z],
+                min_low: [min_low_x, min_low_z],
+                max_high: [max_high_x, max_high_z],
+                max_low: [max_low_x, max_low_z],
+            }),
         );
     }
 
@@ -682,13 +775,9 @@ fn procedural_tree_geometry(
         let Some(base_y) = surface_height(tree.x, tree.z) else {
             continue;
         };
-        append_tree(
-            &mut vertices,
-            &mut indices,
-            *tree,
-            detail,
-            Vec3::new(f64_as_f32(tree.x), f64_as_f32(base_y), f64_as_f32(tree.z)),
-        )?;
+        let first_vertex = vertices.len();
+        append_tree(&mut vertices, &mut indices, *tree, detail, Vec3::ZERO)?;
+        translate_local_vertices(&mut vertices[first_vertex..], [tree.x, base_y, tree.z]);
     }
     Ok((vertices, indices))
 }
@@ -703,7 +792,9 @@ fn procedural_rock_geometry(
         let Some(surface_y) = surface_height(rock.x, rock.z) else {
             continue;
         };
-        append_surface_rock(&mut vertices, &mut indices, *rock, f64_as_f32(surface_y))?;
+        let first_vertex = vertices.len();
+        append_surface_rock(&mut vertices, &mut indices, *rock)?;
+        translate_local_vertices(&mut vertices[first_vertex..], [rock.x, surface_y, rock.z]);
     }
     Ok((vertices, indices))
 }
@@ -718,16 +809,9 @@ fn procedural_ground_vegetation_geometry(
         let Some(surface_y) = surface_height(plant.x, plant.z) else {
             continue;
         };
-        append_ground_plant(
-            &mut vertices,
-            &mut indices,
-            *plant,
-            Vec3::new(
-                f64_as_f32(plant.x),
-                f64_as_f32(surface_y) + 0.015,
-                f64_as_f32(plant.z),
-            ),
-        )?;
+        let first_vertex = vertices.len();
+        append_ground_plant(&mut vertices, &mut indices, *plant, Vec3::Y * 0.015)?;
+        translate_local_vertices(&mut vertices[first_vertex..], [plant.x, surface_y, plant.z]);
     }
     Ok((vertices, indices))
 }
@@ -941,12 +1025,7 @@ fn append_leaf_blade(
         (end + (tangent * width * 0.12), normal),
         (end - (tangent * width * 0.12), normal),
     ] {
-        vertices.push(TerrainVertex {
-            position: position.to_array(),
-            normal: normal.to_array(),
-            color,
-            snow_coverage: 0.0,
-        });
+        vertices.push(local_vertex(position, normal, color, 0.0));
     }
     indices.extend_from_slice(&[
         base_index,
@@ -1007,7 +1086,6 @@ fn append_surface_rock(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     rock: SurfaceRock,
-    surface_y: f32,
 ) -> Result<(), RendererError> {
     const SIDES: usize = 8;
     const RINGS: [(f32, f32); 3] = [(-0.62, 0.76), (-0.04, 1.0), (0.52, 0.70)];
@@ -1017,11 +1095,7 @@ fn append_surface_rock(
         f64_as_f32(rock.radii_meters[1]),
         f64_as_f32(rock.radii_meters[2]),
     );
-    let center = Vec3::new(
-        f64_as_f32(rock.x),
-        surface_y + (radii.y * (1.0 - f64_as_f32(rock.embedded_fraction))),
-        f64_as_f32(rock.z),
-    );
+    let center = Vec3::Y * (radii.y * (1.0 - f64_as_f32(rock.embedded_fraction)));
     let yaw = Quat::from_rotation_y(f64_as_f32(rock.rotation_turns) * std::f32::consts::TAU);
     let tilt_axis = Vec3::new(
         f64_as_f32(rock.tilt_direction[1]),
@@ -1126,12 +1200,12 @@ fn push_rock_vertex(
         local.z / f64_as_f32(rock.radii_meters[2]),
     )
     .normalize_or_zero();
-    vertices.push(TerrainVertex {
-        position: (center + (rotation * local)).to_array(),
-        normal: (rotation * normalized).to_array(),
-        color: rock_color(rock, ordinal),
-        snow_coverage: 0.0,
-    });
+    vertices.push(local_vertex(
+        center + (rotation * local),
+        rotation * normalized,
+        rock_color(rock, ordinal),
+        0.0,
+    ));
 }
 
 fn rock_irregularity(rock: SurfaceRock, ring: usize, side: usize) -> f32 {
@@ -1527,12 +1601,7 @@ fn append_tapered_cylinder(
             let angle = usize_as_f32(side) / usize_as_f32(spec.sides) * std::f32::consts::TAU;
             let radial = (tangent * libm::cosf(angle)) + (bitangent * libm::sinf(angle));
             let position = center + (radial * radius);
-            vertices.push(TerrainVertex {
-                position: position.to_array(),
-                normal: radial.to_array(),
-                color: spec.color,
-                snow_coverage: 0.0,
-            });
+            vertices.push(local_vertex(position, radial, spec.color, 0.0));
         }
     }
     for side in 0..spec.sides {
@@ -1573,27 +1642,17 @@ fn append_conical_crown(
     for side in 0..sides {
         let angle = usize_as_f32(side) / usize_as_f32(sides) * std::f32::consts::TAU;
         let radial = (tangent * libm::cosf(angle)) + (bitangent * libm::sinf(angle));
-        vertices.push(TerrainVertex {
-            position: (base + (radial * radius)).to_array(),
-            normal: (radial + (axis * 0.35)).normalize_or_zero().to_array(),
+        vertices.push(local_vertex(
+            base + (radial * radius),
+            (radial + (axis * 0.35)).normalize_or_zero(),
             color,
-            snow_coverage: 0.0,
-        });
+            0.0,
+        ));
     }
-    vertices.push(TerrainVertex {
-        position: apex.to_array(),
-        normal: axis.to_array(),
-        color,
-        snow_coverage: 0.0,
-    });
+    vertices.push(local_vertex(apex, axis, color, 0.0));
     let apex_index =
         base_index + u32::try_from(sides).map_err(|_| RendererError::TooManyIndices)?;
-    vertices.push(TerrainVertex {
-        position: base.to_array(),
-        normal: (-axis).to_array(),
-        color,
-        snow_coverage: 0.0,
-    });
+    vertices.push(local_vertex(base, -axis, color, 0.0));
     let base_center_index = apex_index + 1;
     for side in 0..sides {
         let next = (side + 1) % sides;
@@ -1624,12 +1683,12 @@ fn append_octahedral_crown(
         -Vec3::Y * radius.y,
     ];
     for offset in offsets {
-        vertices.push(TerrainVertex {
-            position: (center + offset).to_array(),
-            normal: offset.normalize_or_zero().to_array(),
+        vertices.push(local_vertex(
+            center + offset,
+            offset.normalize_or_zero(),
             color,
-            snow_coverage: 0.0,
-        });
+            0.0,
+        ));
     }
     for triangle in [
         [0, 2, 1],
@@ -1696,6 +1755,24 @@ impl DepthTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_low_positions_preserve_submeter_camera_offsets_after_distant_warps() {
+        let origin = [5_000_000.0, 800.0, -5_000_000.0];
+        let position = [5_000_000.125, 799.9375, -4_999_999.875];
+        let (origin_high, origin_low) = split_position(origin);
+        let (position_high, position_low) = split_position(position);
+        let relative: [f32; 3] = std::array::from_fn(|axis| {
+            (position_high[axis] - origin_high[axis]) + (position_low[axis] - origin_low[axis])
+        });
+
+        assert!(
+            relative
+                .into_iter()
+                .zip([0.125, -0.0625, 0.125])
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
+    }
 
     #[test]
     fn distant_mountains_do_not_require_voxel_interiors() {
@@ -1767,7 +1844,8 @@ mod tests {
                 .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
         );
         assert!(vertices.iter().all(|vertex| {
-            vertex.position.into_iter().all(f32::is_finite)
+            vertex.position_high.into_iter().all(f32::is_finite)
+                && vertex.position_low.into_iter().all(f32::is_finite)
                 && vertex.normal.into_iter().all(f32::is_finite)
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
@@ -1838,7 +1916,8 @@ mod tests {
                 .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
         );
         assert!(vertices.iter().all(|vertex| {
-            vertex.position.into_iter().all(f32::is_finite)
+            vertex.position_high.into_iter().all(f32::is_finite)
+                && vertex.position_low.into_iter().all(f32::is_finite)
                 && vertex.normal.into_iter().all(f32::is_finite)
                 && vertex.color[..3]
                     .iter()
@@ -1870,7 +1949,8 @@ mod tests {
                 .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
         );
         assert!(vertices.iter().all(|vertex| {
-            vertex.position.into_iter().all(f32::is_finite)
+            vertex.position_high.into_iter().all(f32::is_finite)
+                && vertex.position_low.into_iter().all(f32::is_finite)
                 && vertex.normal.into_iter().all(f32::is_finite)
                 && vertex.color[..3]
                     .iter()
@@ -1889,9 +1969,8 @@ mod tests {
     fn assert_front_facing_geometry(vertices: &[TerrainVertex], indices: &[u32]) {
         for (triangle_index, triangle) in indices.chunks_exact(3).enumerate() {
             let positions = [triangle[0], triangle[1], triangle[2]].map(|index| {
-                Vec3::from_array(
-                    vertices[usize::try_from(index).expect("test index fits usize")].position,
-                )
+                let vertex = vertices[usize::try_from(index).expect("test index fits usize")];
+                Vec3::from_array(vertex.position_high) + Vec3::from_array(vertex.position_low)
             });
             let geometric_normal = (positions[1] - positions[0]).cross(positions[2] - positions[0]);
             if geometric_normal.length_squared() <= f32::EPSILON {

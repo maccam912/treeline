@@ -14,7 +14,9 @@ use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
 /// Renderer-neutral indexed triangle mesh.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mesh {
-    pub positions: Vec<[f32; 3]>,
+    /// Absolute world-space positions. These remain double precision until the
+    /// renderer splits them into camera-relative GPU coordinates.
+    pub positions: Vec<[f64; 3]>,
     pub normals: Vec<[f32; 3]>,
     /// Optional RGBA vertex colors. Alpha blends from terrain shading to color.
     pub colors: Vec<[f32; 4]>,
@@ -185,7 +187,7 @@ pub fn surface_grid(
                 f64_as_f32(2.0 * spec.spacing_meters),
                 f64_as_f32(low_z - high_z),
             ]);
-            positions.push([f64_as_f32(world_x), f64_as_f32(height), f64_as_f32(world_z)]);
+            positions.push([world_x, height, world_z]);
             normals.push(normal);
         }
     }
@@ -274,12 +276,7 @@ pub fn marching_cubes(field: &impl DensityField, spec: GridSpec) -> Result<Mesh,
         (count_x, count_y, count_z),
         (spacing, spacing, spacing),
         (1.0, 1.0, 1.0),
-        [
-            f64_as_f32(spec.origin.x),
-            f64_as_f32(spec.origin.y),
-            f64_as_f32(spec.origin.z),
-        ]
-        .into(),
+        [0.0, 0.0, 0.0].into(),
         densities,
         0.0,
     )
@@ -289,7 +286,13 @@ pub fn marching_cubes(field: &impl DensityField, spec: GridSpec) -> Result<Mesh,
     let positions = extracted
         .vertices
         .iter()
-        .map(|vertex| [vertex.posit.x, vertex.posit.y, vertex.posit.z])
+        .map(|vertex| {
+            [
+                spec.origin.x + f64::from(vertex.posit.x),
+                spec.origin.y + f64::from(vertex.posit.y),
+                spec.origin.z + f64::from(vertex.posit.z),
+            ]
+        })
         .collect();
     // mcubes defines its outward normal for positive-inside fields. Treeline's
     // density is negative inside solid, so its result is reversed here.
@@ -372,25 +375,21 @@ pub fn transvoxel_chunk(
     // Transvoxel defines values above the threshold as solid. Negating
     // Treeline's negative-inside field also gives the extractor outward-facing
     // normals without a post-process winding reversal.
-    let density = |x: f32, y: f32, z: f32| {
-        -f64_as_f32(
-            field
-                .sample(WorldPosition::new(f64::from(x), f64::from(y), f64::from(z)))
-                .density,
-        )
-    };
     let mut mesh = Mesh::default();
     for layer in minimum_layer..=maximum_layer {
         let origin_y = ChunkIndex::MIN_Y_METERS + (i64_as_f64(layer) * edge_meters);
-        let block = Block::new(
-            [
-                f64_as_f32(horizontal_origin.x),
-                f64_as_f32(origin_y),
-                f64_as_f32(horizontal_origin.z),
-            ],
-            f64_as_f32(edge_meters),
-            subdivisions,
-        );
+        let density = |x: f32, y: f32, z: f32| {
+            -f64_as_f32(
+                field
+                    .sample(WorldPosition::new(
+                        horizontal_origin.x + f64::from(x),
+                        origin_y + f64::from(y),
+                        horizontal_origin.z + f64::from(z),
+                    ))
+                    .density,
+            )
+        };
+        let block = Block::new([0.0, 0.0, 0.0], f64_as_f32(edge_meters), subdivisions);
         let extracted = extract_from_field(
             &density,
             FieldCaching::CacheNothing,
@@ -400,7 +399,11 @@ pub fn transvoxel_chunk(
             GenericMeshBuilder::new(),
         )
         .build();
-        append_transvoxel_mesh(&mut mesh, extracted)?;
+        append_transvoxel_mesh(
+            &mut mesh,
+            extracted,
+            WorldPosition::new(horizontal_origin.x, origin_y, horizontal_origin.z),
+        )?;
     }
     Ok(mesh)
 }
@@ -441,15 +444,18 @@ fn vertical_layer(height: f64, edge_meters: f64) -> Result<i64, MeshingError> {
 fn append_transvoxel_mesh(
     mesh: &mut Mesh,
     extracted: transvoxel::structs::generic_mesh::Mesh<f32>,
+    world_origin: WorldPosition,
 ) -> Result<(), MeshingError> {
     let vertex_offset =
         u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
-    mesh.positions.extend(
-        extracted
-            .positions
-            .chunks_exact(3)
-            .map(|position| [position[0], position[1], position[2]]),
-    );
+    mesh.positions
+        .extend(extracted.positions.chunks_exact(3).map(|position| {
+            [
+                world_origin.x + f64::from(position[0]),
+                world_origin.y + f64::from(position[1]),
+                world_origin.z + f64::from(position[2]),
+            ]
+        }));
     mesh.normals.extend(
         extracted
             .normals
@@ -538,6 +544,22 @@ mod tests {
     use treeline_terrain::{GroundPlane, Material, RollingHills};
 
     #[test]
+    fn far_world_surface_meshes_keep_submeter_vertex_spacing() {
+        let field = GroundPlane {
+            surface_height: 725.25,
+            material: Material::Soil,
+        };
+        let mesh = surface_grid(
+            &field,
+            SurfaceGridSpec::new(5_000_000.0, -5_000_000.0, [2, 1], 0.125),
+        )
+        .expect("valid far-world surface grid");
+
+        assert!((mesh.positions[1][0] - mesh.positions[0][0] - 0.125).abs() < f64::EPSILON);
+        assert!((mesh.positions[3][2] - mesh.positions[0][2] - 0.125).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn malformed_triangle_indices_are_rejected() {
         let mesh = Mesh {
             positions: vec![[0.0; 3]],
@@ -565,7 +587,7 @@ mod tests {
         assert!(
             mesh.positions
                 .iter()
-                .all(|position| (position[1] - 0.25).abs() < f32::EPSILON)
+                .all(|position| (position[1] - 0.25).abs() < f64::EPSILON)
         );
         assert!(mesh.normals.iter().all(|normal| normal[1] > 0.99));
         assert_front_facing(&mesh);
@@ -670,7 +692,7 @@ mod tests {
         let field = RollingHills::new(WorldIdentity::new(0x5eed, 1, 0));
         let left = marching_cubes_chunk(&field, ChunkIndex::new(0, 0)).expect("valid chunk");
         let right = marching_cubes_chunk(&field, ChunkIndex::new(1, 0)).expect("valid chunk");
-        let boundary_x = f64_as_f32(ChunkIndex::edge_meters());
+        let boundary_x = ChunkIndex::edge_meters();
 
         let left_boundary = boundary_vertices(&left, boundary_x);
         let right_boundary = boundary_vertices(&right, boundary_x);
@@ -684,7 +706,7 @@ mod tests {
         let mesh = marching_cubes_chunk(&field, ChunkIndex::new(-3, 2)).expect("valid chunk");
         assert_eq!(
             mesh_fingerprint(&mesh),
-            18_115_744_180_443_714_067,
+            8_730_301_632_951_197_344,
             "changing this value changes generated terrain chunks"
         );
     }
@@ -751,7 +773,7 @@ mod tests {
             TransitionFaces::none().with(ChunkFace::LowX),
         )
         .expect("transition chunk");
-        let boundary_x = f64_as_f32(coarse_chunk.sample_origin().x);
+        let boundary_x = coarse_chunk.sample_origin().x;
 
         let fine_boundary = boundary_positions(&fine, boundary_x);
         let coarse_boundary = boundary_positions(&coarse, boundary_x);
@@ -773,7 +795,7 @@ mod tests {
         );
     }
 
-    fn boundary_vertices(mesh: &Mesh, boundary_x: f32) -> BTreeSet<(u32, u32)> {
+    fn boundary_vertices(mesh: &Mesh, boundary_x: f64) -> BTreeSet<(u64, u64)> {
         mesh.positions
             .iter()
             .filter(|position| (position[0] - boundary_x).abs() < 0.000_1)
@@ -781,25 +803,25 @@ mod tests {
             .collect()
     }
 
-    fn surface_boundary_vertices(mesh: &Mesh, boundary_x: f32) -> BTreeSet<[u32; 6]> {
+    fn surface_boundary_vertices(mesh: &Mesh, boundary_x: f64) -> BTreeSet<[u64; 6]> {
         mesh.positions
             .iter()
             .zip(&mesh.normals)
-            .filter(|(position, _)| (position[0] - boundary_x).abs() < f32::EPSILON)
+            .filter(|(position, _)| (position[0] - boundary_x).abs() < f64::EPSILON)
             .map(|(position, normal)| {
                 [
                     position[0].to_bits(),
                     position[1].to_bits(),
                     position[2].to_bits(),
-                    normal[0].to_bits(),
-                    normal[1].to_bits(),
-                    normal[2].to_bits(),
+                    u64::from(normal[0].to_bits()),
+                    u64::from(normal[1].to_bits()),
+                    u64::from(normal[2].to_bits()),
                 ]
             })
             .collect()
     }
 
-    fn boundary_positions(mesh: &Mesh, boundary_x: f32) -> Vec<[f32; 2]> {
+    fn boundary_positions(mesh: &Mesh, boundary_x: f64) -> Vec<[f64; 2]> {
         mesh.positions
             .iter()
             .filter(|position| (position[0] - boundary_x).abs() < 0.000_1)
@@ -807,9 +829,9 @@ mod tests {
             .collect()
     }
 
-    fn boundaries_match(left: &[[f32; 2]], right: &[[f32; 2]]) -> bool {
-        const EPSILON: f32 = 0.000_1;
-        let contains = |haystack: &[[f32; 2]], needle: &[f32; 2]| {
+    fn boundaries_match(left: &[[f64; 2]], right: &[[f64; 2]]) -> bool {
+        const EPSILON: f64 = 0.000_1;
+        let contains = |haystack: &[[f64; 2]], needle: &[f64; 2]| {
             haystack.iter().any(|candidate| {
                 (candidate[0] - needle[0]).abs() < EPSILON
                     && (candidate[1] - needle[1]).abs() < EPSILON
@@ -842,8 +864,8 @@ mod tests {
             if geometric_normal
                 .iter()
                 .map(|value| value * value)
-                .sum::<f32>()
-                <= f32::EPSILON
+                .sum::<f64>()
+                <= f64::EPSILON
             {
                 continue;
             }
@@ -854,8 +876,8 @@ mod tests {
             let agreement = geometric_normal
                 .into_iter()
                 .zip(vertex_normal)
-                .map(|(geometric, vertex)| geometric * vertex)
-                .sum::<f32>();
+                .map(|(geometric, vertex)| geometric * f64::from(vertex))
+                .sum::<f64>();
             assert!(
                 agreement > 0.0,
                 "triangle {triangle_index} faces away from its vertex normals"
@@ -874,7 +896,7 @@ mod tests {
             mesh.positions
                 .iter()
                 .flatten()
-                .map(|component| u64::from(component.to_bits())),
+                .map(|component| component.to_bits()),
         );
         words.extend(
             mesh.normals
