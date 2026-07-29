@@ -13,7 +13,9 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, closure::Closure};
 
-use glam::{Mat4, Vec2, Vec3};
+#[cfg(test)]
+use glam::DVec2;
+use glam::{DVec3, Mat4, Vec2, Vec3};
 #[cfg(not(target_arch = "wasm32"))]
 use treeline_coordinates::stable_hash;
 use treeline_coordinates::{WorldIdentity, WorldPosition};
@@ -44,13 +46,13 @@ use winit::window::{Window, WindowId};
 
 const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
 const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
-const EYE_HEIGHT: f32 = 1.72;
-const WALK_SPEED: f32 = 8.0;
-const SPRINT_SPEED: f32 = 16.0;
-const START_X: f32 = 78_481.44;
-const START_Z: f32 = -50_125.98;
-const START_YAW: f32 = 0.164;
-const START_PITCH: f32 = -0.08;
+const EYE_HEIGHT: f64 = 1.72;
+const WALK_SPEED: f64 = 8.0;
+const SPRINT_SPEED: f64 = 16.0;
+const START_X: f64 = 78_481.44;
+const START_Z: f64 = -50_125.98;
+const START_YAW: f64 = 0.164;
+const START_PITCH: f64 = -0.08;
 const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
 const RANDOM_WARP_MAX_DISTANCE_METERS: f64 = 5_000_000.0;
 const RANDOM_WARP_COORDINATE_LIMIT_METERS: f64 = 5_000_000.0;
@@ -359,7 +361,11 @@ impl Game {
         let spawn_preparation_started = Instant::now();
         let start_y = surface_height(&terrain, START_X, START_Z) + EYE_HEIGHT;
         let spawn_preparation_time = spawn_preparation_started.elapsed();
-        let camera = Camera::new(Vec3::new(START_X, start_y, START_Z), START_YAW, START_PITCH);
+        let camera = Camera::new(
+            DVec3::new(START_X, start_y, START_Z),
+            START_YAW,
+            START_PITCH,
+        );
         schedule_terrain(
             chunk_streamer,
             far_terrain_streamer,
@@ -374,6 +380,7 @@ impl Game {
         renderer.update_camera(
             &queue,
             camera.view_projection(surface_config.width, surface_config.height),
+            camera.position.to_array(),
         );
         let initial_generation = start_initial_progress(
             &window,
@@ -482,11 +489,9 @@ impl Game {
         let previous = self.camera.world_position();
         let [destination_x, destination_z] = random_warp_site(&self.terrain, previous)
             .ok_or_else(|| std::io::Error::other("could not find dry ground for a random warp"))?;
-        let destination_x = f64_as_f32(destination_x);
-        let destination_z = f64_as_f32(destination_z);
         let destination_y =
             surface_height(&self.terrain, destination_x, destination_z) + EYE_HEIGHT;
-        let destination = Vec3::new(destination_x, destination_y, destination_z);
+        let destination = DVec3::new(destination_x, destination_y, destination_z);
         let preparation_time = started.elapsed();
 
         for (_, spec) in std::mem::take(&mut self.requested_chunks) {
@@ -549,7 +554,7 @@ impl Game {
         }
 
         let now = Instant::now();
-        let delta_seconds = (now - self.previous_frame).as_secs_f32().min(0.1);
+        let delta_seconds = (now - self.previous_frame).as_secs_f64().min(0.1);
         self.previous_frame = now;
         self.camera
             .look_with_stick(self.input.look_axis(), delta_seconds);
@@ -588,6 +593,7 @@ impl Game {
             &self.queue,
             self.camera
                 .view_projection(self.surface_config.width, self.surface_config.height),
+            self.camera.position.to_array(),
         );
         if let Ok((cutout_min, cutout_max)) =
             far_cutout_bounds(self.chunk_streamer, self.camera.world_position())
@@ -849,13 +855,13 @@ impl InitialGenerationProgress {
 }
 
 struct Camera {
-    position: Vec3,
-    yaw: f32,
-    pitch: f32,
+    position: DVec3,
+    yaw: f64,
+    pitch: f64,
 }
 
 impl Camera {
-    const fn new(position: Vec3, yaw: f32, pitch: f32) -> Self {
+    const fn new(position: DVec3, yaw: f64, pitch: f64) -> Self {
         Self {
             position,
             yaw,
@@ -863,30 +869,31 @@ impl Camera {
         }
     }
 
-    fn direction(&self) -> Vec3 {
-        let pitch_cosine = libm::cosf(self.pitch);
-        Vec3::new(
-            libm::cosf(self.yaw) * pitch_cosine,
-            libm::sinf(self.pitch),
-            libm::sinf(self.yaw) * pitch_cosine,
+    fn direction(&self) -> DVec3 {
+        let pitch_cosine = libm::cos(self.pitch);
+        DVec3::new(
+            libm::cos(self.yaw) * pitch_cosine,
+            libm::sin(self.pitch),
+            libm::sin(self.yaw) * pitch_cosine,
         )
         .normalize()
     }
 
     fn look(&mut self, delta_x: f64, delta_y: f64) {
-        const SENSITIVITY: f32 = 0.002;
-        self.yaw += f64_as_f32(delta_x) * SENSITIVITY;
-        self.pitch = (self.pitch - (f64_as_f32(delta_y) * SENSITIVITY)).clamp(-1.5, 1.5);
+        const SENSITIVITY: f64 = 0.002;
+        self.yaw += delta_x * SENSITIVITY;
+        self.pitch = (self.pitch - (delta_y * SENSITIVITY)).clamp(-1.5, 1.5);
     }
 
-    fn look_with_stick(&mut self, axis: Vec2, delta_seconds: f32) {
-        const HORIZONTAL_SPEED: f32 = 2.4;
-        const VERTICAL_SPEED: f32 = 1.8;
-        self.yaw += axis.x * HORIZONTAL_SPEED * delta_seconds;
-        self.pitch = (self.pitch + (axis.y * VERTICAL_SPEED * delta_seconds)).clamp(-1.5, 1.5);
+    fn look_with_stick(&mut self, axis: Vec2, delta_seconds: f64) {
+        const HORIZONTAL_SPEED: f64 = 2.4;
+        const VERTICAL_SPEED: f64 = 1.8;
+        self.yaw += f64::from(axis.x) * HORIZONTAL_SPEED * delta_seconds;
+        self.pitch =
+            (self.pitch + (f64::from(axis.y) * VERTICAL_SPEED * delta_seconds)).clamp(-1.5, 1.5);
     }
 
-    fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f32) {
+    fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f64) {
         let movement = self.movement(input);
         if movement.length_squared() > 0.0 {
             let speed = if input.sprint() {
@@ -900,28 +907,24 @@ impl Camera {
         self.position.y = surface_height(terrain, self.position.x, self.position.z) + EYE_HEIGHT;
     }
 
-    fn movement(&self, input: &InputState) -> Vec3 {
-        let forward = Vec3::new(libm::cosf(self.yaw), 0.0, libm::sinf(self.yaw));
-        let right = forward.cross(Vec3::Y);
-        (forward * input.forward_axis()) + (right * input.right_axis())
+    fn movement(&self, input: &InputState) -> DVec3 {
+        let forward = DVec3::new(libm::cos(self.yaw), 0.0, libm::sin(self.yaw));
+        let right = forward.cross(DVec3::Y);
+        (forward * f64::from(input.forward_axis())) + (right * f64::from(input.right_axis()))
     }
 
     fn travel_direction(&self, input: &InputState) -> [f64; 2] {
         let movement = self.movement(input);
-        if movement.length_squared() <= f32::EPSILON {
+        if movement.length_squared() <= f64::EPSILON {
             [0.0, 0.0]
         } else {
             let direction = movement.normalize();
-            [f64::from(direction.x), f64::from(direction.z)]
+            [direction.x, direction.z]
         }
     }
 
     fn world_position(&self) -> WorldPosition {
-        WorldPosition::new(
-            f64::from(self.position.x),
-            f64::from(self.position.y),
-            f64::from(self.position.z),
-        )
+        WorldPosition::new(self.position.x, self.position.y, self.position.z)
     }
 
     fn view_projection(&self, width: u32, height: u32) -> [[f32; 4]; 4] {
@@ -929,7 +932,7 @@ impl Camera {
         // An infinite reverse-Z projection keeps the 32-bit depth buffer useful
         // for both nearby vegetation and the long-distance terrain horizon.
         let projection = Mat4::perspective_infinite_reverse_rh(60.0_f32.to_radians(), aspect, 0.1);
-        let view = Mat4::look_to_rh(self.position, self.direction(), Vec3::Y);
+        let view = Mat4::look_to_rh(Vec3::ZERO, self.direction().as_vec3(), Vec3::Y);
         (projection * view).to_cols_array_2d()
     }
 }
@@ -1171,11 +1174,10 @@ fn random_unit_interval() -> f64 {
     ((mixed >> 11) as f64) / 9_007_199_254_740_991.0
 }
 
-fn surface_height(terrain: &impl SurfaceField, x: f32, z: f32) -> f32 {
-    let height = terrain
-        .surface_height(f64::from(x), f64::from(z))
-        .expect("finite player positions must have terrain");
-    f64_as_f32(height)
+fn surface_height(terrain: &impl SurfaceField, x: f64, z: f64) -> f64 {
+    terrain
+        .surface_height(x, z)
+        .expect("finite player positions must have terrain")
 }
 
 fn chunk_streaming_config() -> ChunkStreamingConfig {
@@ -1197,17 +1199,14 @@ fn far_terrain_streaming_config() -> FarTerrainStreamingConfig {
 fn far_cutout_bounds(
     chunk_streamer: ChunkStreamer,
     player_position: WorldPosition,
-) -> Result<([f32; 2], [f32; 2]), Box<dyn Error>> {
+) -> Result<([f64; 2], [f64; 2]), Box<dyn Error>> {
     let center = ChunkIndex::containing(player_position)
         .ok_or_else(|| std::io::Error::other("player position is outside chunk index range"))?;
     let cutout = NearTerrainCutout::around(center, chunk_streamer.config().load_radius())
         .ok_or_else(|| std::io::Error::other("near terrain cutout is outside chunk index range"))?;
     let min = cutout.min.sample_origin();
     let max = cutout.max_exclusive.sample_origin();
-    Ok((
-        [f64_as_f32(min.x), f64_as_f32(min.z)],
-        [f64_as_f32(max.x), f64_as_f32(max.z)],
-    ))
+    Ok(([min.x, min.z], [max.x, max.z]))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1687,6 +1686,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn walking_keeps_submeter_steps_at_the_random_warp_limit() {
+        let terrain = GeneratedWorldTerrain::new(WORLD);
+        let mut input = InputState::default();
+        input.set_key(KeyCode::KeyW, true);
+        let mut camera = Camera::new(DVec3::new(5_000_000.0, 0.0, -5_000_000.0), 0.0, 0.0);
+        let previous_x = camera.position.x;
+
+        camera.walk(&input, &terrain, 1.0 / 60.0);
+
+        let expected_step = WALK_SPEED / 60.0;
+        assert!((camera.position.x - previous_x - expected_step).abs() < 1.0e-9);
+    }
+
+    #[test]
     fn initial_generation_reports_horizon_far_and_near_separately() {
         let near_spec = ChunkMeshSpec {
             chunk: ChunkIndex::new(0, 0),
@@ -1739,12 +1752,12 @@ mod tests {
         assert!(
             min.into_iter()
                 .zip([-128.0, -128.0])
-                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+                .all(|(actual, expected)| (actual - expected).abs() < f64::EPSILON)
         );
         assert!(
             max.into_iter()
                 .zip([160.0, 160.0])
-                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+                .all(|(actual, expected)| (actual - expected).abs() < f64::EPSILON)
         );
     }
 
@@ -1776,9 +1789,18 @@ mod tests {
         let center = random_warp_destination(0.5, 0.5);
         let maximum = random_warp_destination(2.0, 2.0);
 
-        assert_eq!(minimum, [-RANDOM_WARP_COORDINATE_LIMIT_METERS; 2]);
-        assert_eq!(center, [0.0; 2]);
-        assert_eq!(maximum, [RANDOM_WARP_COORDINATE_LIMIT_METERS; 2]);
+        for (actual, expected) in [
+            (minimum, [-RANDOM_WARP_COORDINATE_LIMIT_METERS; 2]),
+            (center, [0.0; 2]),
+            (maximum, [RANDOM_WARP_COORDINATE_LIMIT_METERS; 2]),
+        ] {
+            assert!(
+                actual
+                    .into_iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (actual - expected).abs() < f64::EPSILON)
+            );
+        }
     }
 
     #[test]
@@ -1868,17 +1890,11 @@ mod tests {
     fn showcase_spawn_faces_a_boulder_and_retains_trees_and_ground_cover() {
         let terrain = GeneratedWorldTerrain::new(WORLD);
         assert!(
-            terrain
-                .lake_surface_at(f64::from(START_X), f64::from(START_Z))
-                .is_none(),
+            terrain.lake_surface_at(START_X, START_Z).is_none(),
             "spawn should begin on dry ground"
         );
-        let center = ChunkIndex::containing(WorldPosition::new(
-            f64::from(START_X),
-            0.0,
-            f64::from(START_Z),
-        ))
-        .expect("spawn chunk");
+        let center =
+            ChunkIndex::containing(WorldPosition::new(START_X, 0.0, START_Z)).expect("spawn chunk");
         let cutout = NearTerrainCutout::around(center, chunk_streaming_config().load_radius())
             .expect("spawn residency");
         let min = cutout.min.sample_origin();
@@ -1892,10 +1908,7 @@ mod tests {
             .collect::<Vec<_>>();
         let crown_clearance = retained
             .iter()
-            .map(|tree| {
-                (tree.x - f64::from(START_X)).hypot(tree.z - f64::from(START_Z))
-                    - tree.crown_radius_meters
-            })
+            .map(|tree| (tree.x - START_X).hypot(tree.z - START_Z) - tree.crown_radius_meters)
             .fold(f64::INFINITY, f64::min);
 
         assert!(retained.len() >= 20, "spawn should retain a visible stand");
@@ -1915,7 +1928,7 @@ mod tests {
         let rock_clearance = rocks
             .iter()
             .map(|rock| {
-                (rock.x - f64::from(START_X)).hypot(rock.z - f64::from(START_Z))
+                (rock.x - START_X).hypot(rock.z - START_Z)
                     - rock.radii_meters[0].max(rock.radii_meters[2])
             })
             .fold(f64::INFINITY, f64::min);
@@ -1924,18 +1937,15 @@ mod tests {
             "spawn should not begin inside a surface rock"
         );
 
-        let camera_direction = Camera::new(Vec3::ZERO, START_YAW, START_PITCH).direction();
+        let camera_direction = Camera::new(DVec3::ZERO, START_YAW, START_PITCH).direction();
         assert!(
             rocks.iter().any(|rock| {
-                let offset = Vec2::new(
-                    f64_as_f32(rock.x - f64::from(START_X)),
-                    f64_as_f32(rock.z - f64::from(START_Z)),
-                );
+                let offset = DVec2::new(rock.x - START_X, rock.z - START_Z);
                 offset.length() <= 25.0
                     && rock.radii_meters[1] >= 1.0
                     && offset
                         .normalize_or_zero()
-                        .dot(Vec2::new(camera_direction.x, camera_direction.z))
+                        .dot(DVec2::new(camera_direction.x, camera_direction.z))
                         >= 0.98
             }),
             "the initial camera should face a nearby boulder-sized rock"

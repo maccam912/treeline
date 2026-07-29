@@ -456,10 +456,10 @@ fn lake_surface_grid(
             let vertex_offset =
                 u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
             mesh.positions.extend([
-                [f64_as_f32(min_x), f64_as_f32(surface), f64_as_f32(min_z)],
-                [f64_as_f32(min_x), f64_as_f32(surface), f64_as_f32(max_z)],
-                [f64_as_f32(max_x), f64_as_f32(surface), f64_as_f32(min_z)],
-                [f64_as_f32(max_x), f64_as_f32(surface), f64_as_f32(max_z)],
+                [min_x, surface, min_z],
+                [min_x, surface, max_z],
+                [max_x, surface, min_z],
+                [max_x, surface, max_z],
             ]);
             mesh.normals.extend([[0.0, 1.0, 0.0]; 4]);
             mesh.colors.extend([WATER_COLOR; 4]);
@@ -668,7 +668,7 @@ fn generated_terrain_mesh_bytes(generated: &GeneratedTerrainMesh) -> usize {
     fn mesh_bytes(mesh: &Mesh) -> usize {
         mesh.positions
             .len()
-            .saturating_mul(size_of::<[f32; 3]>())
+            .saturating_mul(size_of::<[f64; 3]>())
             .saturating_add(mesh.normals.len().saturating_mul(size_of::<[f32; 3]>()))
             .saturating_add(mesh.colors.len().saturating_mul(size_of::<[f32; 4]>()))
             .saturating_add(mesh.indices.len().saturating_mul(size_of::<u32>()))
@@ -1623,11 +1623,6 @@ fn usize_as_f64(value: usize) -> f64 {
     value as f64
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn f64_as_f32(value: f64) -> f32 {
-    value as f32
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -2013,7 +2008,7 @@ mod tests {
                 .all(|color| color[3].to_bits() == 1.0_f32.to_bits())
         );
         assert!(first.positions.iter().all(|position| {
-            (f64::from(position[1]) - water.lake.surface_elevation_meters - 0.05).abs() < 0.001
+            (position[1] - water.lake.surface_elevation_meters - 0.05).abs() < 0.001
         }));
     }
 

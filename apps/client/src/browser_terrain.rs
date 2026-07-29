@@ -367,7 +367,7 @@ fn decode_mesh_result(data: &Array) -> Result<Mesh, treeline_mesher::MeshingErro
     if error != 0 {
         return Err(decode_meshing_error(error));
     }
-    let positions = js_sys::Float32Array::new(&data.get(1)).to_vec();
+    let positions = js_sys::Float64Array::new(&data.get(1)).to_vec();
     let normals = js_sys::Float32Array::new(&data.get(2)).to_vec();
     let colors = js_sys::Float32Array::new(&data.get(3)).to_vec();
     Ok(Mesh {
@@ -409,7 +409,7 @@ fn generated_mesh_bytes(generated: &GeneratedTerrainMesh) -> usize {
     fn mesh_bytes(mesh: &Mesh) -> usize {
         mesh.positions
             .len()
-            .saturating_mul(size_of::<[f32; 3]>())
+            .saturating_mul(size_of::<[f64; 3]>())
             .saturating_add(mesh.normals.len().saturating_mul(size_of::<[f32; 3]>()))
             .saturating_add(mesh.colors.len().saturating_mul(size_of::<[f32; 4]>()))
             .saturating_add(mesh.indices.len().saturating_mul(size_of::<u32>()))

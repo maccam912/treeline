@@ -8,7 +8,7 @@ fn main() {
 
 #[cfg(target_arch = "wasm32")]
 mod worker {
-    use js_sys::{Array, Float32Array, Uint32Array};
+    use js_sys::{Array, Float32Array, Float64Array, Uint32Array};
     use treeline_coordinates::WorldIdentity;
     use treeline_mesher::{Mesh, MeshingError};
     use treeline_voxel::{ChunkIndex, LodLevel, TransitionFaces};
@@ -102,7 +102,7 @@ mod worker {
         };
         encoded.push(&"0".into());
 
-        let positions = Float32Array::from(flatten_vec3(&mesh.positions).as_slice());
+        let positions = Float64Array::from(flatten_dvec3(&mesh.positions).as_slice());
         let normals = Float32Array::from(flatten_vec3(&mesh.normals).as_slice());
         let colors = Float32Array::from(flatten_vec4(&mesh.colors).as_slice());
         let indices = Uint32Array::from(mesh.indices.as_slice());
@@ -122,6 +122,10 @@ mod worker {
     }
 
     fn flatten_vec3(values: &[[f32; 3]]) -> Vec<f32> {
+        values.iter().flatten().copied().collect()
+    }
+
+    fn flatten_dvec3(values: &[[f64; 3]]) -> Vec<f64> {
         values.iter().flatten().copied().collect()
     }
 

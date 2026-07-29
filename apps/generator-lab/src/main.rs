@@ -501,8 +501,6 @@ impl GeneratorLab {
             f64::from(self.surface_config.width) / f64::from(self.surface_config.height.max(1));
         let half_height = f64_as_f32(self.span_meters * 0.5);
         let half_width = f64_as_f32(self.span_meters * aspect * 0.5);
-        let center_x = f64_as_f32(self.center[0]);
-        let center_z = f64_as_f32(self.center[1]);
         let projection = Mat4::orthographic_rh(
             -half_width,
             half_width,
@@ -511,13 +509,12 @@ impl GeneratorLab {
             0.1,
             4_000.0,
         );
-        let view = Mat4::look_to_rh(
-            Vec3::new(center_x, 2_000.0, center_z),
-            Vec3::NEG_Y,
-            Vec3::NEG_Z,
+        let view = Mat4::look_to_rh(Vec3::Y * 2_000.0, Vec3::NEG_Y, Vec3::NEG_Z);
+        self.renderer.update_camera(
+            &self.queue,
+            (projection * view).to_cols_array_2d(),
+            [self.center[0], 0.0, self.center[1]],
         );
-        self.renderer
-            .update_camera(&self.queue, (projection * view).to_cols_array_2d());
     }
 
     fn cursor_world_position(&self) -> [f64; 2] {
@@ -1140,7 +1137,7 @@ fn generate_drainage_mesh(
         let world_z = origin_z + (usize_as_f64(z) * spacing);
         for x in 0..count_x {
             let world_x = origin_x + (usize_as_f64(x) * spacing);
-            positions.push([f64_as_f32(world_x), 0.0, f64_as_f32(world_z)]);
+            positions.push([world_x, 0.0, world_z]);
             normals.push([0.0, 1.0, 0.0]);
             if mode.is_environment_layer() {
                 colors.push(

@@ -1,23 +1,28 @@
 struct Camera {
     view_projection: mat4x4<f32>,
+    render_origin_high: vec4<f32>,
+    render_origin_low: vec4<f32>,
 };
 
 @group(0) @binding(0)
 var<uniform> camera: Camera;
 
 struct TerrainCutout {
-    min_xz: vec2<f32>,
-    max_xz: vec2<f32>,
+    min_high: vec2<f32>,
+    min_low: vec2<f32>,
+    max_high: vec2<f32>,
+    max_low: vec2<f32>,
 };
 
 @group(0) @binding(1)
 var<uniform> terrain_cutout: TerrainCutout;
 
 struct VertexInput {
-    @location(0) position: vec3<f32>,
+    @location(0) position_high: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) snow_coverage: f32,
+    @location(4) position_low: vec3<f32>,
 };
 
 struct VertexOutput {
@@ -27,6 +32,7 @@ struct VertexOutput {
     @location(2) color: vec4<f32>,
     @location(3) world_position: vec3<f32>,
     @location(4) snow_coverage: f32,
+    @location(5) render_position: vec3<f32>,
 };
 
 @vertex
@@ -36,12 +42,17 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let horizontal_normal = length(normal.xz);
     let terrain_slope = horizontal_normal / max(normal.y, 0.000001);
     let slope_retention = 1.0 - smoothstep(0.32, 1.15, terrain_slope);
-    output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
+    let render_position =
+        (input.position_high - camera.render_origin_high.xyz)
+        + (input.position_low - camera.render_origin_low.xyz);
+    let world_position = input.position_high + input.position_low;
+    output.clip_position = camera.view_projection * vec4<f32>(render_position, 1.0);
     output.world_normal = normal;
-    output.elevation = input.position.y;
+    output.elevation = world_position.y;
     output.color = input.color;
-    output.world_position = input.position;
+    output.world_position = world_position;
     output.snow_coverage = input.snow_coverage * slope_retention;
+    output.render_position = render_position;
     return output;
 }
 
@@ -65,11 +76,17 @@ fn value_noise(position: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let cutout_min =
+        (terrain_cutout.min_high - camera.render_origin_high.xz)
+        + (terrain_cutout.min_low - camera.render_origin_low.xz);
+    let cutout_max =
+        (terrain_cutout.max_high - camera.render_origin_high.xz)
+        + (terrain_cutout.max_low - camera.render_origin_low.xz);
     if (
-        input.world_position.x >= terrain_cutout.min_xz.x
-        && input.world_position.x < terrain_cutout.max_xz.x
-        && input.world_position.z >= terrain_cutout.min_xz.y
-        && input.world_position.z < terrain_cutout.max_xz.y
+        input.render_position.x >= cutout_min.x
+        && input.render_position.x < cutout_max.x
+        && input.render_position.z >= cutout_min.y
+        && input.render_position.z < cutout_max.y
     ) {
         discard;
     }
