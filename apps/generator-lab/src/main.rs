@@ -7,8 +7,8 @@ use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_ecology::{
     ForestDistribution, ForestSample, GroundPlant, GroundVegetation, GroundVegetationBounds,
     GroundVegetationDistribution, GroundVegetationSample, ProceduralTree, ProceduralTrees,
-    RockBounds, Soil, SoilSample, SurfaceRock, SurfaceRockDistribution, SurfaceRockSample,
-    SurfaceRocks, TreeBounds,
+    ReefSample, RockBounds, Soil, SoilSample, SurfaceRock, SurfaceRockDistribution,
+    SurfaceRockSample, SurfaceRocks, TreeBounds, WetlandSample,
 };
 use treeline_geography::{
     Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
@@ -48,10 +48,12 @@ enum ViewMode {
     Forest,
     GroundVegetation,
     SurfaceRocks,
+    Wetlands,
+    Reefs,
 }
 
 impl ViewMode {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 15] = [
         Self::Terrain,
         Self::Watersheds,
         Self::FlowAccumulation,
@@ -65,6 +67,8 @@ impl ViewMode {
         Self::Forest,
         Self::GroundVegetation,
         Self::SurfaceRocks,
+        Self::Wetlands,
+        Self::Reefs,
     ];
 
     const fn label(self) -> &'static str {
@@ -82,6 +86,8 @@ impl ViewMode {
             Self::Forest => "forest distribution",
             Self::GroundVegetation => "ground vegetation",
             Self::SurfaceRocks => "surface rocks",
+            Self::Wetlands => "wetlands",
+            Self::Reefs => "reefs",
         }
     }
 
@@ -100,6 +106,8 @@ impl ViewMode {
             Self::Forest => "F",
             Self::GroundVegetation => "V",
             Self::SurfaceRocks => "G",
+            Self::Wetlands => "M",
+            Self::Reefs => "Q",
         }
     }
 
@@ -113,7 +121,30 @@ impl ViewMode {
                 | Self::Forest
                 | Self::GroundVegetation
                 | Self::SurfaceRocks
+                | Self::Wetlands
+                | Self::Reefs
         )
+    }
+}
+
+fn view_mode_for_key(code: KeyCode) -> Option<ViewMode> {
+    match code {
+        KeyCode::Digit1 => Some(ViewMode::Terrain),
+        KeyCode::Digit2 => Some(ViewMode::Watersheds),
+        KeyCode::Digit3 => Some(ViewMode::FlowAccumulation),
+        KeyCode::Digit4 => Some(ViewMode::Rivers),
+        KeyCode::Digit5 => Some(ViewMode::Lakes),
+        KeyCode::Digit6 => Some(ViewMode::Erosion),
+        KeyCode::Digit7 => Some(ViewMode::Temperature),
+        KeyCode::Digit8 => Some(ViewMode::Precipitation),
+        KeyCode::Digit9 => Some(ViewMode::Snowpack),
+        KeyCode::Digit0 => Some(ViewMode::Soil),
+        KeyCode::KeyF => Some(ViewMode::Forest),
+        KeyCode::KeyV => Some(ViewMode::GroundVegetation),
+        KeyCode::KeyG => Some(ViewMode::SurfaceRocks),
+        KeyCode::KeyM => Some(ViewMode::Wetlands),
+        KeyCode::KeyQ => Some(ViewMode::Reefs),
+        _ => None,
     }
 }
 
@@ -369,96 +400,49 @@ impl GeneratorLab {
 
     fn handle_key(&mut self, code: KeyCode) {
         let step = self.span_meters * 0.15;
-        let changed = match code {
-            KeyCode::KeyW | KeyCode::ArrowUp => {
-                self.center[1] -= step;
-                true
+        let changed = if let Some(mode) = view_mode_for_key(code) {
+            self.mode = mode;
+            true
+        } else {
+            match code {
+                KeyCode::KeyW | KeyCode::ArrowUp => {
+                    self.center[1] -= step;
+                    true
+                }
+                KeyCode::KeyS | KeyCode::ArrowDown => {
+                    self.center[1] += step;
+                    true
+                }
+                KeyCode::KeyA | KeyCode::ArrowLeft => {
+                    self.center[0] -= step;
+                    true
+                }
+                KeyCode::KeyD | KeyCode::ArrowRight => {
+                    self.center[0] += step;
+                    true
+                }
+                KeyCode::Equal | KeyCode::NumpadAdd => {
+                    self.span_meters *= 0.7;
+                    true
+                }
+                KeyCode::Minus | KeyCode::NumpadSubtract => {
+                    self.span_meters *= 1.4;
+                    true
+                }
+                KeyCode::KeyR => {
+                    self.seed = self.seed.wrapping_add(1);
+                    true
+                }
+                KeyCode::KeyT => {
+                    self.center = self.cursor_world_position();
+                    true
+                }
+                KeyCode::KeyC => {
+                    self.season = self.season.next();
+                    true
+                }
+                _ => false,
             }
-            KeyCode::KeyS | KeyCode::ArrowDown => {
-                self.center[1] += step;
-                true
-            }
-            KeyCode::KeyA | KeyCode::ArrowLeft => {
-                self.center[0] -= step;
-                true
-            }
-            KeyCode::KeyD | KeyCode::ArrowRight => {
-                self.center[0] += step;
-                true
-            }
-            KeyCode::Equal | KeyCode::NumpadAdd => {
-                self.span_meters *= 0.7;
-                true
-            }
-            KeyCode::Minus | KeyCode::NumpadSubtract => {
-                self.span_meters *= 1.4;
-                true
-            }
-            KeyCode::KeyR => {
-                self.seed = self.seed.wrapping_add(1);
-                true
-            }
-            KeyCode::KeyT => {
-                self.center = self.cursor_world_position();
-                true
-            }
-            KeyCode::KeyC => {
-                self.season = self.season.next();
-                true
-            }
-            KeyCode::Digit1 => {
-                self.mode = ViewMode::Terrain;
-                true
-            }
-            KeyCode::Digit2 => {
-                self.mode = ViewMode::Watersheds;
-                true
-            }
-            KeyCode::Digit3 => {
-                self.mode = ViewMode::FlowAccumulation;
-                true
-            }
-            KeyCode::Digit4 => {
-                self.mode = ViewMode::Rivers;
-                true
-            }
-            KeyCode::Digit5 => {
-                self.mode = ViewMode::Lakes;
-                true
-            }
-            KeyCode::Digit6 => {
-                self.mode = ViewMode::Erosion;
-                true
-            }
-            KeyCode::Digit7 => {
-                self.mode = ViewMode::Temperature;
-                true
-            }
-            KeyCode::Digit8 => {
-                self.mode = ViewMode::Precipitation;
-                true
-            }
-            KeyCode::Digit9 => {
-                self.mode = ViewMode::Snowpack;
-                true
-            }
-            KeyCode::Digit0 => {
-                self.mode = ViewMode::Soil;
-                true
-            }
-            KeyCode::KeyF => {
-                self.mode = ViewMode::Forest;
-                true
-            }
-            KeyCode::KeyV => {
-                self.mode = ViewMode::GroundVegetation;
-                true
-            }
-            KeyCode::KeyG => {
-                self.mode = ViewMode::SurfaceRocks;
-                true
-            }
-            _ => false,
         };
         self.span_meters = self.span_meters.clamp(MIN_SPAN_METERS, MAX_SPAN_METERS);
         if changed && let Err(error) = self.regenerate() {
@@ -561,14 +545,12 @@ impl GeneratorLab {
         let Some(rock_distribution) = SurfaceRockDistribution::new(world).sample(x, z) else {
             return;
         };
-        let Some(tree_inspection) = inspect_nearby_trees(world, x, z) else {
+        let Some((wetland, reef)) = inspect_phase_three(&generated_terrain, x, z) else {
             return;
         };
-        let Some(ground_vegetation_inspection) = inspect_nearby_ground_vegetation(world, x, z)
+        let Some((tree_inspection, ground_vegetation_inspection, rock_inspection)) =
+            inspect_nearby_surface_features(world, x, z)
         else {
-            return;
-        };
-        let Some(rock_inspection) = inspect_nearby_rocks(world, x, z) else {
             return;
         };
         let watershed = WatershedRegionIndex::containing(x, z)
@@ -595,7 +577,7 @@ impl GeneratorLab {
         let ground_vegetation_summary = ground_vegetation_inspection.summary();
         let rock_summary = rock_inspection.summary();
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ground {:.0}% {}, {} nearby, nearest {ground_vegetation_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ground {:.0}% {}, {} nearby, nearest {ground_vegetation_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | wetland {:.0}% {} | reef {:.0}% {} | ridge +{:.0} m | {drainage_summary}",
             self.season.label(),
             seasonal_climate.mean_temperature_celsius,
             seasonal_climate.snowpack_water_equivalent_millimeters,
@@ -612,10 +594,14 @@ impl GeneratorLab {
             ground_vegetation_inspection.count,
             rock_distribution.density_per_hectare,
             rock_inspection.count,
+            wetland.coverage_fraction * 100.0,
+            wetland.dominant_kind().label(),
+            reef.coverage_fraction * 100.0,
+            reef.dominant_form().label(),
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nground-vegetation distribution: {ground_vegetation:#?}\nsurface-rock distribution: {rock_distribution:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby ground-vegetation count: {}\nnearest ground plant: {nearest_ground_plant:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nground-vegetation distribution: {ground_vegetation:#?}\nsurface-rock distribution: {rock_distribution:#?}\nwetland: {wetland:#?}\nreef: {reef:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby ground-vegetation count: {}\nnearest ground plant: {nearest_ground_plant:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
             tree_inspection.count,
             ground_vegetation_inspection.count,
             rock_inspection.count,
@@ -761,6 +747,30 @@ impl GeneratorLab {
 struct NearbyTreeInspection {
     count: usize,
     nearest: Option<ProceduralTree>,
+}
+
+fn inspect_phase_three(
+    terrain: &GeneratedWorldTerrain,
+    x: f64,
+    z: f64,
+) -> Option<(WetlandSample, ReefSample)> {
+    Some((terrain.wetland_at(x, z)?, terrain.reef_at(x, z)?))
+}
+
+fn inspect_nearby_surface_features(
+    world: WorldIdentity,
+    x: f64,
+    z: f64,
+) -> Option<(
+    NearbyTreeInspection,
+    NearbyGroundVegetationInspection,
+    NearbyRockInspection,
+)> {
+    Some((
+        inspect_nearby_trees(world, x, z)?,
+        inspect_nearby_ground_vegetation(world, x, z)?,
+        inspect_nearby_rocks(world, x, z)?,
+    ))
 }
 
 impl NearbyTreeInspection {
@@ -1048,7 +1058,7 @@ fn draw_keyboard_help(ui: &mut egui::Ui) {
     ui.heading("Keyboard & mouse");
     for help in [
         "1–9  Select view layer",
-        "0 / F / V / G  Soil / forest / ground vegetation / surface rocks",
+        "0 / F / V / G / M / Q  Soil / forest / ground / rocks / wetlands / reefs",
         "C  Advance climate season",
         "WASD / arrows  Pan",
         "+ / − / wheel  Zoom",
@@ -1120,13 +1130,14 @@ fn generate_drainage_mesh(
     let origin_x = center[0] - (usize_as_f64(columns) * spacing * 0.5);
     let origin_z = center[1] - (span_meters * 0.5);
     let world = WorldIdentity::new(seed, GENERATOR_VERSION, 0);
-    let generated_terrain = (mode == ViewMode::Erosion).then(|| GeneratedWorldTerrain::new(world));
+    let generated_terrain = GeneratedWorldTerrain::new(world);
     let environment_layers = EnvironmentLayers {
         climate: Climate::new(world),
         soil: Soil::new(world),
         forest: ForestDistribution::new(world),
         ground_vegetation: GroundVegetationDistribution::new(world),
         surface_rocks: SurfaceRockDistribution::new(world),
+        generated_terrain: generated_terrain.clone(),
     };
     let mut regions = BTreeMap::new();
     let mut river_networks = BTreeMap::new();
@@ -1141,7 +1152,7 @@ fn generate_drainage_mesh(
             normals.push([0.0, 1.0, 0.0]);
             if mode.is_environment_layer() {
                 colors.push(
-                    environment_layer_color(mode, season, world_x, world_z, environment_layers)
+                    environment_layer_color(mode, season, world_x, world_z, &environment_layers)
                         .ok_or_else(|| {
                             std::io::Error::other("failed to sample environment layer")
                         })?,
@@ -1164,9 +1175,9 @@ fn generate_drainage_mesh(
             let river = river_networks[&region_index]
                 .segment_from(cell.index)
                 .copied();
-            let erosion = generated_terrain
-                .as_ref()
-                .and_then(|terrain| terrain.erosion_at(world_x, world_z));
+            let erosion = (mode == ViewMode::Erosion)
+                .then(|| generated_terrain.erosion_at(world_x, world_z))
+                .flatten();
             colors.push(drainage_color(world, *cell, river, erosion.as_ref(), mode));
         }
     }
@@ -1197,13 +1208,14 @@ fn generate_drainage_mesh(
     })
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct EnvironmentLayers {
     climate: Climate,
     soil: Soil,
     forest: ForestDistribution,
     ground_vegetation: GroundVegetationDistribution,
     surface_rocks: SurfaceRockDistribution,
+    generated_terrain: GeneratedWorldTerrain,
 }
 
 fn environment_layer_color(
@@ -1211,7 +1223,7 @@ fn environment_layer_color(
     season: Season,
     x: f64,
     z: f64,
-    layers: EnvironmentLayers,
+    layers: &EnvironmentLayers,
 ) -> Option<[f32; 4]> {
     match mode {
         ViewMode::Temperature | ViewMode::Precipitation | ViewMode::Snowpack => {
@@ -1227,6 +1239,8 @@ fn environment_layer_color(
             layers.ground_vegetation.sample(x, z)?,
         )),
         ViewMode::SurfaceRocks => Some(surface_rock_color(layers.surface_rocks.sample(x, z)?)),
+        ViewMode::Wetlands => Some(wetland_color(layers.generated_terrain.wetland_at(x, z)?)),
+        ViewMode::Reefs => Some(reef_color(layers.generated_terrain.reef_at(x, z)?)),
         ViewMode::Terrain
         | ViewMode::Watersheds
         | ViewMode::FlowAccumulation
@@ -1334,7 +1348,9 @@ fn drainage_color(
         | ViewMode::Soil
         | ViewMode::Forest
         | ViewMode::GroundVegetation
-        | ViewMode::SurfaceRocks => [1.0, 0.0, 1.0, 1.0],
+        | ViewMode::SurfaceRocks
+        | ViewMode::Wetlands
+        | ViewMode::Reefs => [1.0, 0.0, 1.0, 1.0],
     }
 }
 
@@ -1471,6 +1487,52 @@ fn surface_rock_color(rocks: SurfaceRockSample) -> [f32; 4] {
     ]
 }
 
+fn wetland_color(wetland: WetlandSample) -> [f32; 4] {
+    let composition = wetland.composition;
+    let marsh = f64_as_f32(composition.emergent_marsh_fraction);
+    let swamp = f64_as_f32(composition.forested_swamp_fraction);
+    let peat = f64_as_f32(composition.peatland_fraction);
+    let seasonal = f64_as_f32(composition.seasonal_wetland_fraction);
+    let salt = f64_as_f32(composition.salt_marsh_fraction);
+    let cover = f64_as_f32(wetland.coverage_fraction);
+    let open_water = f64_as_f32(wetland.open_water_fraction);
+    let wetland_tint = [
+        (marsh * 0.32) + (swamp * 0.10) + (peat * 0.26) + (seasonal * 0.44) + (salt * 0.38),
+        (marsh * 0.48) + (swamp * 0.28) + (peat * 0.30) + (seasonal * 0.42) + (salt * 0.52),
+        (marsh * 0.13) + (swamp * 0.12) + (peat * 0.17) + (seasonal * 0.15) + (salt * 0.28),
+    ];
+    let dry = [0.49, 0.43, 0.27];
+    [
+        lerp_f32(dry[0], wetland_tint[0], cover) * (1.0 - (open_water * 0.22)),
+        lerp_f32(dry[1], wetland_tint[1], cover),
+        lerp_f32(dry[2], wetland_tint[2] + 0.14, open_water.max(cover * 0.25)),
+        1.0,
+    ]
+}
+
+fn reef_color(reef: ReefSample) -> [f32; 4] {
+    if reef.water_depth_meters <= 0.0 {
+        return [0.52, 0.47, 0.31, 1.0];
+    }
+    let cover = f64_as_f32(reef.coverage_fraction);
+    let channel = f64_as_f32(reef.channel_fraction);
+    let lagoon = f64_as_f32(reef.lagoon_fraction);
+    let depth = f64_as_f32((reef.water_depth_meters / 58.0).clamp(0.0, 1.0));
+    let open_ocean = [
+        lerp_f32(0.06, 0.01, depth),
+        lerp_f32(0.48, 0.16, depth),
+        lerp_f32(0.66, 0.42, depth),
+    ];
+    let framework = [0.76, 0.50 + (lagoon * 0.14), 0.25 + (lagoon * 0.18)];
+    let visible_cover = cover * (1.0 - (channel * 0.78));
+    [
+        lerp_f32(open_ocean[0], framework[0], visible_cover),
+        lerp_f32(open_ocean[1], framework[1], visible_cover),
+        lerp_f32(open_ocean[2], framework[2], visible_cover),
+        1.0,
+    ]
+}
+
 fn hash_channel(key: u64, shift: u32) -> f32 {
     let byte = u8::try_from((key >> shift) & 0xff).expect("masked hash lane fits u8");
     0.25 + (f32::from(byte) / 255.0 * 0.65)
@@ -1503,7 +1565,7 @@ mod tests {
     fn forest_view_generates_varied_opaque_coverage_colors() {
         let mesh = generate_mesh(
             0x5eed,
-            [0.0, 0.0],
+            [-80_000.0, -80_000.0],
             64_000.0,
             64,
             64,
@@ -1573,7 +1635,7 @@ mod tests {
     fn ground_vegetation_view_generates_varied_opaque_distribution_colors() {
         let mesh = generate_mesh(
             0x5eed,
-            [0.0, 0.0],
+            [-80_000.0, -80_000.0],
             64_000.0,
             64,
             64,

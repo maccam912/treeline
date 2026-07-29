@@ -2233,7 +2233,7 @@ The world generator is the game.
       trees, wind damage, fallen trees, standing deadwood, and storm breaks are
       deterministic; the client renders their generated trunks, branches, and
       crowns, and Generator Lab inspection explains nearby individuals.
-- [ ] **PARTIAL** — Distant forest LOD. Near terrain renders full procedural
+- [ ] **NEXT** — Distant forest LOD. **PARTIAL:** Near terrain renders full procedural
       trees, the individual-tree ring through five times the near-terrain radius
       also uses full procedural geometry, a simplified individual-tree ring
       continues through ten times the radius, and an outer silhouette ring
@@ -2266,8 +2266,20 @@ The world generator is the game.
       The client renders the representative winter surface and Generator Lab's
       season control updates the terrain view; this does not yet simulate active
       snow deformation or accumulation from live weather.
-- [ ] **NEXT** — Wetlands
-- [ ] Reefs
+- [x] Wetlands. Explicit equilibrium lake/ocean depth and river-floodplain
+      inputs combine with climate, soil, terrain, and forest structure to
+      produce continuous saturation, hydroperiod, flood frequency, open water,
+      peat depth, and salinity. Emergent marsh, forested swamp, peatland,
+      seasonal wetland, and salt-marsh strategies blend without biome IDs.
+      Wetland ground and shallow water receive visible surface treatment, and
+      Generator Lab maps and explains the distribution.
+- [x] Reefs. Shallow-ocean depth, temperature, wave exposure, clarity,
+      substrate, and deterministic currents constrain reef growth. Framework
+      relief grows upward toward favorable light and depth while coherent
+      channel fields interrupt it; coast distance and exposure yield blended
+      fringing, patch, and barrier-like forms with lagoon potential. Sea-level
+      ocean surfaces make reef-bearing coasts visible in the client, and
+      Generator Lab maps and explains the generated structure.
 
 Target:
 
