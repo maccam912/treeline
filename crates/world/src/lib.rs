@@ -13,6 +13,10 @@ use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use treeline_coordinates::{WorldIdentity, WorldPosition};
+use treeline_ecology::{
+    REEF_GENERATOR_VERSION, ReefDistribution, ReefSample, WETLAND_GENERATOR_VERSION,
+    WetlandDistribution, WetlandHydrology, WetlandKind, WetlandSample,
+};
 pub use treeline_geography::Season;
 use treeline_geography::{Climate, DrainageCellIndex, WatershedRegionIndex};
 use treeline_hydrology::{
@@ -32,7 +36,7 @@ pub const LAKE_GENERATOR_VERSION: u32 = 4;
 /// Generator version that first composes macro, meso, and micro erosion.
 pub const EROSION_GENERATOR_VERSION: u32 = 5;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = 13;
+pub const CURRENT_GENERATOR_VERSION: u32 = REEF_GENERATOR_VERSION;
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
 
@@ -57,12 +61,21 @@ pub struct LakeSurfaceSample {
     pub water_depth_meters: f64,
 }
 
+/// Equilibrium sea-level water above generated ocean terrain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OceanSurfaceSample {
+    pub surface_elevation_meters: f64,
+    pub terrain_elevation_meters: f64,
+    pub water_depth_meters: f64,
+}
+
 /// Explainable contributors to the versioned multi-scale erosion surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldErosionSample {
     pub surface: ErosionSurfaceSample,
     pub gully: Option<GullyTerrainInfluence>,
     pub river: Option<RiverTerrainInfluence>,
+    pub reef: Option<ReefSample>,
     pub final_height_meters: f64,
 }
 
@@ -250,6 +263,63 @@ impl GeneratedWorldTerrain {
         })
     }
 
+    /// Returns equilibrium ocean water above terrain below global sea level.
+    pub fn ocean_surface_at(&self, x: f64, z: f64) -> Option<OceanSurfaceSample> {
+        if self.world().generator_version < REEF_GENERATOR_VERSION {
+            return None;
+        }
+        let terrain_elevation_meters = self.shaped_height(x, z)?.height;
+        let water_depth_meters = -terrain_elevation_meters;
+        (water_depth_meters > 0.0).then_some(OceanSurfaceSample {
+            surface_elevation_meters: 0.0,
+            terrain_elevation_meters,
+            water_depth_meters,
+        })
+    }
+
+    /// Samples equilibrium wetland ecology using cached lake and river artifacts.
+    pub fn wetland_at(&self, x: f64, z: f64) -> Option<WetlandSample> {
+        if self.world().generator_version < WETLAND_GENERATOR_VERSION {
+            return None;
+        }
+        let shape = self.shaped_height(x, z)?;
+        let cell = DrainageCellIndex::containing(x, z)?;
+        let lake_depth = self
+            .lake_network(WatershedRegionIndex::containing_cell(cell))
+            .and_then(|network| network.lake_for_cell(cell))
+            .and_then(|lake| lake.water_depth_at(shape.height))
+            .unwrap_or(0.0);
+        let ocean_depth = if self.world().generator_version >= REEF_GENERATOR_VERSION {
+            (-shape.height).max(0.0)
+        } else {
+            0.0
+        };
+        let equilibrium_water_depth_meters = lake_depth.max(ocean_depth);
+        let floodplain_fraction = shape.river.map_or(0.0, |river| {
+            let outside_channel = smoothstep(
+                river.channel_half_width_meters,
+                river.channel_half_width_meters * 2.5,
+                river.distance_meters,
+            );
+            river.blend * outside_channel
+        });
+        let discharge = shape
+            .river
+            .map_or(0.0, |river| river.segment.discharge_cubic_meters_per_second);
+        let hydrology = WetlandHydrology::new(
+            shape.height,
+            equilibrium_water_depth_meters,
+            floodplain_fraction,
+            discharge,
+        )?;
+        WetlandDistribution::new(self.world()).sample(x, z, hydrology)
+    }
+
+    /// Samples environmentally constrained reef growth at one position.
+    pub fn reef_at(&self, x: f64, z: f64) -> Option<ReefSample> {
+        ReefDistribution::new(self.world()).sample(x, z)
+    }
+
     fn lake_network(&self, region: WatershedRegionIndex) -> Option<Arc<LakeNetwork>> {
         let slot = network_slot(&self.lake_networks, region);
         slot.get_or_init(|| LakeNetwork::generate(self.world(), region).map(Arc::new))
@@ -293,12 +363,14 @@ impl GeneratedWorldTerrain {
     /// a surface sample is unavailable, or the combined mesh exceeds index
     /// capacity.
     pub fn render_mesh(&self, spec: TerrainMeshSpec) -> Result<Mesh, MeshingError> {
-        match spec {
+        let mut mesh = match spec {
             TerrainMeshSpec::Near(spec) => {
                 transvoxel_chunk(self, spec.chunk, spec.lod, spec.transition_faces)
             }
             TerrainMeshSpec::Far(spec) => far_terrain_mesh(self, spec),
-        }
+        }?;
+        self.apply_ecosystem_surface_colors(&mut mesh);
+        Ok(mesh)
     }
 
     /// Reports all three erosion scales at a horizontal position.
@@ -311,6 +383,7 @@ impl GeneratedWorldTerrain {
             surface: shape.erosion?,
             gully: shape.gully,
             river: shape.river,
+            reef: shape.reef,
             final_height_meters: shape.height,
         })
     }
@@ -330,17 +403,34 @@ impl GeneratedWorldTerrain {
             base_height + ((channel_bed - base_height) * influence.blend)
         });
         let river = self.river_influence_at(x, z);
-        let height = river.map_or(gully_height, |river| {
+        let hydrological_height = river.map_or(gully_height, |river| {
             let channel_bed = river.centerline_elevation_meters - river.incision_depth_meters;
             let target = gully_height.min(channel_bed);
             gully_height + ((target - gully_height) * river.blend)
         });
+        let reef = ReefDistribution::new(self.world()).sample(x, z);
+        let height = hydrological_height + reef.map_or(0.0, |reef| reef.framework_height_meters);
         Some(TerrainShape {
             height,
             erosion,
             gully,
             river,
+            reef,
         })
+    }
+
+    fn apply_ecosystem_surface_colors(&self, mesh: &mut Mesh) {
+        mesh.colors.clear();
+        mesh.colors.reserve(mesh.positions.len());
+        for position in &mesh.positions {
+            let reef = self.reef_at(position[0], position[2]);
+            let wetland = self.wetland_at(position[0], position[2]);
+            mesh.colors
+                .push(ecosystem_surface_color(reef, wetland).unwrap_or([1.0, 1.0, 1.0, 0.0]));
+        }
+        if mesh.colors.iter().all(|color| color[3] <= f32::EPSILON) {
+            mesh.colors.clear();
+        }
     }
 }
 
@@ -368,12 +458,57 @@ fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
     t * t * (3.0 - (2.0 * t))
 }
 
+fn ecosystem_surface_color(
+    reef: Option<ReefSample>,
+    wetland: Option<WetlandSample>,
+) -> Option<[f32; 4]> {
+    let reef_strength = reef.map_or(0.0, |sample| sample.coverage_fraction);
+    let wetland_strength = wetland.map_or(0.0, |sample| sample.coverage_fraction);
+    if reef_strength <= 0.01 && wetland_strength <= 0.01 {
+        return None;
+    }
+    if reef_strength > wetland_strength {
+        let reef = reef?;
+        let lagoon = f64_as_f32(reef.lagoon_fraction);
+        return Some([
+            0.54 + (lagoon * 0.08),
+            0.38 + (lagoon * 0.18),
+            0.20 + (lagoon * 0.10),
+            f64_as_f32(reef_strength * 0.88),
+        ]);
+    }
+    let wetland = wetland?;
+    let color = match wetland.dominant_kind() {
+        WetlandKind::EmergentMarsh => [0.28, 0.40, 0.12],
+        WetlandKind::ForestedSwamp => [0.12, 0.28, 0.13],
+        WetlandKind::Peatland => [0.29, 0.25, 0.13],
+        WetlandKind::SeasonalWetland => [0.40, 0.39, 0.16],
+        WetlandKind::SaltMarsh => [0.37, 0.47, 0.25],
+    };
+    Some([
+        color[0],
+        color[1],
+        color[2],
+        f64_as_f32(wetland_strength * 0.82),
+    ])
+}
+
+fn blend_color(start: [f32; 4], end: [f32; 4], amount: f32) -> [f32; 4] {
+    std::array::from_fn(|channel| start[channel] + ((end[channel] - start[channel]) * amount))
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn f64_as_f32(value: f64) -> f32 {
+    value as f32
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TerrainShape {
     height: f64,
     erosion: Option<ErosionSurfaceSample>,
     gully: Option<GullyTerrainInfluence>,
     river: Option<RiverTerrainInfluence>,
+    reef: Option<ReefSample>,
 }
 
 impl DensityField for GeneratedWorldTerrain {
@@ -422,7 +557,8 @@ fn lake_surface_grid(
     spec: SurfaceGridSpec,
 ) -> Result<Mesh, MeshingError> {
     const WATER_RENDER_OFFSET_METERS: f64 = 0.05;
-    const WATER_COLOR: [f32; 4] = [0.04, 0.34, 0.58, 1.0];
+    const LAKE_WATER_COLOR: [f32; 4] = [0.04, 0.34, 0.58, 1.0];
+    const OCEAN_WATER_COLOR: [f32; 4] = [0.02, 0.29, 0.52, 1.0];
 
     if spec.cell_counts.contains(&0)
         || !spec.origin_x.is_finite()
@@ -449,10 +585,34 @@ fn lake_surface_grid(
             }
             let center_x = (min_x + max_x) * 0.5;
             let center_z = (min_z + max_z) * 0.5;
-            let Some(water) = terrain.lake_surface_at(center_x, center_z) else {
+            let (surface, color) = if let Some(ocean) = terrain.ocean_surface_at(center_x, center_z)
+            {
+                let reef = terrain.reef_at(center_x, center_z);
+                let reef_cover = reef.map_or(0.0, |sample| sample.coverage_fraction);
+                let color = blend_color(
+                    OCEAN_WATER_COLOR,
+                    [0.08, 0.62, 0.66, 1.0],
+                    f64_as_f32(reef_cover * 0.72),
+                );
+                (
+                    ocean.surface_elevation_meters + WATER_RENDER_OFFSET_METERS,
+                    color,
+                )
+            } else if let Some(water) = terrain.lake_surface_at(center_x, center_z) {
+                let wetland = terrain.wetland_at(center_x, center_z);
+                let wetland_cover = wetland.map_or(0.0, |sample| sample.coverage_fraction);
+                let color = blend_color(
+                    LAKE_WATER_COLOR,
+                    [0.18, 0.40, 0.24, 1.0],
+                    f64_as_f32(wetland_cover * 0.58),
+                );
+                (
+                    water.lake.surface_elevation_meters + WATER_RENDER_OFFSET_METERS,
+                    color,
+                )
+            } else {
                 continue;
             };
-            let surface = water.lake.surface_elevation_meters + WATER_RENDER_OFFSET_METERS;
             let vertex_offset =
                 u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
             mesh.positions.extend([
@@ -462,7 +622,7 @@ fn lake_surface_grid(
                 [max_x, surface, max_z],
             ]);
             mesh.normals.extend([[0.0, 1.0, 0.0]; 4]);
-            mesh.colors.extend([WATER_COLOR; 4]);
+            mesh.colors.extend([color; 4]);
             mesh.indices.extend([
                 vertex_offset,
                 vertex_offset
@@ -1863,6 +2023,132 @@ mod tests {
 
         assert!(terrain.lake_surface_at(-31_000.0, 17_000.0).is_none());
         assert!(terrain.lake_networks.read().expect("cache lock").is_empty());
+    }
+
+    #[test]
+    fn version_fourteen_combines_filled_water_with_wetland_ecology() {
+        let world = WorldIdentity::new(0x5eed, WETLAND_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let (x, z, water) = generated_lake_point(&terrain);
+        let wetland = terrain.wetland_at(x, z).expect("wetland sample");
+
+        assert!(water.water_depth_meters > 0.0);
+        assert!(wetland.open_water_fraction > 0.0);
+        assert!(wetland.surface_saturation_fraction > 0.0);
+        assert!((0.0..=1.0).contains(&wetland.coverage_fraction));
+    }
+
+    #[test]
+    fn generated_river_floodplains_produce_visible_wetland_cover() {
+        let world = WorldIdentity::new(0x5eed, WETLAND_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let network =
+            RiverNetwork::generate(world, WatershedRegionIndex::new(0, 0)).expect("river network");
+        let mut strongest = None;
+        for segment in network.segments().iter().step_by(7) {
+            let center_x = (segment.source.x + segment.mouth.x) * 0.5;
+            let center_z = (segment.source.z + segment.mouth.z) * 0.5;
+            let Some(channel) = segment.terrain_influence(center_x, center_z) else {
+                continue;
+            };
+            let delta_x = segment.mouth.x - segment.source.x;
+            let delta_z = segment.mouth.z - segment.source.z;
+            let length = libm::hypot(delta_x, delta_z);
+            for side in [-1.0, 1.0] {
+                let bank_distance = channel.channel_half_width_meters * 2.2 * side;
+                let x = center_x - (delta_z / length * bank_distance);
+                let z = center_z + (delta_x / length * bank_distance);
+                let Some(wetland) = terrain.wetland_at(x, z) else {
+                    continue;
+                };
+                if strongest.is_none_or(|current: WetlandSample| {
+                    wetland.coverage_fraction > current.coverage_fraction
+                }) {
+                    strongest = Some(wetland);
+                }
+            }
+        }
+        let strongest = strongest.expect("wetland bank sample");
+
+        assert!(strongest.flood_frequency_fraction > 0.0);
+        assert!(
+            strongest.coverage_fraction > 0.05,
+            "river floodplains should create visible wetland cover"
+        );
+    }
+
+    #[test]
+    fn version_fifteen_grows_reef_relief_below_rendered_ocean_water() {
+        const REEF_X: f64 = -600_000.0;
+        const REEF_Z: f64 = -1_700_000.0;
+        let world = WorldIdentity::new(0x5eed, REEF_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let reef = terrain.reef_at(REEF_X, REEF_Z).expect("reef sample");
+        let erosion = terrain
+            .erosion_at(REEF_X, REEF_Z)
+            .expect("reef terrain contributors");
+        let ocean = terrain
+            .ocean_surface_at(REEF_X, REEF_Z)
+            .expect("ocean above reef");
+
+        assert!(reef.coverage_fraction > 0.5);
+        assert!(reef.framework_height_meters > 0.0);
+        assert_eq!(erosion.reef, Some(reef));
+        assert_eq!(
+            ocean.water_depth_meters.to_bits(),
+            (-erosion.final_height_meters).to_bits()
+        );
+        assert!(erosion.final_height_meters < ocean.surface_elevation_meters);
+    }
+
+    #[test]
+    fn pre_ecosystem_versions_do_not_expose_wetlands_reefs_or_ocean() {
+        let terrain = GeneratedWorldTerrain::new(WorldIdentity::new(
+            0x5eed,
+            WETLAND_GENERATOR_VERSION - 1,
+            0,
+        ));
+
+        assert!(terrain.wetland_at(0.0, 0.0).is_none());
+        assert!(terrain.reef_at(0.0, 0.0).is_none());
+        assert!(terrain.ocean_surface_at(0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn ecosystem_sampling_is_independent_of_regional_cache_order() {
+        let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+        let positions = [
+            [-600_000.0, -1_700_000.0],
+            [-129_000.0, -1_000.0],
+            [127_000.0, 127_000.0],
+        ];
+        let forward_terrain = GeneratedWorldTerrain::new(world);
+        let forward = positions.map(|[x, z]| {
+            (
+                forward_terrain.wetland_at(x, z).expect("wetland"),
+                forward_terrain.reef_at(x, z).expect("reef"),
+                forward_terrain
+                    .surface_height(x, z)
+                    .expect("ecosystem-shaped surface")
+                    .to_bits(),
+            )
+        });
+        let reverse_terrain = GeneratedWorldTerrain::new(world);
+        let mut reverse_positions = positions;
+        reverse_positions.reverse();
+        let mut reverse = reverse_positions.map(|[x, z]| {
+            (
+                reverse_terrain.wetland_at(x, z).expect("wetland"),
+                reverse_terrain.reef_at(x, z).expect("reef"),
+                reverse_terrain
+                    .surface_height(x, z)
+                    .expect("ecosystem-shaped surface")
+                    .to_bits(),
+            )
+        });
+        reverse.reverse();
+
+        assert_eq!(forward, reverse);
     }
 
     #[test]

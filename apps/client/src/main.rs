@@ -49,8 +49,8 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f64 = 1.72;
 const WALK_SPEED: f64 = 8.0;
 const SPRINT_SPEED: f64 = 16.0;
-const START_X: f64 = 78_481.44;
-const START_Z: f64 = -50_125.98;
+const START_X: f64 = -80_074.19;
+const START_Z: f64 = -79_986.31;
 const START_YAW: f64 = 0.164;
 const START_PITCH: f64 = -0.08;
 const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
@@ -1520,6 +1520,7 @@ fn ground_vegetation_mesh_for_chunk(
 
 fn surface_feature_has_dry_ground(terrain: &GeneratedWorldTerrain, x: f64, z: f64) -> bool {
     terrain.lake_surface_at(x, z).is_none()
+        && terrain.ocean_surface_at(x, z).is_none()
         && !terrain
             .river_influence_at(x, z)
             .is_some_and(|river| river.distance_meters <= river.channel_half_width_meters)
@@ -1961,7 +1962,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             plants.len() >= 100,
-            "spawn should retain a visibly populated ground layer"
+            "spawn should retain a visibly populated ground layer; found {} plants",
+            plants.len()
         );
     }
 
@@ -1970,17 +1972,32 @@ mod tests {
         let terrain = GeneratedWorldTerrain::new(WORLD);
         let mut channel = None;
         let mut valley = None;
-        for z_index in -64_i32..=64 {
-            for x_index in -64_i32..=64 {
-                let x = f64::from(x_index) * 16.0;
-                let z = f64::from(z_index) * 16.0;
+        for z_index in -16_i32..=16 {
+            for x_index in -16_i32..=16 {
+                let x = f64::from(x_index) * 2_000.0 + 1_000.0;
+                let z = f64::from(z_index) * 2_000.0 + 1_000.0;
                 let Some(river) = terrain.river_influence_at(x, z) else {
                     continue;
                 };
                 if river.distance_meters <= river.channel_half_width_meters {
                     channel.get_or_insert([x, z]);
-                } else if river.blend > 0.24 && terrain.lake_surface_at(x, z).is_none() {
-                    valley.get_or_insert([x, z]);
+                    let segment_x = river.segment.mouth.x - river.segment.source.x;
+                    let segment_z = river.segment.mouth.z - river.segment.source.z;
+                    let length = segment_x.hypot(segment_z);
+                    let perpendicular = DVec2::new(-segment_z / length, segment_x / length);
+                    for side in [-1.0, 1.0] {
+                        let distance = river.channel_half_width_meters * 2.2;
+                        let candidate_x = x + (perpendicular.x * distance * side);
+                        let candidate_z = z + (perpendicular.y * distance * side);
+                        if terrain
+                            .river_influence_at(candidate_x, candidate_z)
+                            .is_some_and(|candidate| candidate.blend > 0.24)
+                            && terrain.lake_surface_at(candidate_x, candidate_z).is_none()
+                            && terrain.ocean_surface_at(candidate_x, candidate_z).is_none()
+                        {
+                            valley.get_or_insert([candidate_x, candidate_z]);
+                        }
+                    }
                 }
             }
         }

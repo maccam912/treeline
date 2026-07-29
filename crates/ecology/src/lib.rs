@@ -1,7 +1,9 @@
 //! Ecosystem primitives built from environmental variables rather than biome IDs.
 
 mod ground_vegetation;
+mod reefs;
 mod rocks;
+mod wetlands;
 
 use std::collections::BTreeMap;
 
@@ -14,9 +16,14 @@ pub use ground_vegetation::{
     GroundVegetation, GroundVegetationBounds, GroundVegetationComposition,
     GroundVegetationDistribution, GroundVegetationSample,
 };
+pub use reefs::{REEF_GENERATOR_VERSION, ReefComposition, ReefDistribution, ReefForm, ReefSample};
 pub use rocks::{
     RockBounds, RockForm, RockGenotype, SURFACE_ROCK_GENERATOR_VERSION, SurfaceRock,
     SurfaceRockDistribution, SurfaceRockSample, SurfaceRocks,
+};
+pub use wetlands::{
+    WETLAND_GENERATOR_VERSION, WetlandComposition, WetlandDistribution, WetlandHydrology,
+    WetlandKind, WetlandSample,
 };
 
 /// Generator version that first exposes deterministic soil profiles.
