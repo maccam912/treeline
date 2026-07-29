@@ -241,6 +241,12 @@ impl BrowserTerrainMeshQueue {
             let request = encode_worker_request(self.world, job);
             if worker.worker.post_message(&request.into()).is_ok() {
                 worker.busy = Some(job);
+            } else {
+                // The job has already left the heap, so returning it is what
+                // keeps a transient post failure from silently dropping a
+                // chunk and leaving a permanent hole in the world.
+                self.pending.push(Reverse(job));
+                break;
             }
         }
     }

@@ -206,10 +206,31 @@ impl CaveBounds {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaveInfluence {
     /// Positive inside cave air and negative outside the cave boundary.
+    ///
+    /// The field is only evaluated within
+    /// [`CaveInfluence::REACH_METERS`] of a passage. Farther away it
+    /// saturates at `-REACH_METERS` instead of continuing to fall, so callers
+    /// must check [`CaveInfluence::is_within_reach`] before composing this
+    /// value with another signed field.
     pub void_density: f64,
     pub family: CaveFamily,
     pub nearest_kind: CaveNodeKind,
     pub system_key: u64,
+}
+
+impl CaveInfluence {
+    /// Distance beyond a passage wall at which the subtraction field saturates.
+    pub const REACH_METERS: f64 = 4.0;
+
+    /// Returns whether this sample carries a real distance rather than the
+    /// saturated "no nearby passage" floor.
+    ///
+    /// Composing a saturated sample into terrain density would pull the signed
+    /// distance up to `-REACH_METERS` everywhere inside a system's bounding
+    /// box, which visibly displaces coarse-LOD isosurfaces.
+    pub fn is_within_reach(self) -> bool {
+        self.void_density > -Self::REACH_METERS
+    }
 }
 
 /// A surface connection suitable for discovery, inspection, or player travel.
@@ -456,7 +477,7 @@ impl CaveSystem {
 
     /// Samples the analytic union of node spheres and passage capsules.
     pub fn influence_at(&self, position: WorldPosition) -> CaveInfluence {
-        const OUTSIDE_DENSITY_METERS: f64 = -4.0;
+        const OUTSIDE_DENSITY_METERS: f64 = -CaveInfluence::REACH_METERS;
         let mut strongest = OUTSIDE_DENSITY_METERS;
         let mut nearest_kind = CaveNodeKind::Passage;
         for node in &self.graph.nodes {

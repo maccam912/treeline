@@ -45,6 +45,36 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps
 
+  browser:
+    name: Browser client lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # The browser terrain queue and its Web Worker binary are behind
+      # `cfg(target_arch = "wasm32")`, so the native lint job never compiles
+      # them. Without this job a break in browser-only code first appears when
+      # Pages deploys from main.
+      - name: Lint browser client
+        run: >-
+          cargo clippy
+          -p client
+          --target wasm32-unknown-unknown
+          --all-targets
+          -- -D warnings
+
   determinism:
     name: Cross-platform generator fingerprints
     runs-on: macos-latest
