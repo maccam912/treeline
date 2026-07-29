@@ -31,7 +31,7 @@ use treeline_world::TerrainMeshQueue;
 use treeline_world::{
     CURRENT_GENERATOR_VERSION, ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig,
     FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig, FarTileIndex,
-    GeneratedWorldTerrain, GenerationPriority, NearTerrainCutout, Season, TerrainMeshSpec,
+    GeneratedWorldTerrain, GenerationPriority, Lake, NearTerrainCutout, Season, TerrainMeshSpec,
 };
 use web_time::Instant;
 use winit::application::ApplicationHandler;
@@ -58,6 +58,11 @@ const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
 const RANDOM_WARP_MAX_DISTANCE_METERS: f64 = 5_000_000.0;
 const RANDOM_WARP_COORDINATE_LIMIT_METERS: f64 = 5_000_000.0;
 const RANDOM_WARP_SITE_ATTEMPTS: usize = 64;
+const WATER_WARP_REGION_ATTEMPTS: usize = 16;
+const WATER_WARP_DIRECTIONS: u32 = 16;
+const WATER_WARP_MAX_SHORE_DISTANCE_METERS: f64 = 128_000.0;
+const WATER_WARP_MIN_DEPTH_METERS: f64 = 0.5;
+const WATER_WARP_SHORE_CLEARANCE_METERS: f64 = 8.0;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
 const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 20;
@@ -185,6 +190,10 @@ impl ApplicationHandler for TreelineApp {
                         if event.state == ElementState::Pressed && !event.repeat {
                             game.request_cave_warp();
                         }
+                    } else if code == KeyCode::KeyB {
+                        if event.state == ElementState::Pressed && !event.repeat {
+                            game.request_water_warp();
+                        }
                     } else {
                         game.input
                             .set_key(code, event.state == ElementState::Pressed);
@@ -244,6 +253,13 @@ impl ApplicationHandler for TreelineApp {
     }
 }
 
+#[derive(Default)]
+struct WarpRequests {
+    random: bool,
+    cave: bool,
+    water: bool,
+}
+
 struct Game {
     window: Arc<Window>,
     _instance: wgpu::Instance,
@@ -267,8 +283,7 @@ struct Game {
     cursor_captured: bool,
     previous_frame: Instant,
     initial_generation: InitialGenerationProgress,
-    random_warp_requested: bool,
-    cave_warp_requested: bool,
+    warp_requests: WarpRequests,
     #[cfg(target_arch = "wasm32")]
     browser_actions: BrowserActions,
 }
@@ -426,8 +441,7 @@ impl Game {
             cursor_captured: false,
             previous_frame: Instant::now(),
             initial_generation,
-            random_warp_requested: false,
-            cave_warp_requested: false,
+            warp_requests: WarpRequests::default(),
             #[cfg(target_arch = "wasm32")]
             browser_actions,
         };
@@ -488,11 +502,15 @@ impl Game {
     }
 
     fn request_random_warp(&mut self) {
-        self.random_warp_requested = true;
+        self.warp_requests.random = true;
     }
 
     fn request_cave_warp(&mut self) {
-        self.cave_warp_requested = true;
+        self.warp_requests.cave = true;
+    }
+
+    fn request_water_warp(&mut self) {
+        self.warp_requests.water = true;
     }
 
     fn random_warp(&mut self) -> Result<(), Box<dyn Error>> {
@@ -541,6 +559,35 @@ impl Game {
             entrance.position.x,
             entrance.position.z,
         );
+        Ok(())
+    }
+
+    fn water_warp(&mut self) -> Result<(), Box<dyn Error>> {
+        let started = Instant::now();
+        let previous = self.camera.world_position();
+        let site = water_warp_site(&self.terrain, previous)
+            .ok_or_else(|| std::io::Error::other("no reachable water shore found"))?;
+        let destination_y =
+            surface_height(&self.terrain, site.destination[0], site.destination[1]) + EYE_HEIGHT;
+        let destination = DVec3::new(site.destination[0], destination_y, site.destination[1]);
+        let preparation_time = started.elapsed();
+        self.relocate(destination, started, preparation_time)?;
+        self.camera.face_horizontal(site.water);
+
+        let current = self.camera.world_position();
+        let distance_kilometers = (current.x - previous.x).hypot(current.z - previous.z) / 1_000.0;
+        let shore_distance =
+            (site.water[0] - site.destination[0]).hypot(site.water[1] - site.destination[1]);
+        match site.body {
+            WaterBody::Lake(lake) => eprintln!(
+                "water warp: lake {:016x} shore at ({:.0}, {:.0}), water {shore_distance:.0} m away, {distance_kilometers:.0} km traveled",
+                lake.id, site.destination[0], site.destination[1],
+            ),
+            WaterBody::Ocean => eprintln!(
+                "water warp: ocean shore at ({:.0}, {:.0}), water {shore_distance:.0} m away, {distance_kilometers:.0} km traveled",
+                site.destination[0], site.destination[1],
+            ),
+        }
         Ok(())
     }
 
@@ -596,15 +643,24 @@ impl Game {
         if self.browser_actions.take_random_warp_request() {
             self.request_random_warp();
         }
-        if std::mem::take(&mut self.random_warp_requested)
+        #[cfg(target_arch = "wasm32")]
+        if self.browser_actions.take_water_warp_request() {
+            self.request_water_warp();
+        }
+        if std::mem::take(&mut self.warp_requests.random)
             && let Err(error) = self.random_warp()
         {
             eprintln!("random warp failed: {error}");
         }
-        if std::mem::take(&mut self.cave_warp_requested)
+        if std::mem::take(&mut self.warp_requests.cave)
             && let Err(error) = self.cave_warp()
         {
             eprintln!("cave warp failed: {error}");
+        }
+        if std::mem::take(&mut self.warp_requests.water)
+            && let Err(error) = self.water_warp()
+        {
+            eprintln!("water warp failed: {error}");
         }
 
         let now = Instant::now();
@@ -947,6 +1003,15 @@ impl Camera {
             (self.pitch + (f64::from(axis.y) * VERTICAL_SPEED * delta_seconds)).clamp(-1.5, 1.5);
     }
 
+    fn face_horizontal(&mut self, target: [f64; 2]) {
+        let delta_x = target[0] - self.position.x;
+        let delta_z = target[1] - self.position.z;
+        if delta_x != 0.0 || delta_z != 0.0 {
+            self.yaw = libm::atan2(delta_z, delta_x);
+            self.pitch = -0.08;
+        }
+    }
+
     fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f64) {
         let previous_position = self.position;
         let movement = self.movement(input);
@@ -1157,6 +1222,8 @@ impl VirtualSticks {
 struct BrowserActions {
     random_warp_requested: Rc<Cell<bool>>,
     random_warp_listener: Closure<dyn FnMut(web_sys::Event)>,
+    water_warp_requested: Rc<Cell<bool>>,
+    water_warp_listener: Closure<dyn FnMut(web_sys::Event)>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1177,14 +1244,33 @@ impl BrowserActions {
             .map_err(|error| {
                 std::io::Error::other(format!("could not register random warp button: {error:?}"))
             })?;
+        let water_warp_requested = Rc::new(Cell::new(false));
+        let requested = Rc::clone(&water_warp_requested);
+        let water_warp_listener = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            requested.set(true);
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        window
+            .add_event_listener_with_callback(
+                "treeline-water-warp",
+                water_warp_listener.as_ref().unchecked_ref(),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("could not register water warp button: {error:?}"))
+            })?;
         Ok(Self {
             random_warp_requested,
             random_warp_listener,
+            water_warp_requested,
+            water_warp_listener,
         })
     }
 
     fn take_random_warp_request(&self) -> bool {
         self.random_warp_requested.replace(false)
+    }
+
+    fn take_water_warp_request(&self) -> bool {
+        self.water_warp_requested.replace(false)
     }
 }
 
@@ -1196,8 +1282,25 @@ impl Drop for BrowserActions {
                 "treeline-random-warp",
                 self.random_warp_listener.as_ref().unchecked_ref(),
             );
+            let _ = window.remove_event_listener_with_callback(
+                "treeline-water-warp",
+                self.water_warp_listener.as_ref().unchecked_ref(),
+            );
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WaterBody {
+    Lake(Lake),
+    Ocean,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaterWarpSite {
+    destination: [f64; 2],
+    water: [f64; 2],
+    body: WaterBody,
 }
 
 fn random_warp_site(terrain: &GeneratedWorldTerrain, current: WorldPosition) -> Option<[f64; 2]> {
@@ -1210,6 +1313,183 @@ fn random_warp_site(terrain: &GeneratedWorldTerrain, current: WorldPosition) -> 
         }
     }
     None
+}
+
+fn water_warp_site(
+    terrain: &GeneratedWorldTerrain,
+    current: WorldPosition,
+) -> Option<WaterWarpSite> {
+    for _ in 0..WATER_WARP_REGION_ATTEMPTS {
+        let anchor = random_warp_destination(random_unit_interval(), random_unit_interval());
+        if !random_warp_distance_is_eligible(current, anchor) {
+            continue;
+        }
+        if terrain
+            .ocean_surface_at(anchor[0], anchor[1])
+            .is_some_and(|sample| sample.water_depth_meters >= WATER_WARP_MIN_DEPTH_METERS)
+            && let Some((destination, water)) =
+                dry_water_shore(terrain, WaterBody::Ocean, anchor, random_unit_interval())
+            && random_warp_distance_is_eligible(current, destination)
+            && coordinate_is_within_warp_budget(destination)
+        {
+            return Some(WaterWarpSite {
+                destination,
+                water,
+                body: WaterBody::Ocean,
+            });
+        }
+        let Some(lakes) = terrain.regional_lakes_at(anchor[0], anchor[1]) else {
+            continue;
+        };
+        if lakes.is_empty() {
+            continue;
+        }
+        let first = fraction_index(random_unit_interval(), lakes.len());
+        let direction_fraction = random_unit_interval();
+        for offset in 0..lakes.len() {
+            let lake = lakes[(first + offset) % lakes.len()];
+            let Some(deep_water) = visible_lake_water_point(terrain, lake) else {
+                continue;
+            };
+            if random_warp_distance_is_eligible(current, deep_water)
+                && let Some((destination, water)) = dry_water_shore(
+                    terrain,
+                    WaterBody::Lake(lake),
+                    deep_water,
+                    direction_fraction,
+                )
+                && random_warp_distance_is_eligible(current, destination)
+                && coordinate_is_within_warp_budget(destination)
+            {
+                return Some(WaterWarpSite {
+                    destination,
+                    water,
+                    body: WaterBody::Lake(lake),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn fraction_index(fraction: f64, length: usize) -> usize {
+    if length == 0 {
+        return 0;
+    }
+    let length_u32 = u32::try_from(length).unwrap_or(u32::MAX);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let index = (fraction.clamp(0.0, 1.0) * f64::from(length_u32)) as usize;
+    index.min(length - 1)
+}
+
+fn visible_lake_water_point(terrain: &GeneratedWorldTerrain, lake: Lake) -> Option<[f64; 2]> {
+    const SAMPLE_OFFSETS_METERS: [f64; 5] = [0.0, -400.0, 400.0, -800.0, 800.0];
+
+    let [center_x, center_z] = lake.bottom.center();
+    for z_offset in SAMPLE_OFFSETS_METERS {
+        for x_offset in SAMPLE_OFFSETS_METERS {
+            let point = [center_x + x_offset, center_z + z_offset];
+            if terrain.ocean_surface_at(point[0], point[1]).is_none()
+                && terrain
+                    .lake_surface_at(point[0], point[1])
+                    .is_some_and(|sample| {
+                        sample.lake.id == lake.id
+                            && sample.water_depth_meters >= WATER_WARP_MIN_DEPTH_METERS
+                    })
+            {
+                return Some(point);
+            }
+        }
+    }
+    None
+}
+
+fn dry_water_shore(
+    terrain: &GeneratedWorldTerrain,
+    body: WaterBody,
+    water: [f64; 2],
+    direction_fraction: f64,
+) -> Option<([f64; 2], [f64; 2])> {
+    for direction_index in 0..WATER_WARP_DIRECTIONS {
+        let direction_fraction = (direction_fraction
+            + (f64::from(direction_index) / f64::from(WATER_WARP_DIRECTIONS)))
+        .fract();
+        let angle = direction_fraction * std::f64::consts::TAU;
+        let direction = [libm::cos(angle), libm::sin(angle)];
+        let mut water_side = water;
+        let mut distance = 64.0;
+        while distance <= WATER_WARP_MAX_SHORE_DISTANCE_METERS {
+            let candidate = [
+                water[0] + (direction[0] * distance),
+                water[1] + (direction[1] * distance),
+            ];
+            if same_body_water(terrain, body, candidate) {
+                water_side = candidate;
+                distance *= 2.0;
+                continue;
+            }
+            if surface_feature_has_dry_ground(terrain, candidate[0], candidate[1]) {
+                return refine_dry_shore(terrain, body, water_side, candidate, direction);
+            }
+            break;
+        }
+    }
+    None
+}
+
+fn refine_dry_shore(
+    terrain: &GeneratedWorldTerrain,
+    body: WaterBody,
+    mut water_side: [f64; 2],
+    mut dry_side: [f64; 2],
+    direction: [f64; 2],
+) -> Option<([f64; 2], [f64; 2])> {
+    for _ in 0..16 {
+        let midpoint = [
+            (water_side[0] + dry_side[0]) * 0.5,
+            (water_side[1] + dry_side[1]) * 0.5,
+        ];
+        if same_body_water(terrain, body, midpoint) {
+            water_side = midpoint;
+        } else if surface_feature_has_dry_ground(terrain, midpoint[0], midpoint[1]) {
+            dry_side = midpoint;
+        } else {
+            break;
+        }
+    }
+    if (dry_side[0] - water_side[0]).hypot(dry_side[1] - water_side[1]) > 32.0 {
+        return None;
+    }
+    let destination = [
+        dry_side[0] + (direction[0] * WATER_WARP_SHORE_CLEARANCE_METERS),
+        dry_side[1] + (direction[1] * WATER_WARP_SHORE_CLEARANCE_METERS),
+    ];
+    surface_feature_has_dry_ground(terrain, destination[0], destination[1])
+        .then_some((destination, water_side))
+        .or_else(|| {
+            surface_feature_has_dry_ground(terrain, dry_side[0], dry_side[1])
+                .then_some((dry_side, water_side))
+        })
+}
+
+fn same_body_water(terrain: &GeneratedWorldTerrain, body: WaterBody, point: [f64; 2]) -> bool {
+    match body {
+        WaterBody::Lake(lake) => {
+            terrain.ocean_surface_at(point[0], point[1]).is_none()
+                && terrain
+                    .lake_surface_at(point[0], point[1])
+                    .is_some_and(|sample| {
+                        sample.lake.id == lake.id && sample.water_depth_meters > 0.0
+                    })
+        }
+        WaterBody::Ocean => terrain.ocean_surface_at(point[0], point[1]).is_some(),
+    }
+}
+
+fn coordinate_is_within_warp_budget(point: [f64; 2]) -> bool {
+    point
+        .into_iter()
+        .all(|coordinate| coordinate.abs() <= RANDOM_WARP_COORDINATE_LIMIT_METERS)
 }
 
 fn random_warp_destination(x_fraction: f64, z_fraction: f64) -> [f64; 2] {
@@ -2088,6 +2368,42 @@ mod tests {
                 "the prototype region should retain a broad, visible lake"
             );
         }
+    }
+
+    #[test]
+    fn water_warp_places_the_player_on_dry_ground_facing_visible_water() {
+        let terrain = GeneratedWorldTerrain::new(WORLD);
+        let (body, destination, shore_water) = [
+            [-192_000.0, -192_000.0],
+            [-64_000.0, -64_000.0],
+            [64_000.0, 64_000.0],
+            [192_000.0, 192_000.0],
+        ]
+        .into_iter()
+        .find_map(|anchor| {
+            terrain
+                .regional_lakes_at(anchor[0], anchor[1])?
+                .iter()
+                .find_map(|&lake| {
+                    let deep_water = visible_lake_water_point(&terrain, lake)?;
+                    let body = WaterBody::Lake(lake);
+                    let (destination, shore_water) =
+                        dry_water_shore(&terrain, body, deep_water, 0.0)?;
+                    Some((body, destination, shore_water))
+                })
+        })
+        .expect("the representative regions should have a reachable lake shore");
+
+        assert!(surface_feature_has_dry_ground(
+            &terrain,
+            destination[0],
+            destination[1]
+        ));
+        assert!(same_body_water(&terrain, body, shore_water));
+        assert!(
+            (destination[0] - shore_water[0]).hypot(destination[1] - shore_water[1]) <= 40.0,
+            "the player should arrive close enough to see the water"
+        );
     }
 
     #[test]

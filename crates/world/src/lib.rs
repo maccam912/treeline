@@ -23,8 +23,9 @@ use treeline_ecology::{
 };
 pub use treeline_geography::Season;
 use treeline_geography::{Climate, DrainageCellIndex, WatershedRegionIndex};
+pub use treeline_hydrology::Lake;
 use treeline_hydrology::{
-    GullyNetwork, GullyTerrainInfluence, Lake, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
+    GullyNetwork, GullyTerrainInfluence, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
 };
 use treeline_mesher::{Mesh, MeshingError, SurfaceGridSpec, surface_grid, transvoxel_chunk};
 use treeline_terrain::{
@@ -303,6 +304,20 @@ impl GeneratedWorldTerrain {
             terrain_elevation_meters,
             water_depth_meters,
         })
+    }
+
+    /// Lists lakes in the watershed artifact containing a horizontal position.
+    ///
+    /// This uses the same immutable regional cache as surface sampling, making
+    /// it suitable for inspection and travel tools that need to select a body
+    /// before querying its fine shoreline.
+    pub fn regional_lakes_at(&self, x: f64, z: f64) -> Option<Vec<Lake>> {
+        if self.world().generator_version < LAKE_GENERATOR_VERSION {
+            return None;
+        }
+        let region = WatershedRegionIndex::containing(x, z)?;
+        self.lake_network(region)
+            .map(|network| network.lakes().to_vec())
     }
 
     /// Returns equilibrium ocean water above terrain below global sea level.
