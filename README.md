@@ -152,10 +152,11 @@ cargo run -p client
 
 Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
 to sprint. Press Escape to release the cursor; click the window to capture it
-again. Press `R` to warp to random dry ground 1,000–5,000 km away; mobile
-browsers expose the same action as a **Random warp** button. Press `C` to find
-and warp to the nearest generated cave entrance; walking over the opening
-descends to the cave floor.
+again. Press `F` to toggle aerial mode, which follows the ground from 1 km up
+and moves ten times faster. Press `R` to warp to random dry ground 1,000–5,000
+km away, `B` to warp near water, or `C` to find and warp to the nearest
+generated cave entrance; walking over the opening descends to the cave floor.
+Browsers expose aerial mode and both non-cave warps as buttons.
 
 Build the browser version with [Trunk](https://trunk-rs.dev/):
 

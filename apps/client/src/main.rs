@@ -6,8 +6,10 @@ use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
 mod browser_terrain;
 
+#[cfg(any(test, target_arch = "wasm32"))]
+use std::cell::Cell;
 #[cfg(target_arch = "wasm32")]
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
@@ -54,6 +56,8 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f64 = 1.72;
 const WALK_SPEED: f64 = 8.0;
 const SPRINT_SPEED: f64 = 16.0;
+const AERIAL_HEIGHT_METERS: f64 = 1_000.0;
+const AERIAL_SPEED_MULTIPLIER: f64 = 10.0;
 const START_X: f64 = 97_023.0;
 const START_Z: f64 = 20_701.0;
 const START_YAW: f64 = 1.924_842_228_418_599_5;
@@ -201,6 +205,10 @@ impl ApplicationHandler for TreelineApp {
                     } else if code == KeyCode::KeyB {
                         if event.state == ElementState::Pressed && !event.repeat {
                             game.request_water_warp();
+                        }
+                    } else if code == KeyCode::KeyF {
+                        if event.state == ElementState::Pressed && !event.repeat {
+                            game.toggle_aerial_mode();
                         }
                     } else {
                         game.input
@@ -528,13 +536,24 @@ impl Game {
         self.warp_requests.water = true;
     }
 
+    fn toggle_aerial_mode(&mut self) {
+        let enabled = self.camera.toggle_aerial_mode(&self.terrain);
+        #[cfg(target_arch = "wasm32")]
+        BrowserActions::set_aerial_mode_enabled(enabled);
+        eprintln!(
+            "aerial mode {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
+    }
+
     fn random_warp(&mut self) -> Result<(), Box<dyn Error>> {
         let started = Instant::now();
         let previous = self.camera.world_position();
         let [destination_x, destination_z] = random_warp_site(&self.terrain, previous)
             .ok_or_else(|| std::io::Error::other("could not find dry ground for a random warp"))?;
         let destination_y =
-            surface_height(&self.terrain, destination_x, destination_z) + EYE_HEIGHT;
+            self.camera
+                .surface_relative_y(&self.terrain, destination_x, destination_z);
         let destination = DVec3::new(destination_x, destination_y, destination_z);
         let preparation_time = started.elapsed();
         self.relocate(destination, started, preparation_time)?;
@@ -555,10 +574,10 @@ impl Game {
             .terrain
             .nearest_cave_entrance(previous, 12)
             .ok_or_else(|| std::io::Error::other("no cave entrance found in the search area"))?;
-        let surface = surface_height(&self.terrain, entrance.position.x, entrance.position.z);
         let destination = DVec3::new(
             entrance.position.x,
-            surface + EYE_HEIGHT,
+            self.camera
+                .surface_relative_y(&self.terrain, entrance.position.x, entrance.position.z),
             entrance.position.z,
         );
         let preparation_time = started.elapsed();
@@ -583,7 +602,8 @@ impl Game {
         let site = water_warp_site(&self.terrain, previous)
             .ok_or_else(|| std::io::Error::other("no reachable water shore found"))?;
         let destination_y =
-            surface_height(&self.terrain, site.destination[0], site.destination[1]) + EYE_HEIGHT;
+            self.camera
+                .surface_relative_y(&self.terrain, site.destination[0], site.destination[1]);
         let destination = DVec3::new(site.destination[0], destination_y, site.destination[1]);
         let preparation_time = started.elapsed();
         self.relocate(destination, started, preparation_time)?;
@@ -661,6 +681,10 @@ impl Game {
         #[cfg(target_arch = "wasm32")]
         if self.browser_actions.take_water_warp_request() {
             self.request_water_warp();
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.browser_actions.take_aerial_mode_toggle_request() {
+            self.toggle_aerial_mode();
         }
         if std::mem::take(&mut self.warp_requests.random)
             && let Err(error) = self.random_warp()
@@ -1022,10 +1046,33 @@ impl InitialGenerationProgress {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CameraMode {
+    Ground,
+    Aerial,
+}
+
+impl CameraMode {
+    const fn height_above_ground(self) -> f64 {
+        match self {
+            Self::Ground => EYE_HEIGHT,
+            Self::Aerial => AERIAL_HEIGHT_METERS,
+        }
+    }
+
+    const fn speed_multiplier(self) -> f64 {
+        match self {
+            Self::Ground => 1.0,
+            Self::Aerial => AERIAL_SPEED_MULTIPLIER,
+        }
+    }
+}
+
 struct Camera {
     position: DVec3,
     yaw: f64,
     pitch: f64,
+    mode: CameraMode,
 }
 
 impl Camera {
@@ -1034,6 +1081,7 @@ impl Camera {
             position,
             yaw,
             pitch,
+            mode: CameraMode::Ground,
         }
     }
 
@@ -1070,17 +1118,46 @@ impl Camera {
         }
     }
 
-    fn walk(&mut self, input: &InputState, terrain: &GeneratedWorldTerrain, delta_seconds: f64) {
+    fn height_above_ground(&self) -> f64 {
+        self.mode.height_above_ground()
+    }
+
+    fn surface_relative_y(&self, terrain: &impl SurfaceField, x: f64, z: f64) -> f64 {
+        surface_height(terrain, x, z) + self.height_above_ground()
+    }
+
+    fn toggle_aerial_mode(&mut self, terrain: &impl SurfaceField) -> bool {
+        self.mode = match self.mode {
+            CameraMode::Ground => CameraMode::Aerial,
+            CameraMode::Aerial => CameraMode::Ground,
+        };
+        self.snap_to_mode_height(terrain);
+        self.mode == CameraMode::Aerial
+    }
+
+    fn snap_to_mode_height(&mut self, terrain: &impl SurfaceField) {
+        self.position.y = self.surface_relative_y(terrain, self.position.x, self.position.z);
+    }
+
+    fn walk<T>(&mut self, input: &InputState, terrain: &T, delta_seconds: f64)
+    where
+        T: DensityField + SurfaceField,
+    {
         let previous_position = self.position;
         let movement = self.movement(input);
         if movement.length_squared() > 0.0 {
-            let speed = if input.sprint() {
+            let base_speed = if input.sprint() {
                 SPRINT_SPEED
             } else {
                 WALK_SPEED
             };
+            let speed = base_speed * self.mode.speed_multiplier();
             let intensity = movement.length().min(1.0);
             self.position += movement.normalize() * intensity * speed * delta_seconds;
+        }
+        if self.mode == CameraMode::Aerial {
+            self.snap_to_mode_height(terrain);
+            return;
         }
         let current_floor = self.position.y - EYE_HEIGHT;
         let floor = if let Some(floor) =
@@ -1276,12 +1353,31 @@ impl VirtualSticks {
     }
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Default)]
+struct ToggleRequestCounter {
+    count: Cell<u32>,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl ToggleRequestCounter {
+    fn request(&self) {
+        self.count.set(self.count.get().wrapping_add(1));
+    }
+
+    fn take(&self) -> bool {
+        self.count.replace(0) % 2 == 1
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 struct BrowserActions {
     random_warp_requested: Rc<Cell<bool>>,
     random_warp_listener: Closure<dyn FnMut(web_sys::Event)>,
     water_warp_requested: Rc<Cell<bool>>,
     water_warp_listener: Closure<dyn FnMut(web_sys::Event)>,
+    aerial_mode_toggle_requests: Rc<ToggleRequestCounter>,
+    aerial_mode_toggle_listener: Closure<dyn FnMut(web_sys::Event)>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1315,11 +1411,27 @@ impl BrowserActions {
             .map_err(|error| {
                 std::io::Error::other(format!("could not register water warp button: {error:?}"))
             })?;
+        let aerial_mode_toggle_requests = Rc::new(ToggleRequestCounter::default());
+        let requested = Rc::clone(&aerial_mode_toggle_requests);
+        let aerial_mode_toggle_listener = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            requested.request();
+        })
+            as Box<dyn FnMut(web_sys::Event)>);
+        window
+            .add_event_listener_with_callback(
+                "treeline-toggle-aerial",
+                aerial_mode_toggle_listener.as_ref().unchecked_ref(),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("could not register aerial-mode button: {error:?}"))
+            })?;
         Ok(Self {
             random_warp_requested,
             random_warp_listener,
             water_warp_requested,
             water_warp_listener,
+            aerial_mode_toggle_requests,
+            aerial_mode_toggle_listener,
         })
     }
 
@@ -1329,6 +1441,21 @@ impl BrowserActions {
 
     fn take_water_warp_request(&self) -> bool {
         self.water_warp_requested.replace(false)
+    }
+
+    fn take_aerial_mode_toggle_request(&self) -> bool {
+        self.aerial_mode_toggle_requests.take()
+    }
+
+    fn set_aerial_mode_enabled(enabled: bool) {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(button) = document.get_element_by_id("aerial-mode-button") else {
+            return;
+        };
+        let pressed = if enabled { "true" } else { "false" };
+        let _ = button.set_attribute("aria-pressed", pressed);
     }
 }
 
@@ -1343,6 +1470,10 @@ impl Drop for BrowserActions {
             let _ = window.remove_event_listener_with_callback(
                 "treeline-water-warp",
                 self.water_warp_listener.as_ref().unchecked_ref(),
+            );
+            let _ = window.remove_event_listener_with_callback(
+                "treeline-toggle-aerial",
+                self.aerial_mode_toggle_listener.as_ref().unchecked_ref(),
             );
         }
     }
@@ -2303,6 +2434,35 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct SlopedGround;
+
+    impl SlopedGround {
+        fn surface_height(x: f64, z: f64) -> f64 {
+            (x * 0.25) - (z * 0.125)
+        }
+    }
+
+    impl DensityField for SlopedGround {
+        fn sample(&self, position: WorldPosition) -> treeline_terrain::TerrainSample {
+            let density = position.y - Self::surface_height(position.x, position.z);
+            treeline_terrain::TerrainSample::new(
+                density,
+                if density > 0.0 {
+                    treeline_terrain::Material::Air
+                } else {
+                    treeline_terrain::Material::Rock
+                },
+            )
+        }
+    }
+
+    impl SurfaceField for SlopedGround {
+        fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
+            (x.is_finite() && z.is_finite()).then(|| Self::surface_height(x, z))
+        }
+    }
+
     #[test]
     fn walkable_floor_descends_through_an_open_cave_mouth() {
         let floor = walkable_floor_height(&OpenSphericalCave, 0.0, 0.0, 0.0).expect("cave floor");
@@ -2327,6 +2487,105 @@ mod tests {
 
         let expected_step = WALK_SPEED / 60.0;
         assert!((camera.position.x - previous_x - expected_step).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn aerial_toggle_uses_one_kilometer_ground_clearance() {
+        let terrain = SlopedGround;
+        let x = 24.0;
+        let z = -12.0;
+        let yaw = 0.75;
+        let pitch = -0.2;
+        let surface = SlopedGround::surface_height(x, z);
+        let mut camera = Camera::new(DVec3::new(x, surface + EYE_HEIGHT, z), yaw, pitch);
+
+        assert!(camera.toggle_aerial_mode(&terrain));
+        assert_eq!(camera.mode, CameraMode::Aerial);
+        assert_eq!(camera.position, DVec3::new(x, surface + 1_000.0, z));
+        assert!((camera.yaw - yaw).abs() < f64::EPSILON);
+        assert!((camera.pitch - pitch).abs() < f64::EPSILON);
+
+        assert!(!camera.toggle_aerial_mode(&terrain));
+        assert_eq!(camera.mode, CameraMode::Ground);
+        assert_eq!(camera.position, DVec3::new(x, surface + EYE_HEIGHT, z));
+        assert!((camera.yaw - yaw).abs() < f64::EPSILON);
+        assert!((camera.pitch - pitch).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn surface_relative_destination_height_uses_the_current_camera_mode() {
+        let terrain = SlopedGround;
+        let target_x = 80.0;
+        let target_z = -40.0;
+        let surface = SlopedGround::surface_height(target_x, target_z);
+        let mut camera = Camera::new(DVec3::new(0.0, EYE_HEIGHT, 0.0), 0.0, 0.0);
+
+        assert!(
+            (camera.surface_relative_y(&terrain, target_x, target_z) - (surface + EYE_HEIGHT))
+                .abs()
+                < f64::EPSILON
+        );
+        camera.toggle_aerial_mode(&terrain);
+        assert!(
+            (camera.surface_relative_y(&terrain, target_x, target_z)
+                - (surface + AERIAL_HEIGHT_METERS))
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn aerial_movement_is_ten_times_faster_and_tracks_the_ground() {
+        let terrain = SlopedGround;
+        let mut input = InputState::default();
+        input.set_key(KeyCode::KeyW, true);
+        let mut ground_camera = Camera::new(DVec3::new(0.0, EYE_HEIGHT, 0.0), 0.0, 0.0);
+        let mut aerial_camera = Camera::new(DVec3::new(0.0, EYE_HEIGHT, 0.0), 0.0, 0.0);
+        aerial_camera.toggle_aerial_mode(&terrain);
+
+        ground_camera.walk(&input, &terrain, 0.25);
+        aerial_camera.walk(&input, &terrain, 0.25);
+
+        assert!((aerial_camera.position.x - (ground_camera.position.x * 10.0)).abs() < 1.0e-9);
+        assert!(aerial_camera.position.z.abs() < f64::EPSILON);
+        assert!(
+            (aerial_camera.position.y
+                - (SlopedGround::surface_height(aerial_camera.position.x, 0.0)
+                    + AERIAL_HEIGHT_METERS))
+                .abs()
+                < 1.0e-9
+        );
+    }
+
+    #[test]
+    fn aerial_sprinting_is_ten_times_faster_than_ground_sprinting() {
+        let terrain = SlopedGround;
+        let mut input = InputState::default();
+        input.set_key(KeyCode::KeyW, true);
+        input.set_key(KeyCode::ShiftLeft, true);
+        let mut ground_camera = Camera::new(DVec3::new(0.0, EYE_HEIGHT, 0.0), 0.0, 0.0);
+        let mut aerial_camera = Camera::new(DVec3::new(0.0, EYE_HEIGHT, 0.0), 0.0, 0.0);
+        aerial_camera.toggle_aerial_mode(&terrain);
+
+        ground_camera.walk(&input, &terrain, 0.25);
+        aerial_camera.walk(&input, &terrain, 0.25);
+
+        assert!((aerial_camera.position.x - (ground_camera.position.x * 10.0)).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn toggle_requests_preserve_click_parity_between_frames() {
+        let requests = ToggleRequestCounter::default();
+
+        requests.request();
+        requests.request();
+        assert!(!requests.take());
+
+        requests.request();
+        requests.request();
+        requests.request();
+        assert!(requests.take());
+        assert!(!requests.take());
     }
 
     #[test]
