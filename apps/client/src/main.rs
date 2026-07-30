@@ -18,12 +18,14 @@ use glam::DVec2;
 use glam::{DVec3, Mat4, Vec2, Vec3};
 #[cfg(not(target_arch = "wasm32"))]
 use treeline_coordinates::stable_hash;
-use treeline_coordinates::{WorldIdentity, WorldPosition};
+use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition};
 use treeline_ecology::{
-    GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, SurfaceRocks, TreeBounds,
+    GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, Soil, SurfaceRocks,
+    TreeBounds,
 };
+use treeline_geography::Climate;
 use treeline_mesher::Mesh;
-use treeline_renderer::{TerrainMesh, TerrainRenderer, TreeMeshDetail};
+use treeline_renderer::{AtmosphereSettings, TerrainMesh, TerrainRenderer, TreeMeshDetail};
 use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::ChunkIndex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -69,6 +71,7 @@ const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 20;
 const DISTANT_TREE_HIGH_QUALITY_DISTANCE_MULTIPLIER: u64 = 5;
 const DISTANT_TREE_SIMPLIFIED_DISTANCE_MULTIPLIER: u64 = 10;
 const DISTANT_TREE_TILE_CHUNKS_PER_EDGE: u64 = 4;
+const ATMOSPHERE_CELL_EDGE_METERS: f64 = 8_000.0;
 #[cfg(not(target_arch = "wasm32"))]
 const TERRAIN_PREFETCH_CENTERS_AHEAD: u64 = 2;
 #[cfg(target_arch = "wasm32")]
@@ -284,6 +287,7 @@ struct Game {
     previous_frame: Instant,
     initial_generation: InitialGenerationProgress,
     warp_requests: WarpRequests,
+    atmosphere_cell: Option<CellIndex>,
     #[cfg(target_arch = "wasm32")]
     browser_actions: BrowserActions,
 }
@@ -403,6 +407,8 @@ impl Game {
             camera.view_projection(surface_config.width, surface_config.height),
             camera.position.to_array(),
         );
+        let atmosphere_cell =
+            initialize_atmosphere(&renderer, &queue, &terrain, camera.world_position());
         let initial_generation = start_initial_progress(
             &window,
             &renderer,
@@ -442,6 +448,7 @@ impl Game {
             previous_frame: Instant::now(),
             initial_generation,
             warp_requests: WarpRequests::default(),
+            atmosphere_cell,
             #[cfg(target_arch = "wasm32")]
             browser_actions,
         };
@@ -670,6 +677,7 @@ impl Game {
             .look_with_stick(self.input.look_axis(), delta_seconds);
         let travel_direction = self.camera.travel_direction(&self.input);
         self.camera.walk(&self.input, &self.terrain, delta_seconds);
+        self.update_atmosphere();
         if let Err(error) = update_terrain(
             &self.device,
             &self.renderer,
@@ -711,6 +719,19 @@ impl Game {
             self.renderer
                 .update_far_cutout(&self.queue, cutout_min, cutout_max);
         }
+    }
+
+    fn update_atmosphere(&mut self) {
+        let position = self.camera.world_position();
+        let cell = CellIndex::containing(position.x, position.z, 0, ATMOSPHERE_CELL_EDGE_METERS);
+        if cell == self.atmosphere_cell {
+            return;
+        }
+        let Some(settings) = atmosphere_settings(&self.terrain, position.x, position.z) else {
+            return;
+        };
+        self.renderer.update_atmosphere(&self.queue, settings);
+        self.atmosphere_cell = cell;
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -1768,7 +1789,7 @@ fn upload_terrain_surface(
     })?;
     let water = lake_mesh
         .filter(|lake_mesh| !lake_mesh.indices.is_empty())
-        .map(|lake_mesh| renderer.upload_mesh(device, lake_mesh))
+        .map(|lake_mesh| renderer.upload_water_mesh(device, lake_mesh))
         .transpose()?;
     Ok((surface, water))
 }
@@ -1959,6 +1980,43 @@ fn surface_feature_has_dry_ground(terrain: &GeneratedWorldTerrain, x: f64, z: f6
         && !terrain
             .river_influence_at(x, z)
             .is_some_and(|river| river.distance_meters <= river.channel_half_width_meters)
+}
+
+fn atmosphere_settings(
+    terrain: &GeneratedWorldTerrain,
+    x: f64,
+    z: f64,
+) -> Option<AtmosphereSettings> {
+    let climate = Climate::new(terrain.world()).sample(x, z)?;
+    let soil = Soil::new(terrain.world()).sample(x, z)?;
+    let moisture = (soil.surface_moisture * 0.58
+        + climate.precipitation_fraction() * 0.32
+        + climate.ocean_proximity_fraction * 0.10)
+        .clamp(0.0, 1.0);
+    let warmth = climate.warmth_fraction();
+    Some(AtmosphereSettings {
+        fog_color: [
+            f64_as_f32(0.36 + (warmth * 0.07) + ((1.0 - moisture) * 0.03)),
+            f64_as_f32(0.52 + (warmth * 0.04) + (moisture * 0.05)),
+            f64_as_f32(0.66 + ((1.0 - warmth) * 0.07) + (moisture * 0.03)),
+        ],
+        fog_density: f64_as_f32(0.58 + (moisture * 0.92)),
+        moisture: f64_as_f32(moisture),
+        prevailing_wind: climate.prevailing_wind.map(f64_as_f32),
+    })
+}
+
+fn initialize_atmosphere(
+    renderer: &TerrainRenderer,
+    queue: &wgpu::Queue,
+    terrain: &GeneratedWorldTerrain,
+    position: WorldPosition,
+) -> Option<CellIndex> {
+    let cell = CellIndex::containing(position.x, position.z, 0, ATMOSPHERE_CELL_EDGE_METERS);
+    if let Some(settings) = atmosphere_settings(terrain, position.x, position.z) {
+        renderer.update_atmosphere(queue, settings);
+    }
+    cell
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2404,6 +2462,33 @@ mod tests {
             (destination[0] - shore_water[0]).hypot(destination[1] - shore_water[1]) <= 40.0,
             "the player should arrive close enough to see the water"
         );
+    }
+
+    #[test]
+    fn atmosphere_controls_are_deterministic_and_bounded_by_local_geography() {
+        let terrain = GeneratedWorldTerrain::new(WORLD);
+        let first = atmosphere_settings(&terrain, START_X, START_Z).expect("atmosphere");
+        let repeated = atmosphere_settings(&terrain, START_X, START_Z).expect("atmosphere");
+
+        assert_eq!(
+            first.fog_color.map(f32::to_bits),
+            repeated.fog_color.map(f32::to_bits)
+        );
+        assert_eq!(first.fog_density.to_bits(), repeated.fog_density.to_bits());
+        assert_eq!(first.moisture.to_bits(), repeated.moisture.to_bits());
+        assert_eq!(
+            first.prevailing_wind.map(f32::to_bits),
+            repeated.prevailing_wind.map(f32::to_bits)
+        );
+        assert!((0.0..=1.0).contains(&first.moisture));
+        assert!((0.58..=1.5).contains(&first.fog_density));
+        assert!(
+            first
+                .fog_color
+                .into_iter()
+                .all(|channel| (0.0..=1.0).contains(&channel))
+        );
+        assert!(first.prevailing_wind.into_iter().all(f32::is_finite));
     }
 
     #[test]

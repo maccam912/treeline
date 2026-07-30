@@ -15,6 +15,7 @@ libm.workspace = true
 pollster.workspace = true
 treeline-coordinates.workspace = true
 treeline-ecology.workspace = true
+treeline-geography.workspace = true
 treeline-mesher.workspace = true
 treeline-renderer.workspace = true
 treeline-terrain.workspace = true

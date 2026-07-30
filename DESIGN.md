@@ -2308,15 +2308,119 @@ Earlier versions retain their cave-free pristine density contract.
 
 ---
 
-## Phase 5 — Expedition Gameplay
+From this point forward, world quality comes before player activities. Do not
+resume climbing, survival, inventory, or other expedition mechanics until the
+world-generation, presentation, and living-water phases below meet their
+acceptance targets. Basic walking and warps remain sufficient for inspecting
+the world while those phases are in progress.
+
+## Phase 5 — World Quality
+
+**Phase status: In progress; deterministic audits and geography-aware surface
+presentation are usable, while major visual systems remain**
+
+Goal:
+
+> The generated systems should read as a beautiful, coherent place without
+> debug overlays or an explanation of the underlying model.
+
+- [ ] **PARTIAL** — Deterministic screenshot exploration. The headless
+      world-quality audit selects valley, ridge, river, forest, lake-shore,
+      cave, and summit sites for curated and random seeds, emits deterministic
+      hill-shaded contact sheets, explicitly marks missing-feature fallback
+      frames, and retains reviewed regression fingerprints. Native GPU client
+      frame capture and perspective baselines for the actual renderer remain.
+- [x] Quantitative novelty testing. The configurable world-quality exploration
+      audit samples far-apart regions and records terrain relief and roughness,
+      climate, soil moisture, drainage, lakes, forest cover, wetlands, reefs,
+      and caves. It reports closest descriptor pairs, suspicious repetition,
+      plausibility outliers, represented and underrepresented landscape
+      families, and stable CSV/fingerprint artifacts.
+- [x] Geography-aware terrain materials. Rendered terrain now blends explicit
+      regional rock hardness and carbonate character, soil sand/clay and
+      organic content, surface moisture, sediment deposition, rock and scree
+      exposure, forest and ground cover, wetlands, reefs, cave family, and
+      seasonal snow. Inputs are sampled in world space and travel with the
+      shared near/far mesh path so material geography stays aligned across LODs.
+- [ ] **NEXT, PARTIAL** — World lighting and atmosphere. Warm directional sun,
+      cool sky fill, ground bounce, exponential aerial perspective, and
+      locally climate-controlled lowland distance haze now preserve landform
+      legibility into the horizon. A real sky model and cast
+      terrain/vegetation shadows remain.
+- [ ] **PARTIAL** — vegetation across distance. Full, simplified, and
+      silhouette tree meshes exist, and world-space forest composition and
+      canopy cover now tint the very-far terrain representation. Cluster
+      impostors and a raised very-far canopy silhouette are still missing.
+- [ ] **PARTIAL** — Dedicated water presentation. Oceans and lakes now carry
+      distinct hydrology colors, reef-bearing shallows and wetland water alter
+      those colors, and a dedicated water shading path adds world-anchored
+      long/short waves, Fresnel sky reflection, and sun glints. Cave water uses
+      its own generated color. River surface ribbons, shoreline transitions,
+      depth/underwater treatment, and water-specific blending remain.
+- [ ] **PARTIAL** — Geography-driven visible weather. Regional precipitation,
+      ocean proximity, soil moisture, temperature, and prevailing wind now
+      control fog color/density and water-wave orientation in 8 km
+      world-aligned atmosphere cells; seasonal climate already supplies
+      persistent high-elevation surface snow. Clouds, visible precipitation,
+      pressure systems, terrain-lift cloud formation, and ridge-wind cues
+      remain. This phase does not include survival consequences.
+- [ ] Rare natural-wonder generation. Add condition-driven families for major
+      arches and sinkholes, extreme canyon and karst landscapes, volcanic and
+      glacial landforms, dune and salt basins, craters, and similarly rare
+      geographic destinations. These remain algorithms, not placed prefabs.
+- [ ] Visual acceptance pass. Ten screenshots from ten far-apart regions must
+      look immediately distinct, the deterministic viewpoint suite must not
+      expose obvious generation or LOD failures, and representative forest,
+      mountain, river, lake, coast, wetland, reef, and cave scenes must all read
+      clearly.
+
+Do not call the world finished merely because its generators return structured
+data. This phase is complete only when their causes are visible in the rendered
+landscape.
+
+The current Phase 5 work changes renderer presentation and read-only audit
+artifacts only. Generator version 16 and the pristine-terrain/persistence
+contract are unchanged.
+
+---
+
+## Phase 6 — Living Water
+
+**Phase status: Not started; equilibrium hydrology exists**
+
+Implement active-region water simulation before expedition gameplay. Start
+with:
+
+- [ ] River response to local terrain changes
+- [ ] Dynamic lake filling, spill, and outflow
+- [ ] Generated waterfalls, cascades, plunge pools, and downstream gorges
+- [ ] Flooding and floodplain response
+- [ ] Cave-stream, sump, and surface-water connections
+- [ ] Frozen-region water summaries and deterministic reconstruction
+- [ ] **PARTIAL** — frozen-water summary types and deterministic equilibrium
+      lakes exist, but no active local water simulation runs.
+
+Validate terrain-change response through controlled test scenarios and
+Generator Lab tools; player dam-building belongs to expedition gameplay. Do not
+attempt general fluid mechanics first.
+
+Target:
+
+> Rivers, lakes, waterfalls, coasts, and cave water should look like connected
+> parts of one hydrological system, and local water should respond believably
+> when its terrain changes.
+
+---
+
+## Phase 7 — Expedition Gameplay
 
 **Phase status: Not started; basic traversal exists**
 
 - [x] Basic walking and sprinting over terrain
-- [ ] **NEXT** — Climbing
+- [ ] Climbing
 - [ ] Swimming
 - [ ] Temperature simulation
-- [ ] Weather
+- [ ] Weather exposure and survival consequences
 - [ ] Food
 - [ ] Water needs
 - [ ] Sleep
@@ -2324,6 +2428,7 @@ Earlier versions retain their cave-free pristine density contract.
 - [ ] Camping
 - [ ] Inventory
 - [ ] Navigation
+- [ ] Terrain modification and player-built dams
 - [ ] **PARTIAL** — independent survival-pressure settings exist, but the
       corresponding simulation systems do not.
 
@@ -2331,7 +2436,7 @@ Still minimal wildlife.
 
 ---
 
-## Phase 6 — Multiplayer
+## Phase 8 — Multiplayer
 
 **Phase status: Not started; protocol contracts have an early foundation**
 
@@ -2351,27 +2456,7 @@ rather than rewriting single-player architecture.
 
 ---
 
-## Phase 7 — Living Water
-
-**Phase status: Not started; equilibrium hydrology exists**
-
-Implement active-region water simulation.
-
-Start with:
-
-- [ ] River response to local terrain changes
-- [ ] Dynamic lake filling and spill
-- [ ] Player dams
-- [ ] Waterfalls
-- [ ] Flooding
-- [ ] **PARTIAL** — frozen-water summary types and deterministic equilibrium
-      lakes exist, but no active local water simulation runs.
-
-Do not attempt general fluid mechanics first.
-
----
-
-## Phase 8 — Discovery
+## Phase 9 — Discovery
 
 **Phase status: Not started**
 

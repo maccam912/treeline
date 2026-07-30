@@ -17,12 +17,21 @@ struct TerrainCutout {
 @group(0) @binding(1)
 var<uniform> terrain_cutout: TerrainCutout;
 
+struct Atmosphere {
+    fog_color_density: vec4<f32>,
+    wind_moisture: vec4<f32>,
+};
+
+@group(0) @binding(2)
+var<uniform> atmosphere: Atmosphere;
+
 struct VertexInput {
     @location(0) position_high: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) snow_coverage: f32,
     @location(4) position_low: vec3<f32>,
+    @location(5) surface_kind: f32,
 };
 
 struct VertexOutput {
@@ -33,6 +42,7 @@ struct VertexOutput {
     @location(3) world_position: vec3<f32>,
     @location(4) snow_coverage: f32,
     @location(5) render_position: vec3<f32>,
+    @location(6) surface_kind: f32,
 };
 
 @vertex
@@ -53,6 +63,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.world_position = world_position;
     output.snow_coverage = input.snow_coverage * slope_retention;
     output.render_position = render_position;
+    output.surface_kind = input.surface_kind;
     return output;
 }
 
@@ -91,7 +102,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let normal = normalize(input.world_normal);
+    var normal = normalize(input.world_normal);
     let slope = 1.0 - max(normal.y, 0.0);
     let grass = vec3<f32>(0.17, 0.34, 0.14);
     let stone = vec3<f32>(0.35, 0.34, 0.31);
@@ -118,7 +129,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         soil_patch * grass_amount * fine_visibility * 0.42,
     );
     let base = ground_base * (1.0 + broad_detail + fine_detail);
-    let visualized = mix(base, input.color.rgb, input.color.a);
+    var visualized = mix(base, input.color.rgb, input.color.a);
+
+    // Dedicated hydrology sheets retain their generated ocean/lake/wetland
+    // color but read as reflective water instead of flat colored terrain.
+    let is_water = input.surface_kind > 0.5;
+    let view_direction = normalize(-input.render_position);
+    if (is_water) {
+        let wind = normalize(atmosphere.wind_moisture.xy + vec2<f32>(0.0001, 0.0001));
+        let cross_wind = vec2<f32>(-wind.y, wind.x);
+        let wave_position = vec2<f32>(
+            dot(ground_position, wind),
+            dot(ground_position, cross_wind),
+        );
+        let long_wave = (value_noise(wave_position * 0.018) - 0.5) * 0.055;
+        let short_wave = (value_noise(wave_position * 0.11) - 0.5) * 0.025;
+        normal = normalize(vec3<f32>(long_wave, 1.0, short_wave));
+        let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
+        let fresnel = 0.04 + (0.56 * pow(1.0 - facing, 5.0));
+        let reflected_sky = vec3<f32>(0.30, 0.53, 0.72);
+        visualized = mix(input.color.rgb * 0.72, reflected_sky, fresnel);
+    }
 
     // A warm directional sun establishes form while cool skylight and a small
     // ground bounce keep shaded faces legible.
@@ -133,6 +164,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     );
     let direct_light = vec3<f32>(1.00, 0.88, 0.70) * sunlight * 0.86;
     let ground_bounce = vec3<f32>(0.13, 0.10, 0.07) * ground_exposure;
-    let lit = visualized * (skylight + direct_light + ground_bounce);
+    var lit = visualized * (skylight + direct_light + ground_bounce);
+    if (is_water) {
+        let half_direction = normalize(sun_direction + view_direction);
+        let sun_glint = pow(max(dot(normal, half_direction), 0.0), 180.0);
+        lit += vec3<f32>(1.0, 0.88, 0.66) * sun_glint * 1.8;
+    }
+
+    // Exponential aerial perspective keeps the full 100 km horizon legible
+    // without a hard fog wall. Low terrain carries a little more suspended
+    // moisture than ridges, producing visible valley haze.
+    let view_distance = length(input.render_position);
+    let fog_density = max(atmosphere.fog_color_density.w, 0.0);
+    let moisture = clamp(atmosphere.wind_moisture.z, 0.0, 1.0);
+    let distance_haze = 1.0 - exp(-(view_distance / 22000.0) * fog_density);
+    let lowland_haze = exp(-max(input.elevation, 0.0) / 700.0)
+        * smoothstep(900.0, 9000.0, view_distance)
+        * mix(0.06, 0.28, moisture);
+    let haze = clamp(distance_haze + lowland_haze, 0.0, 0.92);
+    let horizon_color = atmosphere.fog_color_density.rgb;
+    lit = mix(lit, horizon_color, haze);
     return vec4<f32>(lit, 1.0);
 }

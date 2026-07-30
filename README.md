@@ -110,6 +110,20 @@ a location, and right-click to teleport the view. Additional ecosystem layers
 use `V` for ground vegetation, `G` for rocks, `M` for wetlands, `Q` for reefs,
 and `K` for caves.
 
+Run the deterministic world-quality survey with:
+
+```sh
+cargo run -p world-viewer -- audit
+```
+
+The survey samples terrain, drainage, climate, forest, soil, wetlands, reefs,
+and caves across far-apart regions. It writes descriptor data, a seven-view
+contact sheet, novelty and plausibility findings, and a stable regression
+fingerprint to `artifacts/world-quality`. Existing baselines are retained when
+results change; after reviewing the report and contact sheet, pass `--accept`
+to adopt an intentional visual change. Use `--help` to see seed, region-count,
+and output-path controls.
+
 Run the playable terrain toy with:
 
 ```sh

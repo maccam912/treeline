@@ -18,11 +18,12 @@ pub use treeline_caves::{
 };
 use treeline_coordinates::{WorldIdentity, WorldPosition};
 use treeline_ecology::{
-    REEF_GENERATOR_VERSION, ReefDistribution, ReefSample, WETLAND_GENERATOR_VERSION,
-    WetlandDistribution, WetlandHydrology, WetlandKind, WetlandSample,
+    ForestDistribution, ForestSample, GroundVegetationDistribution, GroundVegetationSample,
+    REEF_GENERATOR_VERSION, ReefDistribution, ReefSample, Soil, SoilSample,
+    WETLAND_GENERATOR_VERSION, WetlandDistribution, WetlandHydrology, WetlandKind, WetlandSample,
 };
 pub use treeline_geography::Season;
-use treeline_geography::{Climate, DrainageCellIndex, WatershedRegionIndex};
+use treeline_geography::{Climate, DrainageCellIndex, RegionalProfile, WatershedRegionIndex};
 pub use treeline_hydrology::Lake;
 use treeline_hydrology::{
     GullyNetwork, GullyTerrainInfluence, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
@@ -724,10 +725,26 @@ impl GeneratedWorldTerrain {
                 mesh.colors.push(cave_wall_color(cave.family));
                 continue;
             }
+            let profile = RegionalProfile::sample(self.world(), position[0], position[2]);
+            let soil = Soil::new(self.world()).sample(position[0], position[2]);
+            let forest = ForestDistribution::new(self.world()).sample(position[0], position[2]);
+            let ground =
+                GroundVegetationDistribution::new(self.world()).sample(position[0], position[2]);
+            let erosion = self.erosion_at(position[0], position[2]);
             let reef = self.reef_at(position[0], position[2]);
             let wetland = self.wetland_at(position[0], position[2]);
-            mesh.colors
-                .push(ecosystem_surface_color(reef, wetland).unwrap_or([1.0, 1.0, 1.0, 0.0]));
+            mesh.colors.push(
+                geography_surface_color(&SurfaceColorInputs {
+                    profile,
+                    soil,
+                    forest,
+                    ground,
+                    erosion,
+                    wetland,
+                    reef,
+                })
+                .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+            );
         }
         if mesh.colors.iter().all(|color| color[3] <= f32::EPSILON) {
             mesh.colors.clear();
@@ -778,39 +795,101 @@ fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
     t * t * (3.0 - (2.0 * t))
 }
 
-fn ecosystem_surface_color(
-    reef: Option<ReefSample>,
+#[derive(Clone, Copy, Debug)]
+struct SurfaceColorInputs {
+    profile: Option<RegionalProfile>,
+    soil: Option<SoilSample>,
+    forest: Option<ForestSample>,
+    ground: Option<GroundVegetationSample>,
+    erosion: Option<WorldErosionSample>,
     wetland: Option<WetlandSample>,
-) -> Option<[f32; 4]> {
-    let reef_strength = reef.map_or(0.0, |sample| sample.coverage_fraction);
-    let wetland_strength = wetland.map_or(0.0, |sample| sample.coverage_fraction);
-    if reef_strength <= 0.01 && wetland_strength <= 0.01 {
-        return None;
-    }
+    reef: Option<ReefSample>,
+}
+
+fn geography_surface_color(inputs: &SurfaceColorInputs) -> Option<[f32; 4]> {
+    let profile = inputs.profile?;
+    let soil = inputs.soil?;
+    let erosion = inputs.erosion?.surface;
+    let moisture = f64_as_f32(soil.surface_moisture);
+    let organic = f64_as_f32(soil.organic_matter_fraction / 0.17);
+    let carbonate = f64_as_f32(profile.karst_probability);
+    let hardness = f64_as_f32(profile.rock_hardness);
+    let sediment = f64_as_f32((erosion.sediment_deposition_meters / 18.0).clamp(0.0, 1.0));
+    let rock_exposure = f64_as_f32(erosion.rock_exposure);
+    let scree = f64_as_f32(erosion.scree_cover);
+
+    let mineral_rock = [
+        0.31 + (carbonate * 0.16) + (hardness * 0.05),
+        0.30 + (carbonate * 0.15) + (hardness * 0.04),
+        0.28 + (carbonate * 0.11),
+    ];
+    let mineral_soil = [
+        0.25 + (f64_as_f32(soil.composition.sand_fraction) * 0.15),
+        0.17 + (organic * 0.06) + (moisture * 0.04),
+        0.09 + (f64_as_f32(soil.composition.clay_fraction) * 0.08),
+    ];
+    let sediment_color = [0.43, 0.34, 0.20];
+    let vegetation_color = [
+        0.12 + ((1.0 - moisture) * 0.13),
+        0.25 + (moisture * 0.15),
+        0.09 + (moisture * 0.07),
+    ];
+    let canopy = f64_as_f32(
+        inputs
+            .forest
+            .map_or(0.0, |forest| forest.canopy_cover_fraction),
+    );
+    let ground_cover = f64_as_f32(
+        inputs
+            .ground
+            .map_or(0.0, |ground| ground.ground_cover_fraction),
+    );
+    let vegetation = (ground_cover * (1.0 - (canopy * 0.35)) + (canopy * 0.45))
+        * (1.0 - rock_exposure)
+        * (1.0 - (scree * 0.7));
+
+    let soil_base = mix_rgb(mineral_soil, sediment_color, sediment * 0.58);
+    let substrate = mix_rgb(
+        soil_base,
+        mineral_rock,
+        (rock_exposure + (scree * 0.55)).clamp(0.0, 1.0),
+    );
+    let mut color = mix_rgb(substrate, vegetation_color, vegetation.clamp(0.0, 0.82));
+    let mut strength: f32 = 0.88;
+
+    let reef_strength = inputs.reef.map_or(0.0, |sample| sample.coverage_fraction);
+    let wetland_strength = inputs
+        .wetland
+        .map_or(0.0, |sample| sample.coverage_fraction);
     if reef_strength > wetland_strength {
-        let reef = reef?;
+        let reef = inputs.reef?;
         let lagoon = f64_as_f32(reef.lagoon_fraction);
-        return Some([
+        let reef_color = [
             0.54 + (lagoon * 0.08),
             0.38 + (lagoon * 0.18),
             0.20 + (lagoon * 0.10),
-            f64_as_f32(reef_strength * 0.88),
-        ]);
+        ];
+        let reef_blend = f64_as_f32(reef_strength * 0.92);
+        color = mix_rgb(color, reef_color, reef_blend);
+        strength = strength.max(reef_blend);
+    } else if let Some(wetland) = inputs.wetland {
+        let wetland_color = match wetland.dominant_kind() {
+            WetlandKind::EmergentMarsh => [0.28, 0.40, 0.12],
+            WetlandKind::ForestedSwamp => [0.12, 0.28, 0.13],
+            WetlandKind::Peatland => [0.29, 0.25, 0.13],
+            WetlandKind::SeasonalWetland => [0.40, 0.39, 0.16],
+            WetlandKind::SaltMarsh => [0.37, 0.47, 0.25],
+        };
+        let wetland_blend = f64_as_f32(wetland_strength * 0.88);
+        color = mix_rgb(color, wetland_color, wetland_blend);
+        strength = strength.max(wetland_blend);
     }
-    let wetland = wetland?;
-    let color = match wetland.dominant_kind() {
-        WetlandKind::EmergentMarsh => [0.28, 0.40, 0.12],
-        WetlandKind::ForestedSwamp => [0.12, 0.28, 0.13],
-        WetlandKind::Peatland => [0.29, 0.25, 0.13],
-        WetlandKind::SeasonalWetland => [0.40, 0.39, 0.16],
-        WetlandKind::SaltMarsh => [0.37, 0.47, 0.25],
-    };
-    Some([
-        color[0],
-        color[1],
-        color[2],
-        f64_as_f32(wetland_strength * 0.82),
-    ])
+
+    Some([color[0], color[1], color[2], strength])
+}
+
+fn mix_rgb(start: [f32; 3], end: [f32; 3], amount: f32) -> [f32; 3] {
+    std::array::from_fn(|channel| start[channel] + ((end[channel] - start[channel]) * amount))
 }
 
 const fn cave_wall_color(family: CaveFamily) -> [f32; 4] {
@@ -2951,6 +3030,35 @@ mod tests {
                 .is_empty()
         );
         assert!(terrain.lake_networks.read().expect("cache lock").is_empty());
+    }
+
+    #[test]
+    fn geography_surface_materials_are_world_aligned_and_regionally_distinct() {
+        let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let sample_color = |x, z| {
+            geography_surface_color(&SurfaceColorInputs {
+                profile: RegionalProfile::sample(world, x, z),
+                soil: Soil::new(world).sample(x, z),
+                forest: ForestDistribution::new(world).sample(x, z),
+                ground: GroundVegetationDistribution::new(world).sample(x, z),
+                erosion: terrain.erosion_at(x, z),
+                wetland: terrain.wetland_at(x, z),
+                reef: terrain.reef_at(x, z),
+            })
+            .expect("geography material")
+        };
+        let first = sample_color(-80_062.0, -79_950.0);
+        let repeated = sample_color(-80_062.0, -79_950.0);
+        let distant = sample_color(175_000.0, -212_000.0);
+
+        assert_eq!(first.map(f32::to_bits), repeated.map(f32::to_bits));
+        assert_ne!(
+            [first[0], first[1], first[2]].map(f32::to_bits),
+            [distant[0], distant[1], distant[2]].map(f32::to_bits)
+        );
+        assert!((0.0..=1.0).contains(&first[3]));
+        assert!(first[3] >= 0.8);
     }
 
     #[test]

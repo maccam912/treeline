@@ -15,6 +15,26 @@ use wgpu::util::DeviceExt;
 const TERRAIN_SHADER: &str = include_str!("terrain.wgsl");
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Renderer-facing atmosphere controls sampled from the world's local climate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtmosphereSettings {
+    pub fog_color: [f32; 3],
+    pub fog_density: f32,
+    pub moisture: f32,
+    pub prevailing_wind: [f32; 2],
+}
+
+impl Default for AtmosphereSettings {
+    fn default() -> Self {
+        Self {
+            fog_color: [0.39, 0.57, 0.72],
+            fog_density: 1.0,
+            moisture: 0.45,
+            prevailing_wind: [0.8, 0.2],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerrainRenderTier {
     FullVoxel,
@@ -55,15 +75,17 @@ struct TerrainVertex {
     color: [f32; 4],
     snow_coverage: f32,
     position_low: [f32; 3],
+    surface_kind: f32,
 }
 
 impl TerrainVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x4,
         3 => Float32,
         4 => Float32x3,
+        5 => Float32,
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -88,7 +110,29 @@ fn terrain_vertex(
         color,
         snow_coverage,
         position_low,
+        surface_kind: 0.0,
     }
+}
+
+fn mesh_vertices(mesh: &Mesh, surface_kind: f32) -> Vec<TerrainVertex> {
+    mesh.positions
+        .iter()
+        .zip(&mesh.normals)
+        .enumerate()
+        .map(|(index, (&position, &normal))| {
+            let mut vertex = terrain_vertex(
+                position,
+                normal,
+                mesh.colors
+                    .get(index)
+                    .copied()
+                    .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+                0.0,
+            );
+            vertex.surface_kind = surface_kind;
+            vertex
+        })
+        .collect()
 }
 
 fn local_vertex(
@@ -230,6 +274,30 @@ struct TerrainCutoutUniform {
     max_low: [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct AtmosphereUniform {
+    fog_color_density: [f32; 4],
+    wind_moisture: [f32; 4],
+}
+
+fn atmosphere_uniform(settings: AtmosphereSettings) -> AtmosphereUniform {
+    AtmosphereUniform {
+        fog_color_density: [
+            settings.fog_color[0],
+            settings.fog_color[1],
+            settings.fog_color[2],
+            settings.fog_density.max(0.0),
+        ],
+        wind_moisture: [
+            settings.prevailing_wind[0],
+            settings.prevailing_wind[1],
+            settings.moisture.clamp(0.0, 1.0),
+            0.0,
+        ],
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RendererError {
     TooManyIndices,
@@ -253,6 +321,7 @@ pub struct TerrainRenderer {
     far_bind_group: wgpu::BindGroup,
     near_bind_group: wgpu::BindGroup,
     far_cutout_buffer: wgpu::Buffer,
+    atmosphere_buffer: wgpu::Buffer,
     depth: DepthTarget,
 }
 
@@ -262,6 +331,7 @@ struct TerrainBindings {
     far_bind_group: wgpu::BindGroup,
     near_bind_group: wgpu::BindGroup,
     far_cutout_buffer: wgpu::Buffer,
+    atmosphere_buffer: wgpu::Buffer,
 }
 
 impl TerrainBindings {
@@ -299,13 +369,21 @@ impl TerrainBindings {
             entries: &[
                 uniform_layout_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
                 uniform_layout_entry(1, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                uniform_layout_entry(2, wgpu::ShaderStages::FRAGMENT),
             ],
+        });
+        let atmosphere = AtmosphereSettings::default();
+        let atmosphere_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("atmosphere uniform"),
+            contents: bytemuck::bytes_of(&atmosphere_uniform(atmosphere)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let far_bind_group = terrain_bind_group(
             device,
             &layout,
             &camera_buffer,
             &far_cutout_buffer,
+            &atmosphere_buffer,
             "far terrain bind group",
         );
         let near_bind_group = terrain_bind_group(
@@ -313,6 +391,7 @@ impl TerrainBindings {
             &layout,
             &camera_buffer,
             &no_cutout_buffer,
+            &atmosphere_buffer,
             "near terrain bind group",
         );
 
@@ -322,6 +401,7 @@ impl TerrainBindings {
             far_bind_group,
             near_bind_group,
             far_cutout_buffer,
+            atmosphere_buffer,
         }
     }
 }
@@ -360,6 +440,7 @@ fn terrain_bind_group(
     layout: &wgpu::BindGroupLayout,
     camera_buffer: &wgpu::Buffer,
     cutout_buffer: &wgpu::Buffer,
+    atmosphere_buffer: &wgpu::Buffer,
     label: &str,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -373,6 +454,10 @@ fn terrain_bind_group(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: cutout_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: atmosphere_buffer.as_entire_binding(),
             },
         ],
     })
@@ -449,6 +534,7 @@ impl TerrainRenderer {
             far_bind_group: bindings.far_bind_group,
             near_bind_group: bindings.near_bind_group,
             far_cutout_buffer: bindings.far_cutout_buffer,
+            atmosphere_buffer: bindings.atmosphere_buffer,
             depth: DepthTarget::new(device, width, height),
         }
     }
@@ -464,25 +550,34 @@ impl TerrainRenderer {
         device: &wgpu::Device,
         mesh: &Mesh,
     ) -> Result<TerrainMesh, RendererError> {
-        let vertices = mesh
-            .positions
-            .iter()
-            .zip(&mesh.normals)
-            .enumerate()
-            .map(|(index, (&position, &normal))| {
-                terrain_vertex(
-                    position,
-                    normal,
-                    mesh.colors
-                        .get(index)
-                        .copied()
-                        .unwrap_or([1.0, 1.0, 1.0, 0.0]),
-                    0.0,
-                )
-            })
-            .collect::<Vec<_>>();
+        Self::upload_mesh_with_kind(device, mesh, 0.0, "terrain vertices")
+    }
+
+    /// Uploads a dedicated water sheet. Water vertices use the supplied
+    /// hydrology color while the shader adds surface reflection, glints, and
+    /// distance-aware aerial perspective without affecting solid terrain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RendererError::TooManyIndices`] when the mesh cannot be
+    /// addressed using the renderer's `u32` draw count.
+    pub fn upload_water_mesh(
+        &self,
+        device: &wgpu::Device,
+        mesh: &Mesh,
+    ) -> Result<TerrainMesh, RendererError> {
+        Self::upload_mesh_with_kind(device, mesh, 1.0, "water vertices")
+    }
+
+    fn upload_mesh_with_kind(
+        device: &wgpu::Device,
+        mesh: &Mesh,
+        surface_kind: f32,
+        vertex_label: &str,
+    ) -> Result<TerrainMesh, RendererError> {
+        let vertices = mesh_vertices(mesh, surface_kind);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("terrain vertices"),
+            label: Some(vertex_label),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
@@ -694,6 +789,16 @@ impl TerrainRenderer {
                     0.0,
                 ],
             }),
+        );
+    }
+
+    /// Updates climate-derived fog and wind controls without rebuilding any
+    /// resident terrain or render pipeline resources.
+    pub fn update_atmosphere(&self, queue: &wgpu::Queue, settings: AtmosphereSettings) {
+        queue.write_buffer(
+            &self.atmosphere_buffer,
+            0,
+            bytemuck::bytes_of(&atmosphere_uniform(settings)),
         );
     }
 
@@ -1801,6 +1906,25 @@ mod tests {
 
         assert_eq!(query_count, 9);
         assert!((grid.coverage_at([1.0, 0.0, 1.0]) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn water_upload_vertices_are_distinct_from_solid_terrain() {
+        let mesh = Mesh {
+            positions: vec![[0.0, 4.0, 0.0]],
+            normals: vec![[0.0, 1.0, 0.0]],
+            colors: vec![[0.04, 0.34, 0.58, 1.0]],
+            indices: Vec::new(),
+        };
+        let terrain = mesh_vertices(&mesh, 0.0);
+        let water = mesh_vertices(&mesh, 1.0);
+
+        assert!(terrain[0].surface_kind.abs() < f32::EPSILON);
+        assert!((water[0].surface_kind - 1.0).abs() < f32::EPSILON);
+        assert_eq!(
+            terrain[0].color.map(f32::to_bits),
+            water[0].color.map(f32::to_bits)
+        );
     }
 
     #[test]

@@ -9,10 +9,14 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+libm.workspace = true
+treeline-coordinates.workspace = true
+treeline-ecology.workspace = true
+treeline-geography.workspace = true
 treeline-renderer.workspace = true
+treeline-terrain.workspace = true
 treeline-voxel.workspace = true
 treeline-world.workspace = true
 
 [lints]
 workspace = true
-
