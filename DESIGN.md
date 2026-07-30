@@ -2378,27 +2378,45 @@ Do not call the world finished merely because its generators return structured
 data. This phase is complete only when their causes are visible in the rendered
 landscape.
 
-The current Phase 5 work changes renderer presentation and read-only audit
-artifacts only. Generator version 16 and the pristine-terrain/persistence
-contract are unchanged.
+The Phase 5 work changes renderer presentation and read-only audit artifacts
+only. Phase 6 below advances the current generator contract to version 17 for
+fast-water terrain morphology.
 
 ---
 
 ## Phase 6 — Living Water
 
-**Phase status: Not started; equilibrium hydrology exists**
+**Phase status: Complete**
 
 Implement active-region water simulation before expedition gameplay. Start
 with:
 
-- [ ] River response to local terrain changes
-- [ ] Dynamic lake filling, spill, and outflow
-- [ ] Generated waterfalls, cascades, plunge pools, and downstream gorges
-- [ ] Flooding and floodplain response
-- [ ] Cave-stream, sump, and surface-water connections
-- [ ] Frozen-region water summaries and deterministic reconstruction
-- [ ] **PARTIAL** — frozen-water summary types and deterministic equilibrium
-      lakes exist, but no active local water simulation runs.
+- [x] River response to local terrain changes. Bounded storage cells conserve
+      displaced water when their generated bed or bank changes, then reroute it
+      through deterministic, spill-controlled connections on fixed steps.
+- [x] Dynamic lake filling, spill, and outflow. Sources and controlled water
+      pulses fill local storage to connection sills before water enters the
+      downstream store or leaves through an explicit boundary outlet.
+- [x] Generated waterfalls, cascades, plunge pools, and downstream gorges.
+      River drop, gradient, and discharge select fast-water morphology without
+      prefabs; active flow reports visible cascade/waterfall state, and
+      generator version 17 carves derived plunge pools and gorge incision.
+- [x] Flooding and floodplain response. Water surfaces above generated banks
+      expose stable flooded-cell state while retaining volume conservation.
+- [x] Cave-stream, sump, and surface-water connections. Wet cave graph nodes
+      become active stores, underground reaches preserve their directed flow,
+      and entrances and sinkholes explicitly route surface water underground.
+- [x] Frozen-region water summaries and deterministic reconstruction.
+      Inactive regions retain millimeter-quantized depths, elapsed time, and
+      boundary outflow while pure topology, terrain, sources, and connections
+      regenerate from world identity. The client freezes and restores these
+      summaries as the player crosses active-water footprints.
+- [x] Controlled validation and inspection. Conservation, filling, spill,
+      flooding, terrain displacement, fast-water morphology, cave connection,
+      negative-coordinate, lifecycle, and freeze/reconstruction scenarios are
+      automated. Generator Lab's `L` layer runs a controlled raised-terrain
+      and water-pulse scenario and visualizes stored water, the changed strip,
+      flooding, cascades, and waterfalls.
 
 Validate terrain-change response through controlled test scenarios and
 Generator Lab tools; player dam-building belongs to expedition gameplay. Do not
@@ -2409,6 +2427,18 @@ Target:
 > Rivers, lakes, waterfalls, coasts, and cave water should look like connected
 > parts of one hydrological system, and local water should respond believably
 > when its terrain changes.
+
+Known water bug to fix: some equilibrium lakes own a coarse basin footprint
+whose composed fine terrain (including trees and surface debris) descends below
+the lake surface outside the intended contained basin. The separately rendered
+level water sheet then appears to float above that terrain. Fix lake footprint
+and shoreline conformance so the filled fine-scale basin, water surface, and
+surface-feature placement agree; do not hide it with a rendering-only skirt.
+
+Generator version 17 introduces condition-driven plunge-pool and
+downstream-gorge terrain morphology for newly created worlds. Version 16 and
+earlier retain their previous pristine density contract. Active water state is
+a simulation deviation and does not change pristine-terrain persistence.
 
 ---
 

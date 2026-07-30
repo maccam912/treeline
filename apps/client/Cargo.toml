@@ -18,6 +18,7 @@ treeline-ecology.workspace = true
 treeline-geography.workspace = true
 treeline-mesher.workspace = true
 treeline-renderer.workspace = true
+treeline-simulation.workspace = true
 treeline-terrain.workspace = true
 treeline-voxel.workspace = true
 treeline-world.workspace = true

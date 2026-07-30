@@ -16,7 +16,7 @@ pub use treeline_caves::{
     CAVE_GENERATOR_VERSION, CaveEntrance, CaveFamily, CaveInfluence, CaveNode, CaveNodeKind,
     CaveRegionIndex, CaveSystem, UndergroundRiver,
 };
-use treeline_coordinates::{WorldIdentity, WorldPosition};
+use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition, stable_hash};
 use treeline_ecology::{
     ForestDistribution, ForestSample, GroundVegetationDistribution, GroundVegetationSample,
     REEF_GENERATOR_VERSION, ReefDistribution, ReefSample, Soil, SoilSample,
@@ -26,7 +26,8 @@ pub use treeline_geography::Season;
 use treeline_geography::{Climate, DrainageCellIndex, RegionalProfile, WatershedRegionIndex};
 pub use treeline_hydrology::Lake;
 use treeline_hydrology::{
-    GullyNetwork, GullyTerrainInfluence, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
+    ActiveWaterError, ActiveWaterRegion, GullyNetwork, GullyTerrainInfluence, LakeNetwork,
+    RiverNetwork, RiverTerrainInfluence, WaterCell, WaterCellId, WaterCellKind, WaterConnection,
 };
 use treeline_mesher::{Mesh, MeshingError, SurfaceGridSpec, surface_grid, transvoxel_chunk};
 use treeline_terrain::{
@@ -41,10 +42,14 @@ pub const RIVER_TERRAIN_GENERATOR_VERSION: u32 = 3;
 pub const LAKE_GENERATOR_VERSION: u32 = 4;
 /// Generator version that first composes macro, meso, and micro erosion.
 pub const EROSION_GENERATOR_VERSION: u32 = 5;
+/// Generator version that first exposes active-region living-water topology.
+pub const LIVING_WATER_GENERATOR_VERSION: u32 = 17;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = CAVE_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = LIVING_WATER_GENERATOR_VERSION;
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
+const DOMAIN_SURFACE_WATER_CELL: u64 = 0x5355_5246_5741_5445;
+const DOMAIN_CAVE_WATER_CELL: u64 = 0x4341_5645_5741_5445;
 /// Terrain-shape cache budget, in entries.
 ///
 /// Entries are large (roughly half a kilobyte each), and every browser terrain
@@ -83,6 +88,36 @@ pub struct OceanSurfaceSample {
     pub surface_elevation_meters: f64,
     pub terrain_elevation_meters: f64,
     pub water_depth_meters: f64,
+}
+
+/// A regular surface footprint used to reconstruct local active water.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ActiveWaterRegionSpec {
+    pub origin_x: f64,
+    pub origin_z: f64,
+    pub cell_counts: [usize; 2],
+    pub spacing_meters: f64,
+}
+
+impl ActiveWaterRegionSpec {
+    pub fn new(
+        origin_x: f64,
+        origin_z: f64,
+        cell_counts: [usize; 2],
+        spacing_meters: f64,
+    ) -> Option<Self> {
+        (origin_x.is_finite()
+            && origin_z.is_finite()
+            && !cell_counts.contains(&0)
+            && spacing_meters.is_finite()
+            && spacing_meters > 0.0)
+            .then_some(Self {
+                origin_x,
+                origin_z,
+                cell_counts,
+                spacing_meters,
+            })
+    }
 }
 
 /// Top-down Generator Lab description of a subterranean system.
@@ -333,6 +368,255 @@ impl GeneratedWorldTerrain {
             terrain_elevation_meters,
             water_depth_meters,
         })
+    }
+
+    /// Reconstructs deterministic local storage and routing for living water.
+    ///
+    /// The surface lattice samples generated terrain, equilibrium lakes,
+    /// rivers, coasts, and climate runoff. Wet cave graph nodes are appended
+    /// and entrances or sinkholes receive explicit surface-to-cave links.
+    /// Terrain deviations remain an input to [`ActiveWaterRegion`] after this
+    /// pure topology has been regenerated.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid or unrepresentable samples and any generated cell or
+    /// connection topology that violates active-water invariants.
+    #[allow(clippy::too_many_lines)]
+    pub fn active_water_region(
+        &self,
+        spec: ActiveWaterRegionSpec,
+    ) -> Result<ActiveWaterRegion, ActiveWaterError> {
+        const SECONDS_PER_YEAR: f64 = 31_556_952.0;
+
+        if self.world().generator_version < LIVING_WATER_GENERATOR_VERSION {
+            return ActiveWaterRegion::new(Vec::new(), Vec::new());
+        }
+        let [cells_x, cells_z] = spec.cell_counts;
+        let cell_area = spec.spacing_meters * spec.spacing_meters;
+        let count = cells_x
+            .checked_mul(cells_z)
+            .ok_or(ActiveWaterError::InvalidCell)?;
+        let mut cells = Vec::with_capacity(count);
+        let mut surface_ids = Vec::with_capacity(count);
+        for local_z in 0..cells_z {
+            let z = spec.origin_z + ((usize_as_f64(local_z) + 0.5) * spec.spacing_meters);
+            for local_x in 0..cells_x {
+                let x = spec.origin_x + ((usize_as_f64(local_x) + 0.5) * spec.spacing_meters);
+                let lattice = CellIndex::containing(x, z, 0, spec.spacing_meters)
+                    .ok_or(ActiveWaterError::InvalidCell)?;
+                let id =
+                    WaterCellId(lattice.generation_key(self.world(), DOMAIN_SURFACE_WATER_CELL));
+                let bed = self
+                    .surface_height(x, z)
+                    .ok_or(ActiveWaterError::InvalidCell)?;
+                let lake = self.lake_surface_at(x, z);
+                let ocean = self.ocean_surface_at(x, z);
+                let river = self.river_influence_at(x, z).filter(|influence| {
+                    influence.distance_meters <= influence.channel_half_width_meters
+                });
+                let (kind, water_depth) = if let Some(water) = ocean {
+                    (WaterCellKind::Coast, water.water_depth_meters)
+                } else if let Some(water) = lake {
+                    (WaterCellKind::Surface, water.water_depth_meters)
+                } else if let Some(influence) = river {
+                    (
+                        WaterCellKind::Surface,
+                        (0.12
+                            + (libm::sqrt(influence.segment.discharge_cubic_meters_per_second)
+                                * 0.08))
+                            .clamp(0.12, 2.0),
+                    )
+                } else {
+                    (WaterCellKind::Surface, 0.0)
+                };
+                let bank = if let Some(water) = lake {
+                    water.lake.surface_elevation_meters + 0.35
+                } else if ocean.is_some() {
+                    0.6_f64.max(bed)
+                } else if let Some(influence) = river {
+                    bed + (influence.incision_depth_meters * 0.42).max(0.8)
+                } else {
+                    bed + 0.8
+                };
+                let climate = Climate::new(self.world())
+                    .sample(x, z)
+                    .ok_or(ActiveWaterError::InvalidCell)?;
+                let runoff_depth_per_year = climate.annual_precipitation_millimeters / 1_000.0
+                    * (0.18 + ((1.0 - climate.warmth_fraction()) * 0.34));
+                cells.push(WaterCell {
+                    id,
+                    kind,
+                    bed_elevation_meters: bed,
+                    bank_elevation_meters: bank,
+                    area_square_meters: cell_area,
+                    water_depth_meters: water_depth,
+                    source_cubic_meters_per_second: runoff_depth_per_year * cell_area
+                        / SECONDS_PER_YEAR,
+                    infiltration_cubic_meters_per_second: if lake.is_some()
+                        || ocean.is_some()
+                        || river.is_some()
+                    {
+                        0.0
+                    } else {
+                        runoff_depth_per_year * cell_area / SECONDS_PER_YEAR * 0.16
+                    },
+                });
+                surface_ids.push(id);
+            }
+        }
+
+        let mut connections = Vec::new();
+        for local_z in 0..cells_z {
+            for local_x in 0..cells_x {
+                let slot = local_z * cells_x + local_x;
+                if local_x + 1 < cells_x {
+                    append_surface_water_connection(
+                        &mut connections,
+                        &cells,
+                        surface_ids[slot],
+                        surface_ids[slot + 1],
+                        spec.spacing_meters,
+                    )?;
+                }
+                if local_z + 1 < cells_z {
+                    append_surface_water_connection(
+                        &mut connections,
+                        &cells,
+                        surface_ids[slot],
+                        surface_ids[slot + cells_x],
+                        spec.spacing_meters,
+                    )?;
+                }
+                if cells[slot].kind == WaterCellKind::Coast
+                    && (local_x == 0
+                        || local_z == 0
+                        || local_x + 1 == cells_x
+                        || local_z + 1 == cells_z)
+                {
+                    connections.push(WaterConnection {
+                        from: surface_ids[slot],
+                        to: None,
+                        sill_elevation_meters: 0.0,
+                        width_meters: spec.spacing_meters,
+                        conductance: 0.22,
+                    });
+                }
+            }
+        }
+
+        let max_x = spec.origin_x + (usize_as_f64(cells_x) * spec.spacing_meters);
+        let max_z = spec.origin_z + (usize_as_f64(cells_z) * spec.spacing_meters);
+        for system in self.cave_systems_intersecting(spec.origin_x, spec.origin_z, max_x, max_z) {
+            let mut cave_ids = Vec::with_capacity(system.graph.nodes.len());
+            for (node_index, node) in system.graph.nodes.iter().enumerate() {
+                let id = WaterCellId(stable_hash(&[
+                    system.system_key,
+                    u64::try_from(node_index).map_err(|_| ActiveWaterError::InvalidCell)?,
+                    DOMAIN_CAVE_WATER_CELL,
+                ]));
+                let bed = node.position.y - (node.radius_meters * 0.56);
+                let is_wet = system
+                    .graph
+                    .underground_rivers
+                    .iter()
+                    .any(|river| river.flow_from == node_index || river.flow_to == node_index);
+                cells.push(WaterCell {
+                    id,
+                    kind: if node.kind == CaveNodeKind::Sump {
+                        WaterCellKind::Sump
+                    } else {
+                        WaterCellKind::CaveStream
+                    },
+                    bed_elevation_meters: bed,
+                    bank_elevation_meters: node.position.y + (node.radius_meters * 0.2),
+                    area_square_meters: (node.radius_meters
+                        * node.radius_meters
+                        * core::f64::consts::PI)
+                        .max(1.0),
+                    water_depth_meters: if is_wet {
+                        (node.radius_meters * 0.12).max(0.15)
+                    } else {
+                        0.0
+                    },
+                    source_cubic_meters_per_second: 0.0,
+                    infiltration_cubic_meters_per_second: if node.kind == CaveNodeKind::Sump {
+                        0.01
+                    } else {
+                        0.0
+                    },
+                });
+                cave_ids.push(id);
+
+                if matches!(node.kind, CaveNodeKind::Entrance | CaveNodeKind::Sinkhole)
+                    && node.position.x >= spec.origin_x
+                    && node.position.x < max_x
+                    && node.position.z >= spec.origin_z
+                    && node.position.z < max_z
+                {
+                    let local_x = active_grid_offset(
+                        node.position.x,
+                        spec.origin_x,
+                        spec.spacing_meters,
+                        cells_x,
+                    )
+                    .ok_or(ActiveWaterError::InvalidCell)?;
+                    let local_z = active_grid_offset(
+                        node.position.z,
+                        spec.origin_z,
+                        spec.spacing_meters,
+                        cells_z,
+                    )
+                    .ok_or(ActiveWaterError::InvalidCell)?;
+                    let surface_id = surface_ids[local_z * cells_x + local_x];
+                    connections.push(WaterConnection {
+                        from: surface_id,
+                        to: Some(id),
+                        sill_elevation_meters: node.position.y,
+                        width_meters: node.radius_meters,
+                        conductance: 0.11,
+                    });
+                }
+            }
+            for river in &system.graph.underground_rivers {
+                let to = system.graph.nodes[river.flow_to];
+                connections.push(WaterConnection {
+                    from: cave_ids[river.flow_from],
+                    to: Some(cave_ids[river.flow_to]),
+                    sill_elevation_meters: to.position.y - (to.radius_meters * 0.56),
+                    width_meters: river.width_meters,
+                    conductance: 0.16,
+                });
+                let from_slot = cells
+                    .iter()
+                    .position(|cell| cell.id == cave_ids[river.flow_from])
+                    .ok_or(ActiveWaterError::MissingCell)?;
+                cells[from_slot].source_cubic_meters_per_second +=
+                    river.discharge_cubic_meters_per_second * 0.08;
+            }
+        }
+        ActiveWaterRegion::new(cells, connections)
+    }
+
+    /// Resolves a surface sample to the stable cell identity used by
+    /// [`Self::active_water_region`].
+    pub fn active_water_cell_id_at(
+        &self,
+        spec: ActiveWaterRegionSpec,
+        x: f64,
+        z: f64,
+    ) -> Option<WaterCellId> {
+        if x < spec.origin_x
+            || z < spec.origin_z
+            || x >= spec.origin_x + usize_as_f64(spec.cell_counts[0]) * spec.spacing_meters
+            || z >= spec.origin_z + usize_as_f64(spec.cell_counts[1]) * spec.spacing_meters
+        {
+            return None;
+        }
+        let lattice = CellIndex::containing(x, z, 0, spec.spacing_meters)?;
+        Some(WaterCellId(
+            lattice.generation_key(self.world(), DOMAIN_SURFACE_WATER_CELL),
+        ))
     }
 
     /// Samples equilibrium wetland ecology using cached lake and river artifacts.
@@ -689,7 +973,15 @@ impl GeneratedWorldTerrain {
         let hydrological_height = river.map_or(gully_height, |river| {
             let channel_bed = river.centerline_elevation_meters - river.incision_depth_meters;
             let target = gully_height.min(channel_bed);
-            gully_height + ((target - gully_height) * river.blend)
+            let incised = gully_height + ((target - gully_height) * river.blend);
+            if self.world().generator_version < LIVING_WATER_GENERATOR_VERSION {
+                return incised;
+            }
+            let morphology_depth = river.fast_water.map_or(0.0, |feature| {
+                (feature.plunge_pool_depth_meters * feature.plunge_pool_blend)
+                    .max(feature.downstream_gorge_depth_meters * feature.gorge_blend)
+            });
+            incised - morphology_depth
         });
         let reef = ReefDistribution::new(self.world()).sample(x, z);
         let height = hydrological_height + reef.map_or(0.0, |reef| reef.framework_height_meters);
@@ -769,6 +1061,54 @@ fn network_slot<T>(cache: &NetworkCache<T>, region: WatershedRegionIndex) -> Net
             .entry(region)
             .or_insert_with(|| Arc::new(OnceLock::new())),
     )
+}
+
+fn append_surface_water_connection(
+    connections: &mut Vec<WaterConnection>,
+    cells: &[WaterCell],
+    first_id: WaterCellId,
+    second_id: WaterCellId,
+    spacing_meters: f64,
+) -> Result<(), ActiveWaterError> {
+    let first = cells
+        .iter()
+        .find(|cell| cell.id == first_id)
+        .ok_or(ActiveWaterError::MissingCell)?;
+    let second = cells
+        .iter()
+        .find(|cell| cell.id == second_id)
+        .ok_or(ActiveWaterError::MissingCell)?;
+    let first_surface = first.surface_elevation_meters();
+    let second_surface = second.surface_elevation_meters();
+    let (from, to) = if first_surface > second_surface
+        || (first_surface.to_bits() == second_surface.to_bits() && first.id > second.id)
+    {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    connections.push(WaterConnection {
+        from: from.id,
+        to: Some(to.id),
+        sill_elevation_meters: from.bed_elevation_meters.max(to.bed_elevation_meters),
+        width_meters: spacing_meters,
+        conductance: 0.035,
+    });
+    Ok(())
+}
+
+fn active_grid_offset(
+    coordinate: f64,
+    origin: f64,
+    spacing_meters: f64,
+    count: usize,
+) -> Option<usize> {
+    let offset = libm::floor((coordinate - origin) / spacing_meters);
+    if !(0.0..usize_as_f64(count)).contains(&offset) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(offset as usize)
 }
 
 fn cave_slot(cache: &CaveCache, region: CaveRegionIndex) -> NetworkSlot<CaveSystem> {
@@ -1014,6 +1354,7 @@ fn lake_surface_grid(
     const WATER_RENDER_OFFSET_METERS: f64 = 0.05;
     const LAKE_WATER_COLOR: [f32; 4] = [0.04, 0.34, 0.58, 1.0];
     const OCEAN_WATER_COLOR: [f32; 4] = [0.02, 0.29, 0.52, 1.0];
+    const RIVER_WATER_COLOR: [f32; 4] = [0.035, 0.31, 0.49, 1.0];
 
     if spec.cell_counts.contains(&0)
         || !spec.origin_x.is_finite()
@@ -1065,6 +1406,18 @@ fn lake_surface_grid(
                     water.lake.surface_elevation_meters + WATER_RENDER_OFFSET_METERS,
                     color,
                 )
+            } else if terrain.world().generator_version >= LIVING_WATER_GENERATOR_VERSION
+                && let Some(river) = terrain.river_influence_at(center_x, center_z)
+                && river.distance_meters
+                    <= river.channel_half_width_meters + (spec.spacing_meters * 0.6)
+            {
+                let bed = terrain
+                    .surface_height(center_x, center_z)
+                    .ok_or(MeshingError::MissingSurface)?;
+                let depth = (0.12
+                    + (libm::sqrt(river.segment.discharge_cubic_meters_per_second) * 0.08))
+                    .clamp(0.12, 2.0);
+                (bed + depth + WATER_RENDER_OFFSET_METERS, RIVER_WATER_COLOR)
             } else {
                 continue;
             };
@@ -2411,6 +2764,91 @@ mod tests {
     }
 
     #[test]
+    fn living_water_carves_generated_plunge_pools_and_downstream_gorges() {
+        let world = WorldIdentity::new(0x5eed, LIVING_WATER_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let mut found = None;
+        'regions: for region_z in -2..=2 {
+            for region_x in -2..=2 {
+                let network =
+                    RiverNetwork::generate(world, WatershedRegionIndex::new(region_x, region_z))
+                        .expect("river network");
+                for segment in network.segments() {
+                    let x = segment.source.x + ((segment.mouth.x - segment.source.x) * 0.9);
+                    let z = segment.source.z + ((segment.mouth.z - segment.source.z) * 0.9);
+                    let Some(erosion) = terrain.erosion_at(x, z) else {
+                        continue;
+                    };
+                    if erosion.river.and_then(|river| river.fast_water).is_some() {
+                        found = Some(erosion);
+                        break 'regions;
+                    }
+                }
+            }
+        }
+        let erosion = found.expect("test world should generate steep fast water");
+        let base = erosion.surface.surface_height_meters();
+        let gully_height = erosion.gully.map_or(base, |influence| {
+            let channel_bed = base.min(influence.centerline_elevation_meters)
+                - influence.segment.incision_depth_meters;
+            base + ((channel_bed - base) * influence.blend)
+        });
+        let river = erosion.river.expect("fast-water river");
+        let channel_bed = river.centerline_elevation_meters - river.incision_depth_meters;
+        let ordinary_incision =
+            gully_height + ((gully_height.min(channel_bed) - gully_height) * river.blend);
+
+        assert!(erosion.final_height_meters < ordinary_incision);
+    }
+
+    #[test]
+    fn version_sixteen_retains_pre_living_water_terrain_and_has_no_active_topology() {
+        let world = WorldIdentity::new(0x5eed, LIVING_WATER_GENERATOR_VERSION - 1, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let spec = ActiveWaterRegionSpec::new(-64.0, -64.0, [4, 4], 32.0).expect("spec");
+        let water = terrain
+            .active_water_region(spec)
+            .expect("old water contract");
+        assert!(water.cells().is_empty());
+        assert!(water.connections().is_empty());
+
+        let mut found = None;
+        'regions: for region_z in -2..=2 {
+            for region_x in -2..=2 {
+                let network =
+                    RiverNetwork::generate(world, WatershedRegionIndex::new(region_x, region_z))
+                        .expect("river network");
+                for segment in network.segments() {
+                    let x = segment.source.x + ((segment.mouth.x - segment.source.x) * 0.9);
+                    let z = segment.source.z + ((segment.mouth.z - segment.source.z) * 0.9);
+                    let Some(erosion) = terrain.erosion_at(x, z) else {
+                        continue;
+                    };
+                    if erosion.river.and_then(|river| river.fast_water).is_some() {
+                        found = Some(erosion);
+                        break 'regions;
+                    }
+                }
+            }
+        }
+        let erosion = found.expect("old world should expose a steep diagnostic river");
+        let base = erosion.surface.surface_height_meters();
+        let gully_height = erosion.gully.map_or(base, |influence| {
+            let channel_bed = base.min(influence.centerline_elevation_meters)
+                - influence.segment.incision_depth_meters;
+            base + ((channel_bed - base) * influence.blend)
+        });
+        let river = erosion.river.expect("fast-water river");
+        let channel_bed = river.centerline_elevation_meters - river.incision_depth_meters;
+        let ordinary_incision =
+            gully_height + ((gully_height.min(channel_bed) - gully_height) * river.blend);
+        assert_eq!(
+            erosion.final_height_meters.to_bits(),
+            ordinary_incision.to_bits()
+        );
+    }
+
+    #[test]
     fn version_four_worlds_retain_the_pre_erosion_contract() {
         let world = WorldIdentity::new(0x5eed, EROSION_GENERATOR_VERSION - 1, 0);
         let terrain = GeneratedWorldTerrain::new(world);
@@ -3449,6 +3887,96 @@ mod tests {
         let fine = specs.get(&ChunkIndex::new(2, 0)).expect("near ring chunk");
         assert_eq!(fine.lod, ChunkIndex::NEAR_LOD);
         assert!(fine.transition_faces.is_empty());
+    }
+
+    #[test]
+    fn living_water_reconstructs_surface_river_lake_and_cave_topology() {
+        let terrain = GeneratedWorldTerrain::new(WorldIdentity::new(
+            0x5eed,
+            LIVING_WATER_GENERATOR_VERSION,
+            0,
+        ));
+        let cave = generated_cave_system(&terrain);
+        let entrance = cave.entrances().next().expect("surface connection");
+        let spacing = 32.0;
+        let cells = 16;
+        let half_span = usize_as_f64(cells) * spacing * 0.5;
+        let spec = ActiveWaterRegionSpec::new(
+            entrance.position.x - half_span,
+            entrance.position.z - half_span,
+            [cells; 2],
+            spacing,
+        )
+        .expect("spec");
+        let mut water = terrain.active_water_region(spec).expect("active water");
+
+        assert!(
+            water
+                .cells()
+                .iter()
+                .any(|cell| cell.kind == WaterCellKind::Surface)
+        );
+        assert!(
+            water
+                .cells()
+                .iter()
+                .any(|cell| cell.kind == WaterCellKind::CaveStream)
+        );
+        assert!(
+            water
+                .cells()
+                .iter()
+                .any(|cell| cell.kind == WaterCellKind::Sump)
+        );
+        let cave_ids = water
+            .cells()
+            .iter()
+            .filter(|cell| matches!(cell.kind, WaterCellKind::CaveStream | WaterCellKind::Sump))
+            .map(|cell| cell.id)
+            .collect::<BTreeSet<_>>();
+        assert!(water.connections().iter().any(|connection| {
+            !cave_ids.contains(&connection.from)
+                && connection
+                    .to
+                    .is_some_and(|target| cave_ids.contains(&target))
+        }));
+        let initial = water.total_volume_cubic_meters();
+        let report = water.step(1.0).expect("living-water step");
+        let expected = initial + report.source_volume_cubic_meters
+            - report.boundary_outflow_volume_cubic_meters
+            - report.infiltrated_volume_cubic_meters;
+        assert!((water.total_volume_cubic_meters() - expected).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn living_water_adds_visible_surface_river_ribbons() {
+        let world = WorldIdentity::new(0x5eed, LIVING_WATER_GENERATOR_VERSION, 0);
+        let network =
+            RiverNetwork::generate(world, WatershedRegionIndex::new(0, 0)).expect("river network");
+        let segment = network.segments().first().expect("river segment");
+        let midpoint = WorldPosition::new(
+            (segment.source.x + segment.mouth.x) * 0.5,
+            0.0,
+            (segment.source.z + segment.mouth.z) * 0.5,
+        );
+        let chunk = ChunkIndex::containing(midpoint).expect("river chunk");
+        let terrain = GeneratedWorldTerrain::new(world);
+        let water = terrain
+            .lake_surface_mesh(TerrainMeshSpec::Near(ChunkMeshSpec {
+                chunk,
+                lod: ChunkIndex::NEAR_LOD,
+                transition_faces: TransitionFaces::none(),
+            }))
+            .expect("water mesh");
+
+        assert!(water.is_well_formed());
+        assert!(!water.indices.is_empty());
+        assert!(water.positions.iter().any(|position| {
+            let Some(influence) = terrain.river_influence_at(position[0], position[2]) else {
+                return false;
+            };
+            influence.distance_meters <= influence.channel_half_width_meters + 2.0
+        }));
     }
 
     fn specs_by_chunk(specs: Vec<ChunkMeshSpec>) -> BTreeMap<ChunkIndex, ChunkMeshSpec> {

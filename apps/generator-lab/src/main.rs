@@ -14,12 +14,15 @@ use treeline_geography::{
     Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
     WatershedRegion, WatershedRegionIndex,
 };
-use treeline_hydrology::{Lake, LakeNetwork, RiverNetwork, RiverSegment};
+use treeline_hydrology::{
+    FastWaterKind, Lake, LakeNetwork, RiverNetwork, RiverSegment, WaterTerrainChange,
+};
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
 use treeline_renderer::{TerrainMesh, TerrainRenderer};
 use treeline_terrain::{SurfaceField, WildernessTerrain};
 use treeline_world::{
-    CURRENT_GENERATOR_VERSION, CaveFamily, CaveMapSample, GeneratedWorldTerrain, WorldErosionSample,
+    ActiveWaterRegionSpec, CURRENT_GENERATOR_VERSION, CaveFamily, CaveMapSample,
+    GeneratedWorldTerrain, WorldErosionSample,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -53,10 +56,11 @@ enum ViewMode {
     Wetlands,
     Reefs,
     Caves,
+    LivingWater,
 }
 
 impl ViewMode {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::Terrain,
         Self::Watersheds,
         Self::FlowAccumulation,
@@ -73,6 +77,7 @@ impl ViewMode {
         Self::Wetlands,
         Self::Reefs,
         Self::Caves,
+        Self::LivingWater,
     ];
 
     const fn label(self) -> &'static str {
@@ -93,6 +98,7 @@ impl ViewMode {
             Self::Wetlands => "wetlands",
             Self::Reefs => "reefs",
             Self::Caves => "caves",
+            Self::LivingWater => "living water response",
         }
     }
 
@@ -114,6 +120,7 @@ impl ViewMode {
             Self::Wetlands => "M",
             Self::Reefs => "Q",
             Self::Caves => "K",
+            Self::LivingWater => "L",
         }
     }
 
@@ -152,6 +159,7 @@ fn view_mode_for_key(code: KeyCode) -> Option<ViewMode> {
         KeyCode::KeyM => Some(ViewMode::Wetlands),
         KeyCode::KeyQ => Some(ViewMode::Reefs),
         KeyCode::KeyK => Some(ViewMode::Caves),
+        KeyCode::KeyL => Some(ViewMode::LivingWater),
         _ => None,
     }
 }
@@ -1094,7 +1102,7 @@ fn draw_keyboard_help(ui: &mut egui::Ui) {
     ui.heading("Keyboard & mouse");
     for help in [
         "1–9  Select view layer",
-        "0 / F / V / G / M / Q / K  Soil / forest / ground / rocks / wetlands / reefs / caves",
+        "0 / F / V / G / M / Q / K / L  Soil / forest / ground / rocks / wetlands / reefs / caves / living water",
         "C  Advance climate season",
         "WASD / arrows  Pan",
         "+ / − / wheel  Zoom",
@@ -1116,6 +1124,9 @@ fn generate_mesh(
     mode: ViewMode,
     season: Season,
 ) -> Result<treeline_mesher::Mesh, Box<dyn Error>> {
+    if mode == ViewMode::LivingWater {
+        return generate_living_water_mesh(seed, center, span_meters, width, height);
+    }
     if mode != ViewMode::Terrain {
         return generate_drainage_mesh(seed, center, span_meters, width, height, mode, season);
     }
@@ -1130,6 +1141,164 @@ fn generate_mesh(
             spacing,
         ),
     )?)
+}
+
+#[allow(clippy::too_many_lines)]
+fn generate_living_water_mesh(
+    seed: u64,
+    center: [f64; 2],
+    span_meters: f64,
+    width: u32,
+    height: u32,
+) -> Result<Mesh, Box<dyn Error>> {
+    let (columns, spacing) = grid_dimensions(span_meters, width, height);
+    let count_x = columns
+        .checked_add(1)
+        .ok_or_else(|| std::io::Error::other("living-water grid is too large"))?;
+    let count_z = GRID_ROWS
+        .checked_add(1)
+        .ok_or_else(|| std::io::Error::other("living-water grid is too large"))?;
+    let origin_x = center[0] - (usize_as_f64(columns) * spacing * 0.5);
+    let origin_z = center[1] - (span_meters * 0.5);
+    let spec = ActiveWaterRegionSpec::new(origin_x, origin_z, [columns, GRID_ROWS], spacing)
+        .ok_or_else(|| std::io::Error::other("invalid living-water footprint"))?;
+    let terrain = GeneratedWorldTerrain::new(WorldIdentity::new(seed, GENERATOR_VERSION, 0));
+    let mut water = terrain
+        .active_water_region(spec)
+        .map_err(|error| std::io::Error::other(format!("active-water build failed: {error:?}")))?;
+
+    // Controlled inspection scenario: a three-cell-thick raised strip across
+    // the middle of the footprint. This is deliberately a Generator Lab input,
+    // not player dam-building gameplay.
+    let dam_columns = [
+        columns.saturating_sub(1) / 2,
+        columns / 2,
+        (columns / 2 + 1).min(columns.saturating_sub(1)),
+    ];
+    let mut changes = Vec::new();
+    for local_z in 0..GRID_ROWS {
+        for local_x in dam_columns {
+            let x = origin_x + ((usize_as_f64(local_x) + 0.5) * spacing);
+            let z = origin_z + ((usize_as_f64(local_z) + 0.5) * spacing);
+            let Some(id) = terrain.active_water_cell_id_at(spec, x, z) else {
+                continue;
+            };
+            let Some(cell) = water.cell(id) else {
+                continue;
+            };
+            changes.push(WaterTerrainChange {
+                cell: id,
+                new_bed_elevation_meters: cell.bed_elevation_meters + 3.0,
+                new_bank_elevation_meters: cell.bank_elevation_meters + 3.0,
+            });
+        }
+    }
+    changes.sort_by_key(|change| change.cell);
+    changes.dedup_by_key(|change| change.cell);
+    water
+        .apply_terrain_changes(&changes)
+        .map_err(|error| std::io::Error::other(format!("water edit failed: {error:?}")))?;
+    let pulse_x = columns / 4;
+    for local_z in 0..GRID_ROWS {
+        let x = origin_x + ((usize_as_f64(pulse_x) + 0.5) * spacing);
+        let z = origin_z + ((usize_as_f64(local_z) + 0.5) * spacing);
+        let Some(id) = terrain.active_water_cell_id_at(spec, x, z) else {
+            continue;
+        };
+        let Some(cell) = water.cell(id) else {
+            continue;
+        };
+        water
+            .add_water_volume(id, cell.area_square_meters * 0.5)
+            .map_err(|error| std::io::Error::other(format!("water pulse failed: {error:?}")))?;
+    }
+    let mut last_report = None;
+    for _ in 0..24 {
+        last_report = Some(
+            water
+                .step(60.0)
+                .map_err(|error| std::io::Error::other(format!("water step failed: {error:?}")))?,
+        );
+    }
+    let report = last_report.ok_or_else(|| std::io::Error::other("missing water report"))?;
+    let flooded = report
+        .flooded_cells
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let fast_water = report
+        .fast_water
+        .iter()
+        .filter_map(|feature| {
+            let from = water.connections().get(feature.connection_index)?.from;
+            Some((from, feature.kind))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let changed_cells = changes
+        .iter()
+        .map(|change| change.cell)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut positions = Vec::with_capacity(count_x * count_z);
+    let mut normals = Vec::with_capacity(count_x * count_z);
+    let mut colors = Vec::with_capacity(count_x * count_z);
+    for vertex_z in 0..count_z {
+        let local_z = vertex_z.min(GRID_ROWS - 1);
+        let world_z = origin_z + (usize_as_f64(vertex_z) * spacing);
+        for vertex_x in 0..count_x {
+            let local_x = vertex_x.min(columns - 1);
+            let world_x = origin_x + (usize_as_f64(vertex_x) * spacing);
+            positions.push([world_x, 0.0, world_z]);
+            normals.push([0.0, 1.0, 0.0]);
+            let sample_x = origin_x + ((usize_as_f64(local_x) + 0.5) * spacing);
+            let sample_z = origin_z + ((usize_as_f64(local_z) + 0.5) * spacing);
+            let id = terrain
+                .active_water_cell_id_at(spec, sample_x, sample_z)
+                .ok_or_else(|| std::io::Error::other("missing living-water cell id"))?;
+            let cell = water
+                .cell(id)
+                .ok_or_else(|| std::io::Error::other("missing living-water cell"))?;
+            let depth = f64_as_f32((cell.water_depth_meters / 3.0).clamp(0.0, 1.0));
+            let color = if let Some(kind) = fast_water.get(&id) {
+                match kind {
+                    FastWaterKind::Cascade => [0.20, 0.78, 0.92, 1.0],
+                    FastWaterKind::Waterfall => [0.82, 0.96, 1.0, 1.0],
+                }
+            } else if flooded.contains(&id) {
+                [0.70, 0.12, 0.78, 1.0]
+            } else if changed_cells.contains(&id) {
+                [0.72, 0.42, 0.08, 1.0]
+            } else {
+                [
+                    lerp_f32(0.20, 0.02, depth),
+                    lerp_f32(0.18, 0.48, depth),
+                    lerp_f32(0.12, 0.92, depth),
+                    1.0,
+                ]
+            };
+            colors.push(color);
+        }
+    }
+    let mut indices = Vec::with_capacity(columns * GRID_ROWS * 6);
+    for z in 0..GRID_ROWS {
+        for x in 0..columns {
+            let top_left = z * count_x + x;
+            let bottom_left = top_left + count_x;
+            indices.extend([
+                u32::try_from(top_left)?,
+                u32::try_from(bottom_left)?,
+                u32::try_from(top_left + 1)?,
+                u32::try_from(top_left + 1)?,
+                u32::try_from(bottom_left)?,
+                u32::try_from(bottom_left + 1)?,
+            ]);
+        }
+    }
+    Ok(Mesh {
+        positions,
+        normals,
+        colors,
+        indices,
+    })
 }
 
 fn upload_lab_mesh(
@@ -1283,7 +1452,8 @@ fn environment_layer_color(
         | ViewMode::FlowAccumulation
         | ViewMode::Rivers
         | ViewMode::Lakes
-        | ViewMode::Erosion => None,
+        | ViewMode::Erosion
+        | ViewMode::LivingWater => None,
     }
 }
 
@@ -1388,7 +1558,8 @@ fn drainage_color(
         | ViewMode::SurfaceRocks
         | ViewMode::Wetlands
         | ViewMode::Reefs
-        | ViewMode::Caves => [1.0, 0.0, 1.0, 1.0],
+        | ViewMode::Caves
+        | ViewMode::LivingWater => [1.0, 0.0, 1.0, 1.0],
     }
 }
 
@@ -1729,5 +1900,37 @@ mod tests {
                 .iter()
                 .all(|channel| (0.0..=1.0).contains(channel))
         }));
+    }
+
+    #[test]
+    fn living_water_view_runs_the_controlled_terrain_change_scenario() {
+        let mesh = generate_mesh(
+            0x5eed,
+            [0.0, 0.0],
+            8_000.0,
+            32,
+            32,
+            ViewMode::LivingWater,
+            Season::Summer,
+        )
+        .expect("living-water view mesh");
+
+        assert!(mesh.is_well_formed());
+        assert_eq!(mesh.colors.len(), mesh.positions.len());
+        assert!(
+            mesh.colors
+                .iter()
+                .any(|color| (color[0] - 0.72).abs() < f32::EPSILON
+                    && (color[1] - 0.42).abs() < f32::EPSILON
+                    && (color[2] - 0.08).abs() < f32::EPSILON
+                    && (color[3] - 1.0).abs() < f32::EPSILON),
+            "the controlled raised-terrain strip must be visible"
+        );
+        assert!(
+            mesh.colors
+                .iter()
+                .any(|color| color[2] > color[0] && color[2] > color[1]),
+            "stored and routed water must remain visible"
+        );
     }
 }

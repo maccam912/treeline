@@ -26,14 +26,16 @@ use treeline_ecology::{
 use treeline_geography::Climate;
 use treeline_mesher::Mesh;
 use treeline_renderer::{AtmosphereSettings, TerrainMesh, TerrainRenderer, TreeMeshDetail};
+use treeline_simulation::{ActiveRegionId, ActiveWaterSimulation};
 use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::ChunkIndex;
 #[cfg(not(target_arch = "wasm32"))]
 use treeline_world::TerrainMeshQueue;
 use treeline_world::{
-    CURRENT_GENERATOR_VERSION, ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig,
-    FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig, FarTileIndex,
-    GeneratedWorldTerrain, GenerationPriority, Lake, NearTerrainCutout, Season, TerrainMeshSpec,
+    ActiveWaterRegionSpec, CURRENT_GENERATOR_VERSION, ChunkMeshSpec, ChunkStreamer,
+    ChunkStreamingConfig, FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig,
+    FarTileIndex, GeneratedWorldTerrain, GenerationPriority, Lake, NearTerrainCutout, Season,
+    TerrainMeshSpec,
 };
 use web_time::Instant;
 use winit::application::ApplicationHandler;
@@ -52,9 +54,9 @@ const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
 const EYE_HEIGHT: f64 = 1.72;
 const WALK_SPEED: f64 = 8.0;
 const SPRINT_SPEED: f64 = 16.0;
-const START_X: f64 = -80_062.19;
-const START_Z: f64 = -79_950.31;
-const START_YAW: f64 = 0.956_442;
+const START_X: f64 = 97_023.0;
+const START_Z: f64 = 20_701.0;
+const START_YAW: f64 = 1.924_842_228_418_599_5;
 const START_PITCH: f64 = -0.08;
 const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
 const RANDOM_WARP_MAX_DISTANCE_METERS: f64 = 5_000_000.0;
@@ -65,6 +67,9 @@ const WATER_WARP_DIRECTIONS: u32 = 16;
 const WATER_WARP_MAX_SHORE_DISTANCE_METERS: f64 = 128_000.0;
 const WATER_WARP_MIN_DEPTH_METERS: f64 = 0.5;
 const WATER_WARP_SHORE_CLEARANCE_METERS: f64 = 8.0;
+const ACTIVE_WATER_EDGE_METERS: f64 = 512.0;
+const ACTIVE_WATER_CELL_COUNT: usize = 16;
+const ACTIVE_WATER_STEP_SECONDS: f64 = 1.0;
 const MAX_TERRAIN_INTEGRATIONS_PER_FRAME: usize = 2;
 const TERRAIN_INTEGRATION_BUDGET: Duration = Duration::from_millis(3);
 const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 20;
@@ -288,6 +293,9 @@ struct Game {
     initial_generation: InitialGenerationProgress,
     warp_requests: WarpRequests,
     atmosphere_cell: Option<CellIndex>,
+    water_simulation: ActiveWaterSimulation,
+    active_water_region: ActiveRegionId,
+    water_step_accumulator_seconds: f64,
     #[cfg(target_arch = "wasm32")]
     browser_actions: BrowserActions,
 }
@@ -364,12 +372,7 @@ impl Game {
         let world_generation_started = Instant::now();
         window.set_title("Treeline — Preparing spawn geography…");
         let terrain = GeneratedWorldTerrain::new(WORLD);
-        let renderer = TerrainRenderer::new(
-            &device,
-            surface_config.format,
-            surface_config.width,
-            surface_config.height,
-        );
+        let renderer = create_terrain_renderer(&device, &surface_config);
         let chunk_streamer = ChunkStreamer::new(chunk_streaming_config());
         let far_terrain_streamer = FarTerrainStreamer::new(far_terrain_streaming_config());
         let mut terrain_chunks = BTreeMap::new();
@@ -409,6 +412,8 @@ impl Game {
         );
         let atmosphere_cell =
             initialize_atmosphere(&renderer, &queue, &terrain, camera.world_position());
+        let (water_simulation, active_water_region) =
+            initialize_active_water(&terrain, camera.world_position())?;
         let initial_generation = start_initial_progress(
             &window,
             &renderer,
@@ -449,6 +454,9 @@ impl Game {
             initial_generation,
             warp_requests: WarpRequests::default(),
             atmosphere_cell,
+            water_simulation,
+            active_water_region,
+            water_step_accumulator_seconds: 0.0,
             #[cfg(target_arch = "wasm32")]
             browser_actions,
         };
@@ -677,6 +685,9 @@ impl Game {
             .look_with_stick(self.input.look_axis(), delta_seconds);
         let travel_direction = self.camera.travel_direction(&self.input);
         self.camera.walk(&self.input, &self.terrain, delta_seconds);
+        if let Err(error) = self.update_living_water(delta_seconds) {
+            eprintln!("active water simulation failed: {error}");
+        }
         self.update_atmosphere();
         if let Err(error) = update_terrain(
             &self.device,
@@ -732,6 +743,32 @@ impl Game {
         };
         self.renderer.update_atmosphere(&self.queue, settings);
         self.atmosphere_cell = cell;
+    }
+
+    fn update_living_water(&mut self, delta_seconds: f64) -> Result<(), Box<dyn Error>> {
+        let (region, spec) = active_water_footprint(self.camera.world_position())
+            .ok_or_else(|| std::io::Error::other("player is outside active-water range"))?;
+        if region != self.active_water_region {
+            let regenerated = self.terrain.active_water_region(spec).map_err(|error| {
+                std::io::Error::other(format!("water reconstruction failed: {error:?}"))
+            })?;
+            let _ = self.water_simulation.freeze(self.active_water_region);
+            self.water_simulation
+                .activate(region, regenerated)
+                .map_err(|error| {
+                    std::io::Error::other(format!("water activation failed: {error:?}"))
+                })?;
+            self.active_water_region = region;
+            self.water_step_accumulator_seconds = 0.0;
+        }
+        self.water_step_accumulator_seconds += delta_seconds;
+        while self.water_step_accumulator_seconds >= ACTIVE_WATER_STEP_SECONDS {
+            self.water_simulation
+                .step(ACTIVE_WATER_STEP_SECONDS)
+                .map_err(|error| std::io::Error::other(format!("water step failed: {error:?}")))?;
+            self.water_step_accumulator_seconds -= ACTIVE_WATER_STEP_SECONDS;
+        }
+        Ok(())
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -1605,6 +1642,57 @@ fn chunk_streaming_config() -> ChunkStreamingConfig {
     }
 }
 
+fn active_water_footprint(
+    position: WorldPosition,
+) -> Option<(ActiveRegionId, ActiveWaterRegionSpec)> {
+    let cell = CellIndex::containing(position.x, position.z, 0, ACTIVE_WATER_EDGE_METERS)?;
+    let id = ActiveRegionId::new(cell.x, cell.z);
+    let origin_x = index_as_f64(cell.x) * ACTIVE_WATER_EDGE_METERS;
+    let origin_z = index_as_f64(cell.z) * ACTIVE_WATER_EDGE_METERS;
+    let spacing = ACTIVE_WATER_EDGE_METERS / usize_as_f64(ACTIVE_WATER_CELL_COUNT);
+    let spec =
+        ActiveWaterRegionSpec::new(origin_x, origin_z, [ACTIVE_WATER_CELL_COUNT; 2], spacing)?;
+    Some((id, spec))
+}
+
+fn create_terrain_renderer(
+    device: &wgpu::Device,
+    surface_config: &wgpu::SurfaceConfiguration,
+) -> TerrainRenderer {
+    TerrainRenderer::new(
+        device,
+        surface_config.format,
+        surface_config.width,
+        surface_config.height,
+    )
+}
+
+fn initialize_active_water(
+    terrain: &GeneratedWorldTerrain,
+    position: WorldPosition,
+) -> Result<(ActiveWaterSimulation, ActiveRegionId), Box<dyn Error>> {
+    let (id, spec) = active_water_footprint(position)
+        .ok_or_else(|| std::io::Error::other("spawn is outside active-water range"))?;
+    let active = terrain.active_water_region(spec).map_err(|error| {
+        std::io::Error::other(format!("failed to generate spawn water: {error:?}"))
+    })?;
+    let mut simulation = ActiveWaterSimulation::default();
+    simulation.activate(id, active).map_err(|error| {
+        std::io::Error::other(format!("failed to activate spawn water: {error:?}"))
+    })?;
+    Ok((simulation, id))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn index_as_f64(index: i64) -> f64 {
+    index as f64
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn usize_as_f64(value: usize) -> f64 {
+    value as f64
+}
+
 fn far_terrain_streaming_config() -> FarTerrainStreamingConfig {
     if cfg!(target_arch = "wasm32") {
         FarTerrainStreamingConfig::new(4, 5).expect("the browser streaming radii are valid")
@@ -2415,8 +2503,8 @@ mod tests {
 
     #[test]
     fn prototype_region_exposes_real_lake() {
-        const LAKE_X: f64 = -163_000.0;
-        const LAKE_Z: f64 = -191_000.0;
+        const LAKE_X: f64 = -225_000.0;
+        const LAKE_Z: f64 = -249_000.0;
         let terrain = GeneratedWorldTerrain::new(WORLD);
         for [x_offset, z_offset] in [[0.0, 0.0], [128.0, 0.0], [-128.0, 0.0], [0.0, 128.0]] {
             assert!(

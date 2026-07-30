@@ -245,6 +245,7 @@ dependencies = [
  "treeline-geography",
  "treeline-mesher",
  "treeline-renderer",
+ "treeline-simulation",
  "treeline-terrain",
  "treeline-voxel",
  "treeline-world",
@@ -2068,6 +2069,9 @@ dependencies = [
 [[package]]
 name = "treeline-simulation"
 version = "0.1.0"
+dependencies = [
+ "treeline-hydrology",
+]
 
 [[package]]
 name = "treeline-terrain"

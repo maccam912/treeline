@@ -60,10 +60,15 @@ test-backed foundations described in the design. The prototype provides:
 - cave subtraction and deep-layer near-terrain meshing, cave-aware traversal,
   rendered subterranean water, and surface openings kept clear of unsupported
   vegetation;
+- deterministic active-region water storage and routing with terrain-change
+  response, lake filling and spill, flooding, surface-to-cave connections,
+  generated cascades, waterfalls, plunge pools and gorges, and compact frozen
+  summaries reconstructed as the player moves;
 - an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
   terrain/watershed/flow/river/lake/erosion/temperature/precipitation/snowpack
-  /soil/forest/ground-vegetation/rock/wetland/reef/cave views, selectable
-  seasons, and explainable ecosystem and cave inspection;
+  /soil/forest/ground-vegetation/rock/wetland/reef/cave/living-water views,
+  selectable seasons, controlled water-response scenarios, and explainable
+  ecosystem and cave inspection;
 - hydrology and generated cave topology/determinism invariants;
 - voxel LOD alignment;
 - world-region lifecycle, protocol, simulation, and render tiers.
@@ -82,8 +87,8 @@ version 11 standardizes non-basic floating-point operations on pure-Rust
 `libm`; version 10 and older worlds require their original executable to retain
 their previous platform-math behavior. Surface rocks begin with version 12,
 ground vegetation with version 13, wetlands with version 14, reefs with version
-15, and cave subtraction with version 16. Survival and networking have not
-been added yet.
+15, cave subtraction with version 16, and fast-water terrain morphology with
+version 17. Expedition survival and live networking have not been added yet.
 
 ## Getting started
 

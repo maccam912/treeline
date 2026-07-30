@@ -67,17 +67,83 @@ impl RiverSegment {
         let centerline_elevation_meters = self.source.y + ((self.mouth.y - self.source.y) * along);
         let normalized = 1.0 - (distance_meters / valley_half_width_meters);
         let blend = normalized * normalized * (3.0 - (2.0 * normalized));
+        let fast_water = self.fast_water_at(x, z, along, blend);
 
         Some(RiverTerrainInfluence {
             segment: self,
             distance_meters,
+            along_fraction: along,
             centerline_elevation_meters,
             channel_half_width_meters,
             valley_half_width_meters,
             incision_depth_meters,
             blend,
+            fast_water,
         })
     }
+
+    fn fast_water_at(
+        self,
+        x: f64,
+        z: f64,
+        along_fraction: f64,
+        channel_blend: f64,
+    ) -> Option<GeneratedFastWater> {
+        let length = libm::hypot(self.mouth.x - self.source.x, self.mouth.z - self.source.z);
+        if length <= 0.0 {
+            return None;
+        }
+        let drop_meters = (self.source.y - self.mouth.y).max(0.0);
+        let gradient = drop_meters / length;
+        let kind = if drop_meters >= 18.0
+            && gradient >= 0.012
+            && self.discharge_cubic_meters_per_second >= 0.08
+        {
+            FastWaterKind::Waterfall
+        } else if drop_meters >= 6.0
+            && gradient >= 0.004
+            && self.discharge_cubic_meters_per_second >= 0.03
+        {
+            FastWaterKind::Cascade
+        } else {
+            return None;
+        };
+        let energy = self.discharge_cubic_meters_per_second * drop_meters;
+        let plunge_pool_depth_meters = (0.45 + (libm::sqrt(energy) * 0.24)).clamp(0.45, 18.0);
+        let plunge_pool_radius_meters = (4.0
+            + (libm::sqrt(self.discharge_cubic_meters_per_second) * libm::sqrt(drop_meters) * 2.2))
+            .clamp(4.0, 56.0);
+        let pool_distance = libm::hypot(x - self.mouth.x, z - self.mouth.z);
+        let pool_normalized = (1.0 - (pool_distance / plunge_pool_radius_meters)).clamp(0.0, 1.0);
+        let plunge_pool_blend = pool_normalized * pool_normalized * (3.0 - (2.0 * pool_normalized));
+        let downstream_gorge_depth_meters =
+            (drop_meters * 0.24 + libm::sqrt(energy) * 0.3).clamp(0.5, 28.0);
+        let downstream = ((along_fraction - 0.58) / 0.42).clamp(0.0, 1.0);
+        let gorge_blend = downstream * channel_blend;
+        Some(GeneratedFastWater {
+            kind,
+            drop_meters,
+            gradient,
+            plunge_pool_depth_meters,
+            plunge_pool_radius_meters,
+            plunge_pool_blend,
+            downstream_gorge_depth_meters,
+            gorge_blend,
+        })
+    }
+}
+
+/// Condition-driven cascade or waterfall morphology on a generated river.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeneratedFastWater {
+    pub kind: FastWaterKind,
+    pub drop_meters: f64,
+    pub gradient: f64,
+    pub plunge_pool_depth_meters: f64,
+    pub plunge_pool_radius_meters: f64,
+    pub plunge_pool_blend: f64,
+    pub downstream_gorge_depth_meters: f64,
+    pub gorge_blend: f64,
 }
 
 /// Explainable terrain-shaping values contributed by one river segment.
@@ -85,11 +151,13 @@ impl RiverSegment {
 pub struct RiverTerrainInfluence {
     pub segment: RiverSegment,
     pub distance_meters: f64,
+    pub along_fraction: f64,
     pub centerline_elevation_meters: f64,
     pub channel_half_width_meters: f64,
     pub valley_half_width_meters: f64,
     pub incision_depth_meters: f64,
     pub blend: f64,
+    pub fast_water: Option<GeneratedFastWater>,
 }
 
 /// One minor drainage path below the river-network catchment threshold.
@@ -552,8 +620,509 @@ pub struct FrozenWaterState {
 
 impl FrozenWaterState {
     pub fn is_physical(self) -> bool {
-        self.volume_cubic_meters >= 0.0 && self.outflow_cubic_meters_per_second >= 0.0
+        self.volume_cubic_meters.is_finite()
+            && self.volume_cubic_meters >= 0.0
+            && self.surface_elevation.is_finite()
+            && self.outflow_cubic_meters_per_second.is_finite()
+            && self.outflow_cubic_meters_per_second >= 0.0
     }
+}
+
+/// Stable identity for one storage element in an active water region.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WaterCellId(pub u64);
+
+/// The hydrological setting represented by an active water cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WaterCellKind {
+    Surface,
+    CaveStream,
+    Sump,
+    Coast,
+}
+
+/// One bounded storage element in the active-region water model.
+///
+/// Cells deliberately represent local storage and routing rather than general
+/// fluid voxels. Their regenerated bed and connection graph stay outside the
+/// frozen state; only changing water depth needs to be retained.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterCell {
+    pub id: WaterCellId,
+    pub kind: WaterCellKind,
+    pub bed_elevation_meters: f64,
+    pub bank_elevation_meters: f64,
+    pub area_square_meters: f64,
+    pub water_depth_meters: f64,
+    pub source_cubic_meters_per_second: f64,
+    pub infiltration_cubic_meters_per_second: f64,
+}
+
+impl WaterCell {
+    pub fn surface_elevation_meters(self) -> f64 {
+        self.bed_elevation_meters + self.water_depth_meters
+    }
+
+    pub fn volume_cubic_meters(self) -> f64 {
+        self.water_depth_meters * self.area_square_meters
+    }
+
+    pub fn flooded(self) -> bool {
+        self.surface_elevation_meters() > self.bank_elevation_meters
+    }
+
+    fn is_physical(self) -> bool {
+        self.bed_elevation_meters.is_finite()
+            && self.bank_elevation_meters.is_finite()
+            && self.bank_elevation_meters >= self.bed_elevation_meters
+            && self.area_square_meters.is_finite()
+            && self.area_square_meters > 0.0
+            && self.water_depth_meters.is_finite()
+            && self.water_depth_meters >= 0.0
+            && self.source_cubic_meters_per_second.is_finite()
+            && self.source_cubic_meters_per_second >= 0.0
+            && self.infiltration_cubic_meters_per_second.is_finite()
+            && self.infiltration_cubic_meters_per_second >= 0.0
+    }
+}
+
+/// A spill-controlled connection between local water stores.
+///
+/// `to == None` is a boundary outlet. Internal connections are directional:
+/// water can cross only from `from` toward `to`, matching the generated
+/// drainage and cave graphs and preventing order-dependent oscillation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterConnection {
+    pub from: WaterCellId,
+    pub to: Option<WaterCellId>,
+    pub sill_elevation_meters: f64,
+    pub width_meters: f64,
+    pub conductance: f64,
+}
+
+impl WaterConnection {
+    fn is_physical(self) -> bool {
+        self.sill_elevation_meters.is_finite()
+            && self.width_meters.is_finite()
+            && self.width_meters > 0.0
+            && self.conductance.is_finite()
+            && self.conductance > 0.0
+            && self.to != Some(self.from)
+    }
+}
+
+/// A controlled terrain deviation supplied to the active water model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterTerrainChange {
+    pub cell: WaterCellId,
+    pub new_bed_elevation_meters: f64,
+    pub new_bank_elevation_meters: f64,
+}
+
+/// Observable fast-water morphology at one active connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FastWaterKind {
+    Cascade,
+    Waterfall,
+}
+
+/// Generated visible consequences of a steep, flowing connection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FastWaterFeature {
+    pub connection_index: usize,
+    pub kind: FastWaterKind,
+    pub drop_meters: f64,
+    pub discharge_cubic_meters_per_second: f64,
+    pub plunge_pool_depth_meters: f64,
+    pub plunge_pool_radius_meters: f64,
+    pub downstream_gorge_depth_meters: f64,
+}
+
+/// Conservation and visible-state diagnostics returned by a fixed water step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaterStepReport {
+    pub elapsed_seconds: f64,
+    pub source_volume_cubic_meters: f64,
+    pub boundary_outflow_volume_cubic_meters: f64,
+    pub infiltrated_volume_cubic_meters: f64,
+    pub storage_change_cubic_meters: f64,
+    pub flooded_cells: Vec<WaterCellId>,
+    pub fast_water: Vec<FastWaterFeature>,
+}
+
+impl WaterStepReport {
+    pub fn conservation_error_cubic_meters(&self) -> f64 {
+        self.storage_change_cubic_meters
+            + self.boundary_outflow_volume_cubic_meters
+            + self.infiltrated_volume_cubic_meters
+            - self.source_volume_cubic_meters
+    }
+}
+
+/// Compact changing state retained while an active water region is frozen.
+///
+/// Terrain, cell kinds, sources, and connections are pure generated data and
+/// are reconstructed separately. Millimeter depths keep the summary compact
+/// and give a deliberate, platform-independent persistence precision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrozenWaterRegion {
+    pub elapsed_milliseconds: u64,
+    pub cell_ids: Vec<WaterCellId>,
+    pub depth_millimeters: Vec<u32>,
+    pub last_boundary_outflow_milliliters_per_second: u64,
+}
+
+/// Errors that reject malformed active water data instead of allowing NaNs or
+/// topology mistakes into the deterministic simulation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActiveWaterError {
+    DuplicateCell,
+    InvalidCell,
+    InvalidConnection,
+    MissingCell,
+    InvalidTimeStep,
+    InvalidTerrainChange,
+    FrozenTopologyMismatch,
+}
+
+/// Deterministic, bounded active-region water storage and routing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveWaterRegion {
+    cells: Vec<WaterCell>,
+    connections: Vec<WaterConnection>,
+    elapsed_seconds: f64,
+    last_boundary_outflow_cubic_meters_per_second: f64,
+}
+
+impl ActiveWaterRegion {
+    /// Builds a validated, stably ordered active topology.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-physical cells or connections, duplicate identities, and
+    /// connections whose endpoints are absent.
+    pub fn new(
+        mut cells: Vec<WaterCell>,
+        mut connections: Vec<WaterConnection>,
+    ) -> Result<Self, ActiveWaterError> {
+        cells.sort_by_key(|cell| cell.id);
+        if cells.iter().any(|cell| !cell.is_physical()) {
+            return Err(ActiveWaterError::InvalidCell);
+        }
+        if cells.windows(2).any(|pair| pair[0].id == pair[1].id) {
+            return Err(ActiveWaterError::DuplicateCell);
+        }
+        connections.sort_by(|left, right| {
+            (left.from, left.to, left.sill_elevation_meters.to_bits()).cmp(&(
+                right.from,
+                right.to,
+                right.sill_elevation_meters.to_bits(),
+            ))
+        });
+        for connection in &connections {
+            if !connection.is_physical() {
+                return Err(ActiveWaterError::InvalidConnection);
+            }
+            if cell_slot(&cells, connection.from).is_none()
+                || connection
+                    .to
+                    .is_some_and(|target| cell_slot(&cells, target).is_none())
+            {
+                return Err(ActiveWaterError::MissingCell);
+            }
+        }
+        Ok(Self {
+            cells,
+            connections,
+            elapsed_seconds: 0.0,
+            last_boundary_outflow_cubic_meters_per_second: 0.0,
+        })
+    }
+
+    pub fn cells(&self) -> &[WaterCell] {
+        &self.cells
+    }
+
+    pub fn connections(&self) -> &[WaterConnection] {
+        &self.connections
+    }
+
+    pub fn elapsed_seconds(&self) -> f64 {
+        self.elapsed_seconds
+    }
+
+    pub fn cell(&self, id: WaterCellId) -> Option<&WaterCell> {
+        cell_slot(&self.cells, id).map(|slot| &self.cells[slot])
+    }
+
+    pub fn total_volume_cubic_meters(&self) -> f64 {
+        self.cells
+            .iter()
+            .map(|cell| cell.volume_cubic_meters())
+            .sum()
+    }
+
+    /// Adds a controlled precipitation, snowmelt, or boundary-inflow pulse.
+    ///
+    /// # Errors
+    ///
+    /// Rejects negative or non-finite volumes and unknown cell identities.
+    pub fn add_water_volume(
+        &mut self,
+        cell: WaterCellId,
+        volume_cubic_meters: f64,
+    ) -> Result<(), ActiveWaterError> {
+        if !volume_cubic_meters.is_finite() || volume_cubic_meters < 0.0 {
+            return Err(ActiveWaterError::InvalidCell);
+        }
+        let slot = cell_slot(&self.cells, cell).ok_or(ActiveWaterError::MissingCell)?;
+        self.cells[slot].water_depth_meters +=
+            volume_cubic_meters / self.cells[slot].area_square_meters;
+        Ok(())
+    }
+
+    /// Applies terrain edits while conserving water already in each footprint.
+    ///
+    /// Raising a bed displaces its water surface upward; lowering a bed
+    /// deepens storage. Routing on subsequent fixed steps determines whether
+    /// the displaced water backs up, spills, or drains.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown cells and non-finite or inverted bed/bank elevations.
+    pub fn apply_terrain_changes(
+        &mut self,
+        changes: &[WaterTerrainChange],
+    ) -> Result<(), ActiveWaterError> {
+        let mut ordered = changes.to_vec();
+        ordered.sort_by_key(|change| change.cell);
+        for change in ordered {
+            if !change.new_bed_elevation_meters.is_finite()
+                || !change.new_bank_elevation_meters.is_finite()
+                || change.new_bank_elevation_meters < change.new_bed_elevation_meters
+            {
+                return Err(ActiveWaterError::InvalidTerrainChange);
+            }
+            let slot = cell_slot(&self.cells, change.cell).ok_or(ActiveWaterError::MissingCell)?;
+            self.cells[slot].bed_elevation_meters = change.new_bed_elevation_meters;
+            self.cells[slot].bank_elevation_meters = change.new_bank_elevation_meters;
+        }
+        Ok(())
+    }
+
+    /// Advances the local storage graph with a conservative fixed step.
+    ///
+    /// The 60-second ceiling keeps routing stable and makes callers explicitly
+    /// subdivide long frame or lifecycle gaps.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-finite, non-positive, or greater-than-60-second steps.
+    pub fn step(&mut self, delta_seconds: f64) -> Result<WaterStepReport, ActiveWaterError> {
+        if !(delta_seconds.is_finite() && 0.0 < delta_seconds && delta_seconds <= 60.0) {
+            return Err(ActiveWaterError::InvalidTimeStep);
+        }
+        let initial_storage = self.total_volume_cubic_meters();
+        let mut volumes = self
+            .cells
+            .iter()
+            .map(|cell| cell.volume_cubic_meters())
+            .collect::<Vec<_>>();
+        let mut source_volume = 0.0;
+        for (slot, cell) in self.cells.iter().enumerate() {
+            let supplied = cell.source_cubic_meters_per_second * delta_seconds;
+            volumes[slot] += supplied;
+            source_volume += supplied;
+        }
+
+        let mut boundary_outflow = 0.0;
+        let mut flows = vec![0.0; self.connections.len()];
+        for (connection_index, connection) in self.connections.iter().enumerate() {
+            let from_slot =
+                cell_slot(&self.cells, connection.from).ok_or(ActiveWaterError::MissingCell)?;
+            if volumes[from_slot] <= 0.0 {
+                continue;
+            }
+            let from_surface = self.cells[from_slot].bed_elevation_meters
+                + (volumes[from_slot] / self.cells[from_slot].area_square_meters);
+            let destination_surface = connection
+                .to
+                .and_then(|id| cell_slot(&self.cells, id))
+                .map_or(connection.sill_elevation_meters, |slot| {
+                    self.cells[slot].bed_elevation_meters
+                        + (volumes[slot] / self.cells[slot].area_square_meters)
+                });
+            let controlling_elevation = destination_surface.max(connection.sill_elevation_meters);
+            let head = from_surface - controlling_elevation;
+            if head <= 0.0 {
+                continue;
+            }
+            let discharge = connection.conductance
+                * connection.width_meters
+                * libm::sqrt(2.0 * 9.806_65 * head);
+            let moved = (discharge * delta_seconds).min(volumes[from_slot]);
+            volumes[from_slot] -= moved;
+            if let Some(to_slot) = connection.to.and_then(|id| cell_slot(&self.cells, id)) {
+                volumes[to_slot] += moved;
+            } else {
+                boundary_outflow += moved;
+            }
+            flows[connection_index] = moved / delta_seconds;
+        }
+
+        let mut infiltrated = 0.0;
+        for (slot, cell) in self.cells.iter().enumerate() {
+            let loss =
+                (cell.infiltration_cubic_meters_per_second * delta_seconds).min(volumes[slot]);
+            volumes[slot] -= loss;
+            infiltrated += loss;
+        }
+        for (cell, volume) in self.cells.iter_mut().zip(volumes) {
+            cell.water_depth_meters = (volume / cell.area_square_meters).max(0.0);
+        }
+        self.elapsed_seconds += delta_seconds;
+        self.last_boundary_outflow_cubic_meters_per_second = boundary_outflow / delta_seconds;
+
+        let flooded_cells = self
+            .cells
+            .iter()
+            .filter(|cell| cell.flooded())
+            .map(|cell| cell.id)
+            .collect();
+        let fast_water = self.fast_water_features(&flows);
+        let storage_change = self.total_volume_cubic_meters() - initial_storage;
+        Ok(WaterStepReport {
+            elapsed_seconds: self.elapsed_seconds,
+            source_volume_cubic_meters: source_volume,
+            boundary_outflow_volume_cubic_meters: boundary_outflow,
+            infiltrated_volume_cubic_meters: infiltrated,
+            storage_change_cubic_meters: storage_change,
+            flooded_cells,
+            fast_water,
+        })
+    }
+
+    fn fast_water_features(&self, flows: &[f64]) -> Vec<FastWaterFeature> {
+        self.connections
+            .iter()
+            .zip(flows)
+            .enumerate()
+            .filter_map(|(connection_index, (connection, &discharge))| {
+                if discharge <= 0.01 {
+                    return None;
+                }
+                let from = *self.cell(connection.from)?;
+                let destination_elevation = connection
+                    .to
+                    .and_then(|id| self.cell(id))
+                    .map_or(connection.sill_elevation_meters, |cell| {
+                        cell.surface_elevation_meters()
+                    });
+                let drop_meters = from.surface_elevation_meters() - destination_elevation;
+                let kind = if drop_meters >= 3.0 {
+                    FastWaterKind::Waterfall
+                } else if drop_meters >= 0.75 {
+                    FastWaterKind::Cascade
+                } else {
+                    return None;
+                };
+                let energy = discharge * drop_meters;
+                Some(FastWaterFeature {
+                    connection_index,
+                    kind,
+                    drop_meters,
+                    discharge_cubic_meters_per_second: discharge,
+                    plunge_pool_depth_meters: (0.35 + (libm::sqrt(energy) * 0.28))
+                        .clamp(0.35, 18.0),
+                    plunge_pool_radius_meters: (1.0 + (libm::sqrt(discharge) * drop_meters * 0.45))
+                        .clamp(1.0, 42.0),
+                    downstream_gorge_depth_meters: (drop_meters * 0.42 + libm::sqrt(discharge))
+                        .clamp(0.5, 32.0),
+                })
+            })
+            .collect()
+    }
+
+    pub fn freeze(&self) -> FrozenWaterRegion {
+        FrozenWaterRegion {
+            elapsed_milliseconds: seconds_as_milliseconds(self.elapsed_seconds),
+            cell_ids: self.cells.iter().map(|cell| cell.id).collect(),
+            depth_millimeters: self
+                .cells
+                .iter()
+                .map(|cell| meters_as_millimeters(cell.water_depth_meters))
+                .collect(),
+            last_boundary_outflow_milliliters_per_second: cubic_meters_as_milliliters(
+                self.last_boundary_outflow_cubic_meters_per_second,
+            ),
+        }
+    }
+
+    /// Reconstructs changing state on top of a regenerated cell topology.
+    ///
+    /// # Errors
+    ///
+    /// Rejects summaries whose ordered cell identities do not exactly match
+    /// the regenerated topology.
+    pub fn reconstruct(
+        mut regenerated: Self,
+        frozen: &FrozenWaterRegion,
+    ) -> Result<Self, ActiveWaterError> {
+        if frozen.cell_ids.len() != frozen.depth_millimeters.len()
+            || regenerated.cells.len() != frozen.cell_ids.len()
+            || regenerated
+                .cells
+                .iter()
+                .map(|cell| cell.id)
+                .ne(frozen.cell_ids.iter().copied())
+        {
+            return Err(ActiveWaterError::FrozenTopologyMismatch);
+        }
+        for (cell, millimeters) in regenerated.cells.iter_mut().zip(&frozen.depth_millimeters) {
+            cell.water_depth_meters = f64::from(*millimeters) / 1_000.0;
+        }
+        regenerated.elapsed_seconds = milliseconds_as_seconds(frozen.elapsed_milliseconds);
+        regenerated.last_boundary_outflow_cubic_meters_per_second =
+            milliliters_as_cubic_meters(frozen.last_boundary_outflow_milliliters_per_second);
+        Ok(regenerated)
+    }
+}
+
+fn cell_slot(cells: &[WaterCell], id: WaterCellId) -> Option<usize> {
+    cells.binary_search_by_key(&id, |cell| cell.id).ok()
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn meters_as_millimeters(meters: f64) -> u32 {
+    libm::round((meters.max(0.0) * 1_000.0).min(f64::from(u32::MAX))) as u32
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn seconds_as_milliseconds(seconds: f64) -> u64 {
+    libm::round((seconds.max(0.0) * 1_000.0).min(u64::MAX as f64)) as u64
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn milliseconds_as_seconds(milliseconds: u64) -> f64 {
+    milliseconds as f64 / 1_000.0
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn cubic_meters_as_milliliters(cubic_meters: f64) -> u64 {
+    libm::round((cubic_meters.max(0.0) * 1_000_000.0).min(u64::MAX as f64)) as u64
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn milliliters_as_cubic_meters(milliliters: u64) -> f64 {
+    milliliters as f64 / 1_000_000.0
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -657,6 +1226,34 @@ mod tests {
                 .terrain_influence(1_000.0, MAX_RIVER_INFLUENCE_METERS + 1.0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn steep_discharging_rivers_generate_causal_fast_water_morphology() {
+        let river = RiverSegment {
+            source_cell: DrainageCellIndex::new(0, 0),
+            mouth_cell: DrainageCellIndex::new(1, 0),
+            source: WorldPosition::new(0.0, 120.0, 0.0),
+            mouth: WorldPosition::new(1_000.0, 96.0, 0.0),
+            drainage_area_square_kilometers: 96.0,
+            discharge_cubic_meters_per_second: 3.0,
+        };
+        let lip = river
+            .terrain_influence(650.0, 0.0)
+            .expect("river influence")
+            .fast_water
+            .expect("condition-driven waterfall");
+        let pool = river
+            .terrain_influence(1_000.0, 0.0)
+            .expect("river influence")
+            .fast_water
+            .expect("condition-driven waterfall");
+
+        assert_eq!(lip.kind, FastWaterKind::Waterfall);
+        assert!(lip.gorge_blend > 0.0);
+        assert!(pool.plunge_pool_blend > 0.99);
+        assert!(pool.plunge_pool_depth_meters > 0.0);
+        assert!(pool.downstream_gorge_depth_meters > 0.0);
     }
 
     #[test]
@@ -943,6 +1540,240 @@ mod tests {
             stable_hash(&words),
             16_211_266_877_087_865_594,
             "changing this value changes generated meso-scale gullies"
+        );
+    }
+
+    fn active_test_region() -> ActiveWaterRegion {
+        ActiveWaterRegion::new(
+            vec![
+                WaterCell {
+                    id: WaterCellId(10),
+                    kind: WaterCellKind::Surface,
+                    bed_elevation_meters: 12.0,
+                    bank_elevation_meters: 13.0,
+                    area_square_meters: 100.0,
+                    water_depth_meters: 1.5,
+                    source_cubic_meters_per_second: 0.4,
+                    infiltration_cubic_meters_per_second: 0.01,
+                },
+                WaterCell {
+                    id: WaterCellId(20),
+                    kind: WaterCellKind::Surface,
+                    bed_elevation_meters: 5.0,
+                    bank_elevation_meters: 6.5,
+                    area_square_meters: 120.0,
+                    water_depth_meters: 0.2,
+                    source_cubic_meters_per_second: 0.0,
+                    infiltration_cubic_meters_per_second: 0.02,
+                },
+                WaterCell {
+                    id: WaterCellId(30),
+                    kind: WaterCellKind::Sump,
+                    bed_elevation_meters: 1.0,
+                    bank_elevation_meters: 4.0,
+                    area_square_meters: 80.0,
+                    water_depth_meters: 0.0,
+                    source_cubic_meters_per_second: 0.0,
+                    infiltration_cubic_meters_per_second: 0.0,
+                },
+            ],
+            vec![
+                WaterConnection {
+                    from: WaterCellId(10),
+                    to: Some(WaterCellId(20)),
+                    sill_elevation_meters: 12.3,
+                    width_meters: 3.0,
+                    conductance: 0.12,
+                },
+                WaterConnection {
+                    from: WaterCellId(20),
+                    to: Some(WaterCellId(30)),
+                    sill_elevation_meters: 5.1,
+                    width_meters: 2.0,
+                    conductance: 0.09,
+                },
+                WaterConnection {
+                    from: WaterCellId(30),
+                    to: None,
+                    sill_elevation_meters: 3.0,
+                    width_meters: 1.0,
+                    conductance: 0.08,
+                },
+            ],
+        )
+        .expect("physical active region")
+    }
+
+    #[test]
+    fn active_water_steps_are_deterministic_and_conservative() {
+        let mut first = active_test_region();
+        let mut second = active_test_region();
+        for _ in 0..40 {
+            let first_report = first.step(2.0).expect("water step");
+            let second_report = second.step(2.0).expect("water step");
+            assert_eq!(first_report, second_report);
+            assert!(
+                first_report.conservation_error_cubic_meters().abs() < 1.0e-9,
+                "local storage must conserve supplied water"
+            );
+        }
+        assert_eq!(first, second);
+        assert!(
+            first
+                .cell(WaterCellId(30))
+                .expect("sump")
+                .water_depth_meters
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn raised_terrain_displaces_water_and_changes_routing() {
+        let mut region = active_test_region();
+        let volume_before = region.total_volume_cubic_meters();
+        let surface_before = region
+            .cell(WaterCellId(10))
+            .expect("upstream")
+            .surface_elevation_meters();
+        region
+            .apply_terrain_changes(&[WaterTerrainChange {
+                cell: WaterCellId(10),
+                new_bed_elevation_meters: 13.0,
+                new_bank_elevation_meters: 14.0,
+            }])
+            .expect("valid controlled edit");
+
+        assert_eq!(
+            region.total_volume_cubic_meters().to_bits(),
+            volume_before.to_bits()
+        );
+        assert!(
+            region
+                .cell(WaterCellId(10))
+                .expect("upstream")
+                .surface_elevation_meters()
+                > surface_before
+        );
+        let downstream_before = region
+            .cell(WaterCellId(20))
+            .expect("downstream")
+            .volume_cubic_meters();
+        region.step(1.0).expect("water response");
+        assert!(
+            region
+                .cell(WaterCellId(20))
+                .expect("downstream")
+                .volume_cubic_meters()
+                > downstream_before
+        );
+    }
+
+    #[test]
+    fn filling_spills_then_floods_a_bounded_basin() {
+        let mut region = ActiveWaterRegion::new(
+            vec![
+                WaterCell {
+                    id: WaterCellId(1),
+                    kind: WaterCellKind::Surface,
+                    bed_elevation_meters: 0.0,
+                    bank_elevation_meters: 1.0,
+                    area_square_meters: 10.0,
+                    water_depth_meters: 0.0,
+                    source_cubic_meters_per_second: 2.0,
+                    infiltration_cubic_meters_per_second: 0.0,
+                },
+                WaterCell {
+                    id: WaterCellId(2),
+                    kind: WaterCellKind::Surface,
+                    bed_elevation_meters: -0.5,
+                    bank_elevation_meters: 0.5,
+                    area_square_meters: 10.0,
+                    water_depth_meters: 0.0,
+                    source_cubic_meters_per_second: 0.0,
+                    infiltration_cubic_meters_per_second: 0.0,
+                },
+            ],
+            vec![WaterConnection {
+                from: WaterCellId(1),
+                to: Some(WaterCellId(2)),
+                sill_elevation_meters: 0.6,
+                width_meters: 1.0,
+                conductance: 0.15,
+            }],
+        )
+        .expect("basin");
+
+        for _ in 0..10 {
+            region.step(1.0).expect("fill");
+        }
+        assert!(
+            region
+                .cell(WaterCellId(2))
+                .expect("outflow")
+                .water_depth_meters
+                > 0.0
+        );
+        assert!(
+            region
+                .step(10.0)
+                .expect("flood")
+                .flooded_cells
+                .contains(&WaterCellId(1))
+        );
+    }
+
+    #[test]
+    fn steep_surface_to_cave_flow_generates_waterfall_and_plunge_pool() {
+        let mut region = active_test_region();
+        let report = region.step(1.0).expect("water step");
+        assert!(report.fast_water.iter().any(|feature| {
+            feature.kind == FastWaterKind::Waterfall
+                && feature.plunge_pool_depth_meters > 0.0
+                && feature.downstream_gorge_depth_meters > 0.0
+        }));
+    }
+
+    #[test]
+    fn frozen_summary_reconstructs_deterministically_on_regenerated_topology() {
+        let mut active = active_test_region();
+        for _ in 0..12 {
+            active.step(2.5).expect("water step");
+        }
+        let frozen = active.freeze();
+        let first =
+            ActiveWaterRegion::reconstruct(active_test_region(), &frozen).expect("reconstruction");
+        let second =
+            ActiveWaterRegion::reconstruct(active_test_region(), &frozen).expect("reconstruction");
+
+        assert_eq!(first, second);
+        assert_eq!(first.freeze(), frozen);
+        assert!(
+            first
+                .cells()
+                .iter()
+                .zip(active.cells())
+                .all(|(restored, original)| {
+                    (restored.water_depth_meters - original.water_depth_meters).abs() <= 0.0005
+                })
+        );
+    }
+
+    #[test]
+    fn active_water_rejects_invalid_topology_and_time() {
+        let mut region = active_test_region();
+        assert_eq!(region.step(0.0), Err(ActiveWaterError::InvalidTimeStep));
+        assert_eq!(
+            ActiveWaterRegion::new(
+                region.cells().to_vec(),
+                vec![WaterConnection {
+                    from: WaterCellId(999),
+                    to: None,
+                    sill_elevation_meters: 0.0,
+                    width_meters: 1.0,
+                    conductance: 1.0,
+                }],
+            ),
+            Err(ActiveWaterError::MissingCell)
         );
     }
 }
