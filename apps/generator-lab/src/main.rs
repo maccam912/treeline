@@ -5,14 +5,14 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_ecology::{
-    ForestDistribution, ForestSample, GroundPlant, GroundVegetation, GroundVegetationBounds,
-    GroundVegetationDistribution, GroundVegetationSample, ProceduralTree, ProceduralTrees,
-    ReefSample, RockBounds, Soil, SoilSample, SurfaceRock, SurfaceRockDistribution,
-    SurfaceRockSample, SurfaceRocks, TreeBounds, WetlandSample,
+    EcosystemDistribution, EcosystemSample, ForestDistribution, ForestSample, GroundPlant,
+    GroundVegetation, GroundVegetationBounds, GroundVegetationDistribution, GroundVegetationSample,
+    ProceduralTree, ProceduralTrees, ReefSample, RockBounds, Soil, SoilSample, SurfaceRock,
+    SurfaceRockDistribution, SurfaceRockSample, SurfaceRocks, TreeBounds, WetlandSample,
 };
 use treeline_geography::{
-    Climate, ClimateSample, DrainageCell, RegionalProfile, Season, SeasonalClimateSample,
-    WatershedRegion, WatershedRegionIndex,
+    Climate, ClimateSample, DrainageCell, ProvincePlan, ProvinceSample, RegionalProfile, Season,
+    SeasonalClimateSample, WatershedRegion, WatershedRegionIndex,
 };
 use treeline_hydrology::{
     FastWaterKind, Lake, LakeNetwork, RiverNetwork, RiverSegment, WaterTerrainChange,
@@ -46,6 +46,7 @@ enum ViewMode {
     Rivers,
     Lakes,
     Erosion,
+    ProvinceLandforms,
     Temperature,
     Precipitation,
     Snowpack,
@@ -60,13 +61,14 @@ enum ViewMode {
 }
 
 impl ViewMode {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::Terrain,
         Self::Watersheds,
         Self::FlowAccumulation,
         Self::Rivers,
         Self::Lakes,
         Self::Erosion,
+        Self::ProvinceLandforms,
         Self::Temperature,
         Self::Precipitation,
         Self::Snowpack,
@@ -88,6 +90,7 @@ impl ViewMode {
             Self::Rivers => "rivers",
             Self::Lakes => "lakes",
             Self::Erosion => "erosion",
+            Self::ProvinceLandforms => "provinces / landforms",
             Self::Temperature => "temperature",
             Self::Precipitation => "precipitation",
             Self::Snowpack => "snowpack",
@@ -110,6 +113,7 @@ impl ViewMode {
             Self::Rivers => "4",
             Self::Lakes => "5",
             Self::Erosion => "6",
+            Self::ProvinceLandforms => "P",
             Self::Temperature => "7",
             Self::Precipitation => "8",
             Self::Snowpack => "9",
@@ -127,7 +131,8 @@ impl ViewMode {
     const fn is_environment_layer(self) -> bool {
         matches!(
             self,
-            Self::Temperature
+            Self::ProvinceLandforms
+                | Self::Temperature
                 | Self::Precipitation
                 | Self::Snowpack
                 | Self::Soil
@@ -149,6 +154,7 @@ fn view_mode_for_key(code: KeyCode) -> Option<ViewMode> {
         KeyCode::Digit4 => Some(ViewMode::Rivers),
         KeyCode::Digit5 => Some(ViewMode::Lakes),
         KeyCode::Digit6 => Some(ViewMode::Erosion),
+        KeyCode::KeyP => Some(ViewMode::ProvinceLandforms),
         KeyCode::Digit7 => Some(ViewMode::Temperature),
         KeyCode::Digit8 => Some(ViewMode::Precipitation),
         KeyCode::Digit9 => Some(ViewMode::Snowpack),
@@ -527,11 +533,18 @@ impl GeneratorLab {
         ]
     }
 
+    #[allow(clippy::too_many_lines)]
     fn inspect_cursor(&mut self) {
         let [x, z] = self.cursor_world_position();
         let world = WorldIdentity::new(self.seed, GENERATOR_VERSION, 0);
         let terrain = WildernessTerrain::new(world);
         let generated_terrain = GeneratedWorldTerrain::new(world);
+        let Some(province_sample) = ProvincePlan::sample_at(world, x, z) else {
+            return;
+        };
+        let Some(province_plan) = ProvincePlan::generate(world, province_sample.province) else {
+            return;
+        };
         let Some((macro_sample, surface_height)) = terrain.inspect(x, z) else {
             return;
         };
@@ -550,6 +563,9 @@ impl GeneratorLab {
             return;
         };
         let Some(soil) = Soil::new(world).sample(x, z) else {
+            return;
+        };
+        let Some(ecosystem) = EcosystemDistribution::new(world).sample(x, z) else {
             return;
         };
         let Some(forest) = ForestDistribution::new(world).sample(x, z) else {
@@ -588,13 +604,15 @@ impl GeneratorLab {
                 .as_ref()
                 .and_then(|network| network.lake_for_cell(cell.index))
         });
-        let lake_surface = generated_terrain.lake_surface_at(x, z);
+        let lake_surface = generated_terrain.lake_surface_at_season(x, z, self.season);
         let drainage_summary = describe_drainage(drainage, river, lake);
         let tree_summary = tree_inspection.summary();
         let ground_vegetation_summary = ground_vegetation_inspection.summary();
         let rock_summary = rock_inspection.summary();
+        let province_summary = describe_province_inspection(&province_plan, &province_sample);
+        let ecosystem_summary = describe_ecosystem_inspection(ecosystem);
         let summary = format!(
-            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ground {:.0}% {}, {} nearby, nearest {ground_vegetation_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | wetland {:.0}% {} | reef {:.0}% {} | {} | ridge +{:.0} m | {drainage_summary}",
+            "x {x:.0} m, z {z:.0} m | height {carved_surface_height:.0} m | {} {:.1} °C | snow {:.0} mm | {:.0} mm/yr | {} {:.1} pH, {:.0}% moist | forest {:.0}% {}, {:.0} yr | {} stems/1,024 m², nearest {tree_summary} | ground {:.0}% {}, {} nearby, nearest {ground_vegetation_summary} | rocks {:.0}/ha, {} nearby, nearest {rock_summary} | wetland {:.0}% {} | reef {:.0}% {} | {} | ridge +{:.0} m | {drainage_summary}\n{province_summary}\n{ecosystem_summary}",
             self.season.label(),
             seasonal_climate.mean_temperature_celsius,
             seasonal_climate.snowpack_water_equivalent_millimeters,
@@ -619,7 +637,7 @@ impl GeneratorLab {
             macro_sample.mountain_uplift_meters,
         );
         eprintln!(
-            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\nforest: {forest:#?}\nground-vegetation distribution: {ground_vegetation:#?}\nsurface-rock distribution: {rock_distribution:#?}\nwetland: {wetland:#?}\nreef: {reef:#?}\ncave: {cave:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby ground-vegetation count: {}\nnearest ground plant: {nearest_ground_plant:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
+            "Generator Lab inspection\ncoordinate: ({x:.2}, {z:.2})\nbase surface height: {surface_height:.2} m\nshaped surface height: {carved_surface_height:.2} m\nprovince plan: {province_plan:#?}\nprovince physical sample: {province_sample:#?}\nmacro terrain: {macro_sample:#?}\nregional profile: {profile:#?}\nannual climate: {climate:#?}\nseasonal climate: {seasonal_climate:#?}\nsoil: {soil:#?}\necosystem regimes: {ecosystem:#?}\nforest: {forest:#?}\nground-vegetation distribution: {ground_vegetation:#?}\nsurface-rock distribution: {rock_distribution:#?}\nwetland: {wetland:#?}\nreef: {reef:#?}\ncave: {cave:#?}\nnearby procedural tree count: {}\nnearest procedural tree: {nearest_tree:#?}\nnearby ground-vegetation count: {}\nnearest ground plant: {nearest_ground_plant:#?}\nnearby surface-rock count: {}\nnearest surface rock: {nearest_rock:#?}\ndrainage cell: {drainage:#?}\nriver segment: {river:#?}\nriver terrain influence: {river_influence:#?}\nerosion: {erosion:#?}\nlake: {lake:#?}\nlake surface: {lake_surface:#?}",
             tree_inspection.count,
             ground_vegetation_inspection.count,
             rock_inspection.count,
@@ -798,6 +816,123 @@ fn describe_cave(cave: Option<CaveMapSample>) -> String {
                 }
             )
         },
+    )
+}
+
+fn describe_province_inspection(plan: &ProvincePlan, sample: &ProvinceSample) -> String {
+    let boundary = plan.boundary_conditions;
+    let scarp = sample.scarp_geometry.map_or_else(
+        || "none at cursor".to_owned(),
+        |geometry| {
+            format!(
+                "{:.0}% face, signed distance {:.0} m, low/high {:.0}/{:.0} m, normal [{:.2}, {:.2}], half-width {:.0} m, offset {:.0} m, undercut {:.0} m",
+                geometry.face_strength * 100.0,
+                geometry.signed_distance_meters,
+                geometry.low_elevation_meters,
+                geometry.high_elevation_meters,
+                geometry.face_normal[0],
+                geometry.face_normal[1],
+                geometry.half_width_meters,
+                geometry.elevation_offset_meters,
+                geometry.undercut_depth_meters,
+            )
+        },
+    );
+    let dune = sample.dune_geometry.map_or_else(
+        || "none at cursor".to_owned(),
+        |geometry| {
+            format!(
+                "{:.0}% strength, wind [{:.2}, {:.2}], ridge [{:.2}, {:.2}], wavelength {:.0} m, phase {:.2} rad, amplitude {:.0} m, offset {:.0} m",
+                geometry.strength * 100.0,
+                geometry.downwind_direction[0],
+                geometry.downwind_direction[1],
+                geometry.ridge_direction[0],
+                geometry.ridge_direction[1],
+                geometry.wavelength_meters,
+                geometry.phase_radians,
+                geometry.amplitude_meters,
+                geometry.height_offset_meters,
+            )
+        },
+    );
+
+    format!(
+        "province ({}, {}) | plan {:016x}, parent {:016x}\nboundary SW/SE/NW/NE continentalness {:.2}/{:.2}/{:.2}/{:.2}, uplift {:.2}/{:.2}/{:.2}/{:.2}, moisture {:.2}/{:.2}/{:.2}/{:.2}, drainage {:.2}/{:.2}/{:.2}/{:.2}\nland/coast {:.0}%/{:.0}% | base/relief/planned elevation {:.0}/{:.0}/{:.0} m\nphysical causes: crust age {:.2}, rock hardness {:.2}, carbonate {:.2}, uplift {:.2}, faulting {:.2}, strata tilt {:.2}, volcanism {:.2}, glaciation {:.2}, erosion {:.2}\nlandform weights: plains {:.2}, uplands {:.2}, plateau {:.2}, scarp {:.2}, mountain {:.2}, glacial {:.2}, dune {:.2}, closed basin {:.2}\nwater balance: sediment {:.2}, drainage {:.2}, moisture {:.2}, aridity {:.2}; salinity {:.2}, exposure {:.2}, disturbance {:.2}\nscarp geometry: {scarp}\ndune geometry: {dune}",
+        sample.province.x,
+        sample.province.z,
+        plan.plan_key,
+        plan.parent_key,
+        boundary.southwest.continentalness,
+        boundary.southeast.continentalness,
+        boundary.northwest.continentalness,
+        boundary.northeast.continentalness,
+        boundary.southwest.uplift,
+        boundary.southeast.uplift,
+        boundary.northwest.uplift,
+        boundary.northeast.uplift,
+        boundary.southwest.moisture_supply,
+        boundary.southeast.moisture_supply,
+        boundary.northwest.moisture_supply,
+        boundary.northeast.moisture_supply,
+        boundary.southwest.drainage_bias,
+        boundary.southeast.drainage_bias,
+        boundary.northwest.drainage_bias,
+        boundary.northeast.drainage_bias,
+        sample.land_fraction * 100.0,
+        sample.coast_fraction * 100.0,
+        sample.base_elevation_meters,
+        sample.macro_relief_meters,
+        sample.elevation_meters,
+        sample.crust_age,
+        sample.rock_hardness,
+        sample.carbonate_fraction,
+        sample.uplift,
+        sample.faulting,
+        sample.strata_tilt,
+        sample.volcanism,
+        sample.glaciation,
+        sample.erosion,
+        sample.plains,
+        sample.rolling_uplands,
+        sample.plateau,
+        sample.scarp,
+        sample.mountain,
+        sample.glacial,
+        sample.dune,
+        sample.closed_basin,
+        sample.sediment,
+        sample.drainage,
+        sample.moisture,
+        sample.aridity,
+        sample.salinity,
+        sample.exposure,
+        sample.disturbance,
+    )
+}
+
+fn describe_ecosystem_inspection(sample: EcosystemSample) -> String {
+    format!(
+        "ecosystem controls: PET {:.0} mm, climatic water balance {:+.0} mm ({:.2}), tree line {:.0} m, above tree line {:.2}, exposure {:.2}, fire {:.2}, disturbance {:.2}, sediment {:.2}, salinity {:.2}, closed basin {:.2}\necosystem potentials (overlapping): closed forest {:.2}, open woodland {:.2}, prairie/grassland {:.2}, steppe {:.2}, shrubland {:.2}, desert {:.2}, tundra {:.2}, exposed alpine {:.2}, wetland {:.2}",
+        sample.potential_evapotranspiration_millimeters,
+        sample.climatic_water_balance_millimeters,
+        sample.water_balance_fraction,
+        sample.tree_line_elevation_meters,
+        sample.above_tree_line_fraction,
+        sample.exposure_fraction,
+        sample.fire_pressure_fraction,
+        sample.disturbance_fraction,
+        sample.sediment_fraction,
+        sample.salinity_fraction,
+        sample.closed_basin_fraction,
+        sample.closed_forest_potential,
+        sample.open_woodland_potential,
+        sample.grassland_prairie_potential,
+        sample.steppe_potential,
+        sample.shrubland_potential,
+        sample.desert_potential,
+        sample.tundra_potential,
+        sample.exposed_alpine_potential,
+        sample.wetland_potential,
     )
 }
 
@@ -1102,6 +1237,7 @@ fn draw_keyboard_help(ui: &mut egui::Ui) {
     ui.heading("Keyboard & mouse");
     for help in [
         "1–9  Select view layer",
+        "P  Province and causal landforms",
         "0 / F / V / G / M / Q / K / L  Soil / forest / ground / rocks / wetlands / reefs / caves / living water",
         "C  Advance climate season",
         "WASD / arrows  Pan",
@@ -1337,6 +1473,7 @@ fn generate_drainage_mesh(
     let world = WorldIdentity::new(seed, GENERATOR_VERSION, 0);
     let generated_terrain = GeneratedWorldTerrain::new(world);
     let environment_layers = EnvironmentLayers {
+        world,
         climate: Climate::new(world),
         soil: Soil::new(world),
         forest: ForestDistribution::new(world),
@@ -1415,6 +1552,7 @@ fn generate_drainage_mesh(
 
 #[derive(Clone, Debug)]
 struct EnvironmentLayers {
+    world: WorldIdentity,
     climate: Climate,
     soil: Soil,
     forest: ForestDistribution,
@@ -1431,6 +1569,10 @@ fn environment_layer_color(
     layers: &EnvironmentLayers,
 ) -> Option<[f32; 4]> {
     match mode {
+        ViewMode::ProvinceLandforms => {
+            let sample = ProvincePlan::sample_at(layers.world, x, z)?;
+            Some(province_landform_color(&sample))
+        }
         ViewMode::Temperature | ViewMode::Precipitation | ViewMode::Snowpack => {
             Some(climate_color(
                 layers.climate.sample(x, z)?,
@@ -1550,6 +1692,7 @@ fn drainage_color(
             ]
         }),
         ViewMode::Temperature
+        | ViewMode::ProvinceLandforms
         | ViewMode::Precipitation
         | ViewMode::Snowpack
         | ViewMode::Soil
@@ -1561,6 +1704,61 @@ fn drainage_color(
         | ViewMode::Caves
         | ViewMode::LivingWater => [1.0, 0.0, 1.0, 1.0],
     }
+}
+
+/// Blends overlapping physical outcomes instead of selecting a primary biome
+/// or landform category. The intentionally separated palette makes gradual
+/// causal transitions and mixed morphology visible in the top-down audit.
+fn province_landform_color(sample: &ProvinceSample) -> [f32; 4] {
+    const OCEAN: [f32; 3] = [0.025, 0.105, 0.285];
+    const COAST: [f32; 3] = [0.075, 0.720, 0.720];
+    const LAND_BASE: [f32; 3] = [0.235, 0.255, 0.175];
+    const CAUSES: [[f32; 3]; 8] = [
+        [0.420, 0.690, 0.235], // plains
+        [0.330, 0.505, 0.150], // rolling uplands
+        [0.765, 0.390, 0.125], // plateau
+        [0.910, 0.095, 0.055], // scarp
+        [0.345, 0.285, 0.390], // mountain
+        [0.720, 0.925, 1.000], // glacial
+        [0.970, 0.720, 0.145], // dune
+        [0.745, 0.255, 0.650], // closed basin
+    ];
+
+    let weights = [
+        sample.plains,
+        sample.rolling_uplands,
+        sample.plateau,
+        sample.scarp,
+        sample.mountain,
+        sample.glacial,
+        sample.dune,
+        sample.closed_basin,
+    ]
+    .map(f64_as_f32);
+    let mut land = LAND_BASE.map(|channel| channel * 0.28);
+    let mut total_weight = 0.28;
+    for (weight, color) in weights.into_iter().zip(CAUSES) {
+        let visible_weight = weight * 1.15;
+        total_weight += visible_weight;
+        for channel in 0..3 {
+            land[channel] += color[channel] * visible_weight;
+        }
+    }
+    for channel in &mut land {
+        *channel /= total_weight;
+    }
+
+    let land_fraction = f64_as_f32(sample.land_fraction);
+    let coast_fraction = f64_as_f32(sample.coast_fraction);
+    let salinity = f64_as_f32(sample.salinity * sample.closed_basin);
+    let mut color = [0.0; 4];
+    for channel in 0..3 {
+        color[channel] = lerp_f32(OCEAN[channel], land[channel], land_fraction);
+        color[channel] = lerp_f32(color[channel], COAST[channel], coast_fraction * 0.78);
+        color[channel] = lerp_f32(color[channel], 0.94, salinity * 0.28);
+    }
+    color[3] = 1.0;
+    color
 }
 
 fn climate_color(
@@ -1796,6 +1994,107 @@ fn u64_as_f32(value: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use treeline_geography::PROVINCE_GENERATOR_VERSION;
+
+    #[test]
+    fn province_landforms_has_an_unused_intuitive_shortcut() {
+        assert_eq!(
+            view_mode_for_key(KeyCode::KeyP),
+            Some(ViewMode::ProvinceLandforms)
+        );
+        assert_eq!(ViewMode::ProvinceLandforms.shortcut(), "P");
+        assert_eq!(ViewMode::ProvinceLandforms.label(), "provinces / landforms");
+    }
+
+    #[test]
+    fn province_landform_colors_are_continuous_bounded_causal_mixtures() {
+        let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
+        let mut colors = Vec::new();
+        for z in -5..=5 {
+            for x in -5..=5 {
+                let sample = ProvincePlan::sample_at(
+                    world,
+                    f64::from(x) * 310_000.0,
+                    f64::from(z) * 310_000.0,
+                )
+                .expect("province sample");
+                colors.push(province_landform_color(&sample));
+            }
+        }
+
+        assert!(colors.iter().all(|color| {
+            color[..3]
+                .iter()
+                .all(|channel| (0.0..=1.0).contains(channel))
+                && (color[3] - 1.0).abs() < f32::EPSILON
+        }));
+        let first = colors[0];
+        assert!(colors.iter().any(|color| {
+            color[..3]
+                .iter()
+                .zip(first)
+                .map(|(channel, first_channel)| (channel - first_channel).abs())
+                .sum::<f32>()
+                > 0.25
+        }));
+    }
+
+    #[test]
+    fn province_inspection_reports_plan_causes_and_analytic_geometry() {
+        let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
+        let sample =
+            ProvincePlan::sample_at(world, -712_000.0, 943_000.0).expect("province sample");
+        let plan = ProvincePlan::generate(world, sample.province).expect("province plan");
+        let description = describe_province_inspection(&plan, &sample);
+
+        for required in [
+            "province (",
+            "parent",
+            "boundary SW/SE/NW/NE",
+            "land/coast",
+            "physical causes",
+            "landform weights",
+            "water balance",
+            "salinity",
+            "exposure",
+            "disturbance",
+            "scarp geometry",
+            "dune geometry",
+        ] {
+            assert!(
+                description.contains(required),
+                "inspection omitted {required:?}: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn ecosystem_inspection_reports_overlapping_regime_weights() {
+        let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
+        let ecosystem = EcosystemDistribution::new(world)
+            .sample(-712_000.0, 943_000.0)
+            .expect("ecosystem sample");
+        let description = describe_ecosystem_inspection(ecosystem);
+
+        for required in [
+            "climatic water balance",
+            "tree line",
+            "closed forest",
+            "open woodland",
+            "prairie/grassland",
+            "steppe",
+            "shrubland",
+            "desert",
+            "tundra",
+            "exposed alpine",
+            "wetland",
+        ] {
+            assert!(
+                description.contains(required),
+                "inspection omitted {required:?}: {description}"
+            );
+        }
+    }
 
     #[test]
     fn forest_view_generates_varied_opaque_coverage_colors() {

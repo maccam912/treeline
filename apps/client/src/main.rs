@@ -2503,13 +2503,20 @@ mod tests {
 
     #[test]
     fn prototype_region_exposes_real_lake() {
-        const LAKE_X: f64 = -225_000.0;
-        const LAKE_Z: f64 = -249_000.0;
+        const RESET_LAKE_REGION: [f64; 2] = [-36_032_000.0, -15_744_000.0];
         let terrain = GeneratedWorldTerrain::new(WORLD);
+        let lake_point = terrain
+            .regional_lakes_at(RESET_LAKE_REGION[0], RESET_LAKE_REGION[1])
+            .and_then(|lakes| {
+                lakes
+                    .into_iter()
+                    .find_map(|lake| visible_lake_water_point(&terrain, lake))
+            })
+            .expect("the version 18 prototype region should contain visible equilibrium water");
         for [x_offset, z_offset] in [[0.0, 0.0], [128.0, 0.0], [-128.0, 0.0], [0.0, 128.0]] {
             assert!(
                 terrain
-                    .lake_surface_at(LAKE_X + x_offset, LAKE_Z + z_offset)
+                    .lake_surface_at(lake_point[0] + x_offset, lake_point[1] + z_offset)
                     .is_some_and(|water| water.water_depth_meters >= 0.5),
                 "the prototype region should retain a broad, visible lake"
             );
@@ -2520,6 +2527,7 @@ mod tests {
     fn water_warp_places_the_player_on_dry_ground_facing_visible_water() {
         let terrain = GeneratedWorldTerrain::new(WORLD);
         let (body, destination, shore_water) = [
+            [-36_032_000.0, -15_744_000.0],
             [-192_000.0, -192_000.0],
             [-64_000.0, -64_000.0],
             [64_000.0, 64_000.0],

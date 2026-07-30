@@ -18,12 +18,16 @@ pub use treeline_caves::{
 };
 use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition, stable_hash};
 use treeline_ecology::{
-    ForestDistribution, ForestSample, GroundVegetationDistribution, GroundVegetationSample,
-    REEF_GENERATOR_VERSION, ReefDistribution, ReefSample, Soil, SoilSample,
-    WETLAND_GENERATOR_VERSION, WetlandDistribution, WetlandHydrology, WetlandKind, WetlandSample,
+    EcosystemDistribution, EcosystemSample, ForestDistribution, ForestSample,
+    GroundVegetationDistribution, GroundVegetationSample, REEF_GENERATOR_VERSION, ReefDistribution,
+    ReefSample, Soil, SoilSample, WETLAND_GENERATOR_VERSION, WetlandDistribution, WetlandHydrology,
+    WetlandKind, WetlandSample,
 };
 pub use treeline_geography::Season;
-use treeline_geography::{Climate, DrainageCellIndex, RegionalProfile, WatershedRegionIndex};
+use treeline_geography::{
+    Climate, DrainageCellIndex, PROVINCE_GENERATOR_VERSION, ProvincePlan, RegionalProfile,
+    WatershedRegionIndex,
+};
 pub use treeline_hydrology::Lake;
 use treeline_hydrology::{
     ActiveWaterError, ActiveWaterRegion, GullyNetwork, GullyTerrainInfluence, LakeNetwork,
@@ -44,8 +48,10 @@ pub const LAKE_GENERATOR_VERSION: u32 = 4;
 pub const EROSION_GENERATOR_VERSION: u32 = 5;
 /// Generator version that first exposes active-region living-water topology.
 pub const LIVING_WATER_GENERATOR_VERSION: u32 = 17;
+/// Generator version that resets generation around top-down geographical provinces.
+pub const LANDSCAPE_DIVERSITY_GENERATOR_VERSION: u32 = PROVINCE_GENERATOR_VERSION;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = LIVING_WATER_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = LANDSCAPE_DIVERSITY_GENERATOR_VERSION;
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
 const DOMAIN_SURFACE_WATER_CELL: u64 = 0x5355_5246_5741_5445;
@@ -253,12 +259,40 @@ impl GeneratedWorldTerrain {
                 let Some(network) = self.river_network(region) else {
                     continue;
                 };
-                let Some(influence) = network
+                let Some(mut influence) = network
                     .segment_from(source)
                     .and_then(|segment| segment.terrain_influence(x, z))
                 else {
                     continue;
                 };
+                if self.world().generator_version >= LANDSCAPE_DIVERSITY_GENERATOR_VERSION {
+                    let Some(province) = ProvincePlan::sample_at(self.world(), x, z) else {
+                        continue;
+                    };
+                    let canyon_strength = ((province.mountain * 0.32)
+                        + (province.plateau * 0.18)
+                        + (province.scarp * 0.18)
+                        + (province.rock_hardness * 0.17)
+                        + (province.aridity * 0.15))
+                        .clamp(0.0, 1.0);
+                    let floodplain_strength =
+                        (province.plains * province.sediment * (0.45 + (province.moisture * 0.55)))
+                            .clamp(0.0, 1.0);
+                    let width_scale = (1.0 - (canyon_strength * 0.58)
+                        + (floodplain_strength * 0.18))
+                        .clamp(0.42, 1.0);
+                    influence.valley_half_width_meters *= width_scale;
+                    if influence.distance_meters > influence.valley_half_width_meters {
+                        continue;
+                    }
+                    influence.channel_half_width_meters *=
+                        (0.82 + (floodplain_strength * 0.28)).clamp(0.82, 1.08);
+                    influence.incision_depth_meters *=
+                        0.82 + (canyon_strength * 2.45) + (province.glacial * 0.38);
+                    let normalized =
+                        1.0 - (influence.distance_meters / influence.valley_half_width_meters);
+                    influence.blend = normalized * normalized * (3.0 - (2.0 * normalized));
+                }
                 let carve_strength = influence.blend * influence.incision_depth_meters;
                 if strongest.is_none_or(|current: RiverTerrainInfluence| {
                     let current_strength = current.blend * current.incision_depth_meters;
@@ -293,12 +327,34 @@ impl GeneratedWorldTerrain {
                 let Some(network) = self.gully_network(region) else {
                     continue;
                 };
-                let Some(influence) = network
+                let Some(mut influence) = network
                     .segment_from(source)
                     .and_then(|segment| segment.terrain_influence(x, z))
                 else {
                     continue;
                 };
+                if self.world().generator_version >= LANDSCAPE_DIVERSITY_GENERATOR_VERSION {
+                    let Some(province) = ProvincePlan::sample_at(self.world(), x, z) else {
+                        continue;
+                    };
+                    let ruggedness = (province.mountain * 0.48
+                        + province.plateau * 0.22
+                        + province.scarp * 0.30)
+                        .clamp(0.0, 1.0);
+                    let incision_scale = 0.72
+                        + (ruggedness * 1.62)
+                        + (province.aridity * province.rock_hardness * 0.58);
+                    let width_scale =
+                        (1.0 - (ruggedness * 0.48) + (province.plains * 0.12)).clamp(0.48, 1.0);
+                    influence.segment.half_width_meters *= width_scale;
+                    if influence.distance_meters > influence.segment.half_width_meters {
+                        continue;
+                    }
+                    influence.segment.incision_depth_meters *= incision_scale;
+                    let normalized =
+                        1.0 - (influence.distance_meters / influence.segment.half_width_meters);
+                    influence.blend = normalized * normalized * (3.0 - (2.0 * normalized));
+                }
                 let carve_strength = influence.blend * influence.segment.incision_depth_meters;
                 if strongest.is_none_or(|current: GullyTerrainInfluence| {
                     let current_strength = current.blend * current.segment.incision_depth_meters;
@@ -335,6 +391,28 @@ impl GeneratedWorldTerrain {
         let lake = network.lake_for_cell(cell)?;
         let terrain_elevation_meters = self.shaped_height(x, z)?.height;
         let water_depth_meters = lake.water_depth_at(terrain_elevation_meters)?;
+        (water_depth_meters > 0.0).then_some(LakeSurfaceSample {
+            lake,
+            terrain_elevation_meters,
+            water_depth_meters,
+        })
+    }
+
+    /// Returns seasonally high or low lake water, including spring playa flooding.
+    pub fn lake_surface_at_season(
+        &self,
+        x: f64,
+        z: f64,
+        season: Season,
+    ) -> Option<LakeSurfaceSample> {
+        if self.world().generator_version < LAKE_GENERATOR_VERSION {
+            return None;
+        }
+        let cell = DrainageCellIndex::containing(x, z)?;
+        let network = self.lake_network(WatershedRegionIndex::containing_cell(cell))?;
+        let lake = network.lake_for_cell(cell)?;
+        let terrain_elevation_meters = self.shaped_height(x, z)?.height;
+        let water_depth_meters = lake.water_depth_at_season(terrain_elevation_meters, season)?;
         (water_depth_meters > 0.0).then_some(LakeSurfaceSample {
             lake,
             terrain_elevation_meters,
@@ -1017,30 +1095,31 @@ impl GeneratedWorldTerrain {
                 mesh.colors.push(cave_wall_color(cave.family));
                 continue;
             }
-            let profile = RegionalProfile::sample(self.world(), position[0], position[2]);
-            let soil = Soil::new(self.world()).sample(position[0], position[2]);
-            let forest = ForestDistribution::new(self.world()).sample(position[0], position[2]);
-            let ground =
-                GroundVegetationDistribution::new(self.world()).sample(position[0], position[2]);
-            let erosion = self.erosion_at(position[0], position[2]);
-            let reef = self.reef_at(position[0], position[2]);
-            let wetland = self.wetland_at(position[0], position[2]);
             mesh.colors.push(
-                geography_surface_color(&SurfaceColorInputs {
-                    profile,
-                    soil,
-                    forest,
-                    ground,
-                    erosion,
-                    wetland,
-                    reef,
-                })
-                .unwrap_or([1.0, 1.0, 1.0, 0.0]),
+                self.surface_color_at(position[0], position[2])
+                    .unwrap_or([1.0, 1.0, 1.0, 0.0]),
             );
         }
         if mesh.colors.iter().all(|color| color[3] <= f32::EPSILON) {
             mesh.colors.clear();
         }
+    }
+
+    /// Returns the world-aligned terrain material color shared by near and far meshes.
+    pub fn surface_color_at(&self, x: f64, z: f64) -> Option<[f32; 4]> {
+        if !x.is_finite() || !z.is_finite() {
+            return None;
+        }
+        geography_surface_color(&SurfaceColorInputs {
+            profile: RegionalProfile::sample(self.world(), x, z),
+            soil: Soil::new(self.world()).sample(x, z),
+            forest: ForestDistribution::new(self.world()).sample(x, z),
+            ground: GroundVegetationDistribution::new(self.world()).sample(x, z),
+            erosion: self.erosion_at(x, z),
+            wetland: self.wetland_at(x, z),
+            reef: self.reef_at(x, z),
+            ecosystem: EcosystemDistribution::new(self.world()).sample(x, z),
+        })
     }
 }
 
@@ -1144,8 +1223,10 @@ struct SurfaceColorInputs {
     erosion: Option<WorldErosionSample>,
     wetland: Option<WetlandSample>,
     reef: Option<ReefSample>,
+    ecosystem: Option<EcosystemSample>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn geography_surface_color(inputs: &SurfaceColorInputs) -> Option<[f32; 4]> {
     let profile = inputs.profile?;
     let soil = inputs.soil?;
@@ -1196,6 +1277,43 @@ fn geography_surface_color(inputs: &SurfaceColorInputs) -> Option<[f32; 4]> {
     );
     let mut color = mix_rgb(substrate, vegetation_color, vegetation.clamp(0.0, 0.82));
     let mut strength: f32 = 0.88;
+
+    if let Some(ecosystem) = inputs.ecosystem {
+        let potentials = ecosystem.relative_potentials();
+        let ecosystem_colors = [
+            [0.055, 0.205, 0.075],
+            [0.22, 0.31, 0.105],
+            [0.38, 0.46, 0.13],
+            [0.50, 0.41, 0.18],
+            [0.42, 0.30, 0.17],
+            [0.66, 0.48, 0.24],
+            [0.40, 0.46, 0.34],
+            [0.43, 0.44, 0.45],
+            [0.20, 0.39, 0.25],
+        ];
+        let mut ecosystem_color = [0.0_f32; 3];
+        for (potential, regime_color) in potentials.into_iter().zip(ecosystem_colors) {
+            for channel in 0..3 {
+                ecosystem_color[channel] += f64_as_f32(potential) * regime_color[channel];
+            }
+        }
+        let strongest = ecosystem.potentials().into_iter().fold(0.0_f64, f64::max);
+        let ecosystem_blend = f64_as_f32((0.18 + (strongest * 0.64)).clamp(0.18, 0.72));
+        color = mix_rgb(color, ecosystem_color, ecosystem_blend);
+
+        let playa = inputs.wetland.map_or(0.0, |wetland| wetland.playa_fraction);
+        let salt_pan = (ecosystem.salinity_fraction
+            * ecosystem.closed_basin_fraction
+            * (0.42 + (playa * 0.88)))
+            .clamp(0.0, 1.0);
+        if salt_pan > 0.04 {
+            color = mix_rgb(
+                color,
+                [0.78, 0.76, 0.66],
+                f64_as_f32((salt_pan * 0.88).clamp(0.0, 0.82)),
+            );
+        }
+    }
 
     let reef_strength = inputs.reef.map_or(0.0, |sample| sample.coverage_fraction);
     let wetland_strength = inputs
@@ -1287,7 +1405,7 @@ impl DensityField for GeneratedWorldTerrain {
         let Some(shape) = self.shaped_height(position.x, position.z) else {
             return TerrainSample::new(f64::INFINITY, Material::Air);
         };
-        let density = position.y - shape.height;
+        let density = self.base.density_at_surface(position, shape.height);
         let material = if density > 0.0 {
             Material::Air
         } else if shape.river.is_some_and(|influence| {
@@ -1333,17 +1451,41 @@ impl SurfaceField for GeneratedWorldTerrain {
 
     fn volume_bounds(&self, min_x: f64, min_z: f64, max_x: f64, max_z: f64) -> Option<(f64, f64)> {
         let systems = self.cave_systems_intersecting(min_x, min_z, max_x, max_z);
-        let minimum = systems
+        let cave_minimum = systems
             .iter()
             .filter_map(|system| system.vertical_bounds_in(min_x, min_z, max_x, max_z))
             .map(|bounds| bounds.0)
             .fold(f64::INFINITY, f64::min);
-        let maximum = systems
+        let cave_maximum = systems
             .iter()
             .filter_map(|system| system.vertical_bounds_in(min_x, min_z, max_x, max_z))
             .map(|bounds| bounds.1)
             .fold(f64::NEG_INFINITY, f64::max);
-        minimum.is_finite().then_some((minimum, maximum))
+        let terrain_bounds = self
+            .base
+            .undercut_depth_in(min_x, min_z, max_x, max_z)
+            .and_then(|depth| {
+                let mut minimum = f64::INFINITY;
+                let mut maximum = f64::NEG_INFINITY;
+                for z_fraction in [0.0, 0.5, 1.0] {
+                    for x_fraction in [0.0, 0.5, 1.0] {
+                        let x = min_x + ((max_x - min_x) * x_fraction);
+                        let z = min_z + ((max_z - min_z) * z_fraction);
+                        let surface = self.shaped_height(x, z)?.height;
+                        minimum = minimum.min(surface - depth - 2.0);
+                        maximum = maximum.max(surface + 2.0);
+                    }
+                }
+                Some((minimum, maximum))
+            });
+        match (cave_minimum.is_finite(), terrain_bounds) {
+            (true, Some((terrain_minimum, terrain_maximum))) => Some((
+                cave_minimum.min(terrain_minimum),
+                cave_maximum.max(terrain_maximum),
+            )),
+            (true, None) => Some((cave_minimum, cave_maximum)),
+            (false, bounds) => bounds,
+        }
     }
 }
 
@@ -1352,7 +1494,6 @@ fn lake_surface_grid(
     spec: SurfaceGridSpec,
 ) -> Result<Mesh, MeshingError> {
     const WATER_RENDER_OFFSET_METERS: f64 = 0.05;
-    const LAKE_WATER_COLOR: [f32; 4] = [0.04, 0.34, 0.58, 1.0];
     const OCEAN_WATER_COLOR: [f32; 4] = [0.02, 0.29, 0.52, 1.0];
     const RIVER_WATER_COLOR: [f32; 4] = [0.035, 0.31, 0.49, 1.0];
 
@@ -1397,11 +1538,7 @@ fn lake_surface_grid(
             } else if let Some(water) = terrain.lake_surface_at(center_x, center_z) {
                 let wetland = terrain.wetland_at(center_x, center_z);
                 let wetland_cover = wetland.map_or(0.0, |sample| sample.coverage_fraction);
-                let color = blend_color(
-                    LAKE_WATER_COLOR,
-                    [0.18, 0.40, 0.24, 1.0],
-                    f64_as_f32(wetland_cover * 0.58),
-                );
+                let color = lake_water_color(wetland_cover, water.lake.salinity_fraction);
                 (
                     water.lake.surface_elevation_meters + WATER_RENDER_OFFSET_METERS,
                     color,
@@ -1452,6 +1589,19 @@ fn lake_surface_grid(
         }
     }
     Ok(mesh)
+}
+
+fn lake_water_color(wetland_cover: f64, salinity: f64) -> [f32; 4] {
+    let freshwater = blend_color(
+        [0.04, 0.34, 0.58, 1.0],
+        [0.18, 0.40, 0.24, 1.0],
+        f64_as_f32(wetland_cover * 0.58),
+    );
+    blend_color(
+        freshwater,
+        [0.20, 0.48, 0.44, 1.0],
+        f64_as_f32(salinity * 0.62),
+    )
 }
 
 fn append_underground_river_quad(
@@ -2698,6 +2848,93 @@ mod tests {
     use treeline_terrain::RollingHills;
 
     #[test]
+    fn version_eighteen_is_the_top_down_landscape_reset() {
+        assert_eq!(LANDSCAPE_DIVERSITY_GENERATOR_VERSION, 18);
+        assert_eq!(
+            CURRENT_GENERATOR_VERSION,
+            LANDSCAPE_DIVERSITY_GENERATOR_VERSION
+        );
+
+        let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        for [x, z] in [
+            [-1_420_125.0, 812_375.0],
+            [-512_000.0, -0.001],
+            [2_960_500.0, -4_180_250.0],
+        ] {
+            let surface = terrain.surface_height(x, z).expect("reset surface");
+            let sample = terrain.sample(WorldPosition::new(x, surface, z));
+            assert_eq!(
+                sample.density.to_bits(),
+                0.0_f64.to_bits(),
+                "near density and far surface must remain aligned at {x}, {z}"
+            );
+            assert!(
+                EcosystemDistribution::new(world).sample(x, z).is_some(),
+                "the shared province plan must feed broad ecosystem structure"
+            );
+        }
+    }
+
+    #[test]
+    fn version_eighteen_composes_scarp_volume_with_the_final_shaped_surface() {
+        let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+        let terrain = GeneratedWorldTerrain::new(world);
+        let mut candidate = None;
+        'outer: for z in -64..=64 {
+            for x in -64..=64 {
+                let world_x = f64::from(x) * 16_000.0;
+                let world_z = f64::from(z) * 16_000.0;
+                let province = ProvincePlan::sample_at(world, world_x, world_z).expect("province");
+                if let Some(scarp) = province.scarp_geometry
+                    && scarp.face_strength >= 0.12
+                    && scarp.undercut_depth_meters > 0.5
+                {
+                    candidate = Some((world_x, world_z, scarp));
+                    break 'outer;
+                }
+            }
+        }
+        let (x, z, scarp) = candidate.expect("golden survey contains a strong scarp");
+        let target_signed = scarp.undercut_depth_meters * 0.46;
+        let shift = target_signed - scarp.signed_distance_meters;
+        let target_x = x + (scarp.face_normal[0] * shift);
+        let target_z = z + (scarp.face_normal[1] * shift);
+        let target = ProvincePlan::sample_at(world, target_x, target_z)
+            .and_then(|sample| sample.scarp_geometry)
+            .expect("same scarp at low-side cavity");
+        let far_surface = terrain
+            .surface_height(target_x, target_z)
+            .expect("final shaped surface");
+        assert_eq!(
+            terrain
+                .sample(WorldPosition::new(target_x, far_surface, target_z))
+                .density
+                .to_bits(),
+            0.0_f64.to_bits()
+        );
+        let cavity = WorldPosition::new(
+            target_x,
+            far_surface - (target.undercut_depth_meters * 0.66),
+            target_z,
+        );
+        let carved = terrain.sample(cavity);
+        assert!(cavity.y - far_surface < 0.0);
+        assert!(carved.density > 0.0);
+        assert_eq!(carved.material, Material::Air);
+
+        let (minimum, maximum) = terrain
+            .volume_bounds(
+                target_x - 16.0,
+                target_z - 16.0,
+                target_x + 16.0,
+                target_z + 16.0,
+            )
+            .expect("shaped undercut bounds");
+        assert!(minimum <= cavity.y && cavity.y <= maximum);
+    }
+
+    #[test]
     fn version_three_rivers_lower_the_shared_near_and_far_surface() {
         let world = WorldIdentity::new(0x5eed, RIVER_TERRAIN_GENERATOR_VERSION, 0);
         let network =
@@ -3483,6 +3720,7 @@ mod tests {
                 erosion: terrain.erosion_at(x, z),
                 wetland: terrain.wetland_at(x, z),
                 reef: terrain.reef_at(x, z),
+                ecosystem: EcosystemDistribution::new(world).sample(x, z),
             })
             .expect("geography material")
         };

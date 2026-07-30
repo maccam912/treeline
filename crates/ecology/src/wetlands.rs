@@ -1,7 +1,7 @@
 use treeline_coordinates::WorldIdentity;
 use treeline_geography::Climate;
 
-use crate::{ForestDistribution, Soil};
+use crate::{ECOSYSTEM_GENERATOR_VERSION, EcosystemDistribution, ForestDistribution, Soil};
 
 /// Generator version that first exposes hydrology-constrained wetlands.
 pub const WETLAND_GENERATOR_VERSION: u32 = 14;
@@ -121,6 +121,8 @@ pub struct WetlandSample {
     pub open_water_fraction: f64,
     pub peat_depth_meters: f64,
     pub salinity_fraction: f64,
+    /// Inland saline-basin and intermittently inundated playa expression.
+    pub playa_fraction: f64,
     pub composition: WetlandComposition,
 }
 
@@ -142,6 +144,7 @@ impl WetlandDistribution {
     }
 
     /// Classifies a hydrological setting without introducing a biome ID.
+    #[allow(clippy::too_many_lines)]
     pub fn sample(self, x: f64, z: f64, hydrology: WetlandHydrology) -> Option<WetlandSample> {
         if self.world.generator_version < WETLAND_GENERATOR_VERSION {
             return None;
@@ -150,6 +153,11 @@ impl WetlandDistribution {
         let climate = Climate::new(self.world).sample(x, z)?;
         let soil = Soil::new(self.world).sample(x, z)?;
         let forest = ForestDistribution::new(self.world).sample(x, z)?;
+        let ecosystem = if self.world.generator_version >= ECOSYSTEM_GENERATOR_VERSION {
+            Some(EcosystemDistribution::new(self.world).sample(x, z)?)
+        } else {
+            None
+        };
         let water_depth = hydrology.equilibrium_water_depth_meters;
         let shallow_water = if water_depth > 0.0 {
             1.0 - smoothstep(0.35, 4.0, water_depth)
@@ -166,19 +174,19 @@ impl WetlandDistribution {
         let coastal_inundation = climate.ocean_proximity_fraction
             * (1.0 - smoothstep(0.0, 6.0, hydrology.surface_height_meters.abs()))
             * flatness;
-        let surface_saturation_fraction = (soil.surface_moisture * 0.62
+        let mut surface_saturation_fraction = (soil.surface_moisture * 0.62
             + shallow_water * 0.48
             + flood_frequency_fraction * 0.42
             + coastal_inundation * 0.34)
             .clamp(0.0, 1.0);
-        let hydroperiod_fraction = (surface_saturation_fraction * 0.62
+        let mut hydroperiod_fraction = (surface_saturation_fraction * 0.62
             + shallow_water * 0.36
             + flood_frequency_fraction * 0.24
             + flatness * 0.12)
             .clamp(0.0, 1.0);
         let wetland_signal =
             hydroperiod_fraction * (0.55 + (flatness * 0.45)) * (1.0 - (soil.rock_exposure * 0.72));
-        let coverage_fraction = (smoothstep(0.42, 0.82, wetland_signal)
+        let mut coverage_fraction = (smoothstep(0.42, 0.82, wetland_signal)
             * (1.0 - (open_water_fraction * 0.88)))
             .clamp(0.0, 1.0);
 
@@ -186,8 +194,35 @@ impl WetlandDistribution {
         let acidity = soil.acidity_fraction();
         let evaporation_pressure =
             (warmth * (1.0 - climate.precipitation_fraction())).clamp(0.0, 1.0);
-        let salinity_fraction =
+        let mut salinity_fraction =
             (coastal_inundation * (0.42 + (evaporation_pressure * 0.58))).clamp(0.0, 1.0);
+        let mut playa_fraction = 0.0;
+        if let Some(ecosystem) = ecosystem {
+            playa_fraction = (ecosystem.closed_basin_fraction
+                * ecosystem.salinity_fraction
+                * flatness
+                * (0.34 + (climate.precipitation_seasonality_fraction * 0.66))
+                * (1.0 - (open_water_fraction * 0.72)))
+                .clamp(0.0, 1.0);
+            salinity_fraction = (salinity_fraction
+                + (ecosystem.salinity_fraction
+                    * (0.44 + (ecosystem.closed_basin_fraction * 0.56))))
+                .clamp(0.0, 1.0);
+            surface_saturation_fraction = (surface_saturation_fraction
+                + (ecosystem.wetland_potential * 0.16)
+                + (playa_fraction * 0.08))
+                .clamp(0.0, 1.0);
+            hydroperiod_fraction = (hydroperiod_fraction
+                + (ecosystem.wetland_potential * 0.14)
+                + (playa_fraction * 0.10))
+                .clamp(0.0, 1.0);
+            let province_coverage = smoothstep(
+                0.24,
+                0.72,
+                ecosystem.wetland_potential + (playa_fraction * 0.22),
+            ) * (1.0 - (open_water_fraction * 0.88));
+            coverage_fraction = coverage_fraction.max(province_coverage).clamp(0.0, 1.0);
+        }
         let peat_potential = hydroperiod_fraction
             * acidity
             * (1.0 - smoothstep(0.58, 0.88, warmth))
@@ -205,8 +240,9 @@ impl WetlandDistribution {
         let peatland = 0.08 + (peat_potential * 1.12);
         let seasonal = (0.10 + (intermittency * 0.90))
             * (0.52 + (climate.precipitation_seasonality_fraction * 0.48))
-            * (1.0 - (salinity_fraction * 0.45));
-        let salt_marsh = 0.04 + (salinity_fraction * 1.16);
+            * (1.0 - (salinity_fraction * 0.45))
+            + (playa_fraction * 1.08);
+        let salt_marsh = 0.04 + (salinity_fraction * 1.16) + (playa_fraction * 0.82);
         let total = marsh + swamp + peatland + seasonal + salt_marsh;
         let composition = WetlandComposition {
             emergent_marsh_fraction: marsh / total,
@@ -224,6 +260,7 @@ impl WetlandDistribution {
             open_water_fraction,
             peat_depth_meters,
             salinity_fraction,
+            playa_fraction,
             composition,
         })
     }
@@ -315,6 +352,47 @@ mod tests {
             assert_eq!(first, second);
             assert!(first.coverage_fraction.is_finite());
         }
+    }
+
+    #[test]
+    fn version_eighteen_closed_saline_basins_express_inland_playas() {
+        let world = WorldIdentity::new(0x5eed, ECOSYSTEM_GENERATOR_VERSION, 0);
+        let ecosystems = EcosystemDistribution::new(world);
+        let mut best_position = [0.0, 0.0];
+        let mut best_signal = f64::NEG_INFINITY;
+        for z in -8..=8 {
+            for x in -8..=8 {
+                let position = [f64::from(x) * 384_000.0, f64::from(z) * 384_000.0];
+                let ecosystem = ecosystems
+                    .sample(position[0], position[1])
+                    .expect("ecosystem");
+                let signal = ecosystem.closed_basin_fraction * ecosystem.salinity_fraction;
+                if signal > best_signal {
+                    best_signal = signal;
+                    best_position = position;
+                }
+            }
+        }
+        let dry_basin =
+            WetlandHydrology::new(120.0, 0.0, 0.0, 0.0).expect("dry closed-basin hydrology");
+        let sample = WetlandDistribution::new(world)
+            .sample(best_position[0], best_position[1], dry_basin)
+            .expect("playa");
+
+        assert!(
+            best_signal > 0.08,
+            "best saline-basin signal was {best_signal}"
+        );
+        assert!(
+            sample.playa_fraction > 0.03,
+            "playa expression was only {}",
+            sample.playa_fraction
+        );
+        assert!(sample.salinity_fraction > 0.18);
+        assert!(
+            sample.composition.seasonal_wetland_fraction + sample.composition.salt_marsh_fraction
+                > 0.28
+        );
     }
 
     #[test]

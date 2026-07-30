@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
 use treeline_geography::Climate;
 
-use crate::{ForestDistribution, Soil};
+use crate::{ECOSYSTEM_GENERATOR_VERSION, EcosystemDistribution, ForestDistribution, Soil};
 
 /// Generator version that first exposes deterministic ground vegetation.
 pub const GROUND_VEGETATION_GENERATOR_VERSION: u32 = 13;
@@ -120,6 +120,7 @@ impl GroundVegetationDistribution {
     }
 
     /// Samples ground cover without assigning a biome or consulting simulation state.
+    #[allow(clippy::too_many_lines)]
     pub fn sample(self, x: f64, z: f64) -> Option<GroundVegetationSample> {
         if self.world.generator_version < GROUND_VEGETATION_GENERATOR_VERSION {
             return None;
@@ -128,6 +129,11 @@ impl GroundVegetationDistribution {
         let climate = Climate::new(self.world).sample(x, z)?;
         let soil = Soil::new(self.world).sample(x, z)?;
         let forest = ForestDistribution::new(self.world).sample(x, z)?;
+        let ecosystem = if self.world.generator_version >= ECOSYSTEM_GENERATOR_VERSION {
+            Some(EcosystemDistribution::new(self.world).sample(x, z)?)
+        } else {
+            None
+        };
         let warmth = climate.warmth_fraction();
         let moisture = soil.surface_moisture;
         let depth = soil.depth_fraction();
@@ -141,25 +147,50 @@ impl GroundVegetationDistribution {
             (climate.permanent_snowpack_water_equivalent_millimeters / 1_200.0).clamp(0.0, 1.0);
 
         let temperate_vigor = (1.0 - ((warmth - 0.56).abs() * 1.55)).clamp(0.0, 1.0);
-        let graminoid = (0.12 + (sunlight * 0.72) + (disturbance * 0.34))
+        let mut graminoid = (0.12 + (sunlight * 0.72) + (disturbance * 0.34))
             * (0.34 + (moisture * 0.66))
             * (0.45 + (temperate_vigor * 0.55));
-        let forb = (0.08 + (sunlight * 0.74))
+        let mut forb = (0.08 + (sunlight * 0.74))
             * (0.28 + (depth * 0.72))
             * (0.35 + (temperate_vigor * 0.65))
             * (1.0 - (moisture - 0.58).abs() * 0.72).clamp(0.24, 1.0)
             * (0.72 + (disturbance * 0.28));
-        let fern = (0.06 + (shade * 0.94))
+        let mut fern = (0.06 + (shade * 0.94))
             * (0.12 + (moisture * 0.88))
             * (0.35 + (depth * 0.65))
             * (0.72 + (soil.acidity_fraction() * 0.28));
-        let low_shrub = (0.18 + (sunlight * 0.42) + (shade * 0.22))
+        let mut low_shrub = (0.18 + (sunlight * 0.42) + (shade * 0.22))
             * (0.36 + (depth * 0.64))
             * (0.52 + ((1.0 - disturbance) * 0.48))
             * (0.62 + ((1.0 - moisture) * warmth * 0.38));
-        let moss = (0.08 + (shade * 0.74))
+        let mut moss = (0.08 + (shade * 0.74))
             * (0.14 + (moisture * 0.86))
             * (0.52 + (soil.acidity_fraction() * 0.28) + (exposure * 0.20));
+        if let Some(ecosystem) = ecosystem {
+            graminoid *= 0.18
+                + (ecosystem.grassland_prairie_potential * 2.10)
+                + (ecosystem.steppe_potential * 1.15)
+                + (ecosystem.tundra_potential * 0.45)
+                + (ecosystem.wetland_potential * 0.40);
+            forb *= 0.30
+                + (ecosystem.grassland_prairie_potential * 0.72)
+                + (ecosystem.open_woodland_potential * 0.34)
+                + (ecosystem.wetland_potential * 0.42);
+            fern *= 0.18
+                + (ecosystem.closed_forest_potential * 1.72)
+                + (ecosystem.wetland_potential * 0.82);
+            low_shrub *= 0.20
+                + (ecosystem.shrubland_potential * 2.0)
+                + (ecosystem.steppe_potential * 0.72)
+                + (ecosystem.desert_potential * 0.58)
+                + (ecosystem.tundra_potential * 0.68)
+                + (ecosystem.open_woodland_potential * 0.48);
+            moss *= 0.20
+                + (ecosystem.tundra_potential * 1.58)
+                + (ecosystem.wetland_potential * 1.08)
+                + (ecosystem.closed_forest_potential * 0.42)
+                + (ecosystem.exposed_alpine_potential * 0.52);
+        }
         let total = graminoid + forb + fern + low_shrub + moss;
         let composition = GroundVegetationComposition {
             graminoid_fraction: graminoid / total,
@@ -180,20 +211,43 @@ impl GroundVegetationDistribution {
             (0.18 + (depth * 0.82)) * (1.0 - (exposure * 0.70)) * (1.0 - (slope * 0.58));
         let water_vigor = (0.30 + (moisture * 0.92) - (moisture * moisture * 0.22)).clamp(0.0, 1.0);
         let snow_free = 1.0 - permanent_snow;
-        let ground_cover_fraction = (substrate
+        let mut ground_cover_fraction = (substrate
             * water_vigor
             * (0.44 + (temperate_vigor * 0.56))
             * (0.58 + (patchiness * 0.58))
             * (0.62 + (canopy * 0.14))
             * snow_free)
             .clamp(0.0, 1.0);
+        if let Some(ecosystem) = ecosystem {
+            let target_cover = ((ecosystem.closed_forest_potential * 0.46)
+                + (ecosystem.open_woodland_potential * 0.62)
+                + (ecosystem.grassland_prairie_potential * 0.98)
+                + (ecosystem.steppe_potential * 0.68)
+                + (ecosystem.shrubland_potential * 0.64)
+                + (ecosystem.desert_potential * 0.12)
+                + (ecosystem.tundra_potential * 0.54)
+                + (ecosystem.wetland_potential * 0.88))
+                .clamp(0.0, 1.0);
+            ground_cover_fraction = ((((ground_cover_fraction * 0.24)
+                + (target_cover * substrate * (0.56 + (patchiness * 0.48))))
+                * (1.0 - (ecosystem.exposed_alpine_potential * 0.82)))
+                * ecosystem.land_fraction)
+                .clamp(0.0, 1.0);
+        }
         let patch_density_per_hectare =
             (ground_cover_fraction * (680.0 + (1_720.0 * patchiness))).clamp(0.0, 2_400.0);
-        let mean_height_meters = GroundCoverGroup::ALL
+        let mut mean_height_meters = GroundCoverGroup::ALL
             .into_iter()
             .map(|group| composition.fraction(group) * group.typical_height_meters())
             .sum::<f64>()
             * (0.58 + (ground_cover_fraction * 0.62));
+        if let Some(ecosystem) = ecosystem {
+            mean_height_meters *= (1.0
+                - (ecosystem.desert_potential * 0.42)
+                - (ecosystem.tundra_potential * 0.24)
+                - (ecosystem.exposed_alpine_potential * 0.48))
+                .clamp(0.18, 1.0);
+        }
         let flowering_fraction = (composition.forb_fraction
             * sunlight
             * (0.35 + (warmth * 0.65))
@@ -631,6 +685,53 @@ mod tests {
                 .is_none()
         );
         assert!(GroundVegetation::new(old_world).plants_in(bounds).is_none());
+    }
+
+    #[test]
+    fn version_eighteen_ground_layers_express_grass_shrub_desert_and_tundra_structure() {
+        let world = WorldIdentity::new(0x5eed, ECOSYSTEM_GENERATOR_VERSION, 0);
+        let ecosystems = EcosystemDistribution::new(world);
+        let ground = GroundVegetationDistribution::new(world);
+        let mut best = [[0.0, 0.0]; 4];
+        let mut maxima = [f64::NEG_INFINITY; 4];
+        for z in -8..=8 {
+            for x in -8..=8 {
+                let position = [f64::from(x) * 384_000.0, f64::from(z) * 384_000.0];
+                let ecosystem = ecosystems
+                    .sample(position[0], position[1])
+                    .expect("ecosystem");
+                let potentials = [
+                    ecosystem.grassland_prairie_potential,
+                    ecosystem.shrubland_potential,
+                    ecosystem.desert_potential,
+                    ecosystem.tundra_potential,
+                ];
+                for (index, potential) in potentials.into_iter().enumerate() {
+                    if potential > maxima[index] {
+                        maxima[index] = potential;
+                        best[index] = position;
+                    }
+                }
+            }
+        }
+
+        let grass = ground
+            .sample(best[0][0], best[0][1])
+            .expect("grassland ground layer");
+        let shrub = ground
+            .sample(best[1][0], best[1][1])
+            .expect("shrubland ground layer");
+        let desert = ground
+            .sample(best[2][0], best[2][1])
+            .expect("desert ground layer");
+        let tundra = ground
+            .sample(best[3][0], best[3][1])
+            .expect("tundra ground layer");
+
+        assert!(grass.composition.graminoid_fraction > 0.34);
+        assert!(shrub.composition.low_shrub_fraction > 0.30);
+        assert!(desert.ground_cover_fraction < grass.ground_cover_fraction);
+        assert!(tundra.composition.low_shrub_fraction + tundra.composition.moss_fraction > 0.34);
     }
 
     #[test]

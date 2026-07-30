@@ -1,16 +1,19 @@
 //! Ecosystem primitives built from environmental variables rather than biome IDs.
 
+mod ecosystem;
 mod ground_vegetation;
 mod reefs;
 mod rocks;
 mod wetlands;
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 
 use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
-use treeline_geography::{Climate, RegionalProfile};
+use treeline_geography::{Climate, ProvincePlan, ProvinceSample, RegionalProfile};
 use treeline_terrain::WildernessTerrain;
 
+pub use ecosystem::{ECOSYSTEM_GENERATOR_VERSION, EcosystemDistribution, EcosystemSample};
 pub use ground_vegetation::{
     GROUND_VEGETATION_GENERATOR_VERSION, GroundCoverGroup, GroundPlant, GroundPlantGenotype,
     GroundVegetation, GroundVegetationBounds, GroundVegetationComposition,
@@ -36,6 +39,32 @@ pub const TREE_GENERATOR_VERSION: u32 = 10;
 const DOMAIN_FOREST_PATCHES: u64 = 0x464f_5245_5354_5041;
 const DOMAIN_FOREST_STANDS: u64 = 0x464f_5245_5354_5354;
 const DOMAIN_STAND_AGE: u64 = 0x5354_414e_445f_4147;
+// Exact-coordinate memoization only: eviction and visitation order cannot
+// change generated values.
+const ECOLOGY_SAMPLE_CACHE_ENTRIES: usize = 64;
+
+thread_local! {
+    static SOIL_SAMPLE_CACHE: RefCell<VecDeque<SoilCacheEntry>> =
+        const { RefCell::new(VecDeque::new()) };
+    static FOREST_SAMPLE_CACHE: RefCell<VecDeque<ForestCacheEntry>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+#[derive(Clone, Copy)]
+struct SoilCacheEntry {
+    world: WorldIdentity,
+    x_bits: u64,
+    z_bits: u64,
+    sample: SoilSample,
+}
+
+#[derive(Clone, Copy)]
+struct ForestCacheEntry {
+    world: WorldIdentity,
+    x_bits: u64,
+    z_bits: u64,
+    sample: ForestSample,
+}
 const DOMAIN_FIRE_HISTORY: u64 = 0x4649_5245_4849_5354;
 const DOMAIN_WINDTHROW_HISTORY: u64 = 0x5749_4e44_5448_524f;
 const DOMAIN_FLOOD_HISTORY: u64 = 0x464c_4f4f_445f_4849;
@@ -100,6 +129,10 @@ pub struct SoilSample {
     pub texture: SoilTexture,
     pub depth_meters: f64,
     pub surface_moisture: f64,
+    pub potential_evapotranspiration_millimeters: f64,
+    pub climatic_water_balance_millimeters: f64,
+    pub climatic_water_balance_fraction: f64,
+    pub salinity_fraction: f64,
     pub acidity_ph: f64,
     pub organic_matter_fraction: f64,
     pub rock_exposure: f64,
@@ -138,23 +171,49 @@ impl Soil {
     ///
     /// The arithmetic and square roots used by lower-level terrain and climate
     /// samplers are part of the versioned generation contract.
+    #[allow(clippy::too_many_lines)]
     pub fn sample(self, x: f64, z: f64) -> Option<SoilSample> {
         if self.world.generator_version < SOIL_GENERATOR_VERSION {
             return None;
+        }
+        let x_bits = x.to_bits();
+        let z_bits = z.to_bits();
+        if let Some(sample) = SOIL_SAMPLE_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.world == self.world && entry.x_bits == x_bits && entry.z_bits == z_bits
+                })
+                .map(|entry| entry.sample)
+        }) {
+            return Some(sample);
         }
 
         let profile = RegionalProfile::sample(self.world, x, z)?;
         let erosion = WildernessTerrain::new(self.world).erosion_at(x, z)?;
         let climate = Climate::new(self.world).sample(x, z)?;
+        let province = if self.world.generator_version >= ECOSYSTEM_GENERATOR_VERSION {
+            Some(ProvincePlan::sample_at(self.world, x, z)?)
+        } else {
+            None
+        };
         let softness = 1.0 - profile.rock_hardness;
         let deposition = (erosion.sediment_deposition_meters / 18.0).clamp(0.0, 1.0);
 
-        let sand_weight = 0.2 + (profile.rock_hardness * 0.45) + (erosion.scree_cover * 0.3);
-        let silt_weight = 0.18 + (deposition * 0.55) + (profile.erosion_age * 0.22);
-        let clay_weight = 0.12
+        let mut sand_weight = 0.2 + (profile.rock_hardness * 0.45) + (erosion.scree_cover * 0.3);
+        let mut silt_weight = 0.18 + (deposition * 0.55) + (profile.erosion_age * 0.22);
+        let mut clay_weight = 0.12
             + (softness * 0.38)
             + (profile.erosion_age * 0.25)
             + (profile.karst_probability * 0.08);
+        if let Some(province) = province {
+            sand_weight += province.dune * 0.58 + province.rock_hardness * 0.12;
+            silt_weight += province.sediment * 0.46 + province.plains * 0.12;
+            clay_weight +=
+                province.closed_basin * province.sediment * 0.34 + province.erosion * 0.08;
+        }
         let mineral_total = sand_weight + silt_weight + clay_weight;
         let composition = SoilComposition {
             sand_fraction: sand_weight / mineral_total,
@@ -187,7 +246,7 @@ impl Soil {
             / climate.annual_precipitation_millimeters.max(1.0))
         .clamp(0.0, 1.0);
         let depth_fraction = (erosion.soil_depth_meters / 3.5).clamp(0.0, 1.0);
-        let surface_moisture = ((precipitation * 0.62)
+        let mut surface_moisture = ((precipitation * 0.62)
             + (snowmelt_fraction * 0.15)
             + (water_holding * 0.35)
             + (depth_fraction * 0.12)
@@ -195,21 +254,64 @@ impl Soil {
             - (drainage * 0.32))
             .clamp(0.0, 1.0);
 
-        let acidity_ph = (6.8 + (profile.karst_probability * 1.2) + (profile.rock_hardness * 0.25)
-            - (precipitation * 0.95)
-            - (organic_fraction * 0.55))
-            .clamp(3.5, 8.5);
+        let mut potential_evapotranspiration_millimeters = 0.0;
+        let mut climatic_water_balance_millimeters = 0.0;
+        let mut climatic_water_balance_fraction = surface_moisture;
+        let mut salinity_fraction = 0.0;
+        if let Some(province) = province {
+            let balance = ecosystem::climate_water_balance(climate, &province);
+            potential_evapotranspiration_millimeters =
+                balance.potential_evapotranspiration_millimeters;
+            climatic_water_balance_millimeters = balance.balance_millimeters;
+            climatic_water_balance_fraction = balance.fraction;
+            salinity_fraction = (province.salinity
+                * (0.52 + (province.aridity * 0.32) + (province.closed_basin * 0.16)))
+                .clamp(0.0, 1.0);
+            surface_moisture = ((surface_moisture * 0.42)
+                + (balance.fraction * 0.34)
+                + (province.moisture * 0.24)
+                - (salinity_fraction * 0.18))
+                .clamp(0.0, 1.0);
+        }
 
-        Some(SoilSample {
+        let mut acidity_ph =
+            (6.8 + (profile.karst_probability * 1.2) + (profile.rock_hardness * 0.25)
+                - (precipitation * 0.95)
+                - (organic_fraction * 0.55))
+                .clamp(3.5, 8.5);
+        if let Some(province) = province {
+            acidity_ph =
+                (acidity_ph + (province.carbonate_fraction * 0.34) + (salinity_fraction * 0.46))
+                    .clamp(3.5, 8.5);
+        }
+
+        let sample = SoilSample {
             composition,
             texture: composition.texture(),
             depth_meters: erosion.soil_depth_meters,
             surface_moisture,
+            potential_evapotranspiration_millimeters,
+            climatic_water_balance_millimeters,
+            climatic_water_balance_fraction,
+            salinity_fraction,
             acidity_ph,
             organic_matter_fraction,
             rock_exposure: erosion.rock_exposure,
             slope: erosion.slope,
-        })
+        };
+        SOIL_SAMPLE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= ECOLOGY_SAMPLE_CACHE_ENTRIES {
+                cache.pop_front();
+            }
+            cache.push_back(SoilCacheEntry {
+                world: self.world,
+                x_bits,
+                z_bits,
+                sample,
+            });
+        });
+        Some(sample)
     }
 }
 
@@ -466,9 +568,24 @@ impl ForestDistribution {
     /// suitability with soil depth, exposed rock, slope, permanent snow,
     /// coherent stand patchiness, and a deterministic disturbance history.
     /// The value fields and IEEE-754 arithmetic are part of generator version 9.
+    #[allow(clippy::too_many_lines)]
     pub fn sample(self, x: f64, z: f64) -> Option<ForestSample> {
         if self.world.generator_version < FOREST_GENERATOR_VERSION {
             return None;
+        }
+        let x_bits = x.to_bits();
+        let z_bits = z.to_bits();
+        if let Some(sample) = FOREST_SAMPLE_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.world == self.world && entry.x_bits == x_bits && entry.z_bits == z_bits
+                })
+                .map(|entry| entry.sample)
+        }) {
+            return Some(sample);
         }
 
         let climate = Climate::new(self.world).sample(x, z)?;
@@ -478,6 +595,16 @@ impl ForestDistribution {
         let sunlight = (0.88 - (precipitation * 0.28)).clamp(0.0, 1.0);
         let slope_fraction = (soil.slope / 0.22).clamp(0.0, 1.0);
         let dryness = 1.0 - soil.surface_moisture;
+        let ecosystem = if self.world.generator_version >= ECOSYSTEM_GENERATOR_VERSION {
+            Some(EcosystemDistribution::new(self.world).sample(x, z)?)
+        } else {
+            None
+        };
+        let province = if self.world.generator_version >= ECOSYSTEM_GENERATOR_VERSION {
+            Some(ProvincePlan::sample_at(self.world, x, z)?)
+        } else {
+            None
+        };
 
         let history = sample_forest_history(
             self.world,
@@ -491,12 +618,36 @@ impl ForestDistribution {
                 slope: slope_fraction,
             },
         )?;
+        let disturbance_severity = ecosystem.map_or(history.severity, |ecosystem| {
+            ((history.severity * 0.52)
+                + (ecosystem.disturbance_fraction * 0.28)
+                + (ecosystem.fire_pressure_fraction * 0.20))
+                .clamp(0.0, 1.0)
+        });
+        let stand_age_years = ecosystem.map_or(history.stand_age_years, |ecosystem| {
+            history.stand_age_years * (1.0 - (ecosystem.disturbance_fraction * 0.46))
+        });
+        let dominant_disturbance = ecosystem.map_or(history.dominant_disturbance, |ecosystem| {
+            if ecosystem.fire_pressure_fraction > history.severity {
+                ForestDisturbance::Fire
+            } else {
+                history.dominant_disturbance
+            }
+        });
 
-        let environment = Environment::from_soil(warmth, sunlight, history.severity, soil);
+        let environment = Environment::from_soil(warmth, sunlight, disturbance_severity, soil);
         let permanent_snow_fraction =
             (climate.permanent_snowpack_water_equivalent_millimeters / 1_200.0).clamp(0.0, 1.0);
-        let (composition, best_suitability) =
-            forest_composition(environment, permanent_snow_fraction, history.severity);
+        let (composition, best_suitability) = match (ecosystem, province) {
+            (Some(ecosystem), Some(province)) => forest_composition_v18(
+                environment,
+                permanent_snow_fraction,
+                disturbance_severity,
+                ecosystem,
+                &province,
+            ),
+            _ => forest_composition(environment, permanent_snow_fraction, disturbance_severity),
+        };
         let patchiness = (value_field(
             self.world,
             DOMAIN_FOREST_PATCHES,
@@ -514,16 +665,42 @@ impl ForestDistribution {
         let substrate = (0.18 + (soil.depth_fraction() * 0.82))
             * (1.0 - (soil.rock_exposure * 0.78))
             * (1.0 - (slope_fraction * 0.60));
-        let succession_cover = (history.stand_age_years / 55.0).clamp(0.12, 1.0);
-        let canopy_cover_fraction =
+        let succession_cover = (stand_age_years / 55.0).clamp(0.12, 1.0);
+        let mut canopy_cover_fraction =
             (best_suitability * substrate * (0.42 + (patchiness * 0.72)) * succession_cover)
                 .clamp(0.0, 1.0);
+        if let Some(ecosystem) = ecosystem {
+            let target_cover = (ecosystem.closed_forest_potential * 0.92)
+                + (ecosystem.open_woodland_potential * 0.36)
+                + (ecosystem.wetland_potential * 0.08);
+            let open_excess = (ecosystem.open_land_potential()
+                - (ecosystem.closed_forest_potential * 0.68)
+                - (ecosystem.open_woodland_potential * 0.24))
+                .max(0.0);
+            let local_canopy = ((canopy_cover_fraction * 0.24)
+                + (target_cover * substrate * succession_cover * (0.66 + (patchiness * 0.42))))
+                .clamp(0.0, 1.0);
+            // The ecosystem potential has already paid the broad penalties for
+            // water balance, substrate, exposure, fire, elevation, and salinity.
+            // Reapplying the full local substrate and stand-age terms made even
+            // strongly mesic provinces read as sparse woodland. Preserve local
+            // gaps, but let a sustained causal forest signal close the canopy.
+            let mesic_closure = (target_cover
+                * (0.82 + (substrate * 0.18))
+                * (0.88 + (patchiness * 0.12))
+                * (0.86 + ((1.0 - disturbance_severity) * 0.14)))
+                .clamp(0.0, 1.0);
+            canopy_cover_fraction = ((local_canopy.max(mesic_closure)
+                * (1.0 - (open_excess * 0.88)))
+                * ecosystem.land_fraction)
+                .clamp(0.0, 1.0);
+        }
 
         let mature_height_meters = TreeFunctionalGroup::ALL
             .into_iter()
             .map(|group| composition.fraction(group) * group.mature_height_meters())
             .sum::<f64>();
-        let maturity = (history.stand_age_years / 120.0).clamp(0.0, 1.0);
+        let maturity = (stand_age_years / 120.0).clamp(0.0, 1.0);
         let mean_canopy_height_meters = mature_height_meters
             * (0.20 + (maturity * 0.80))
             * (0.45 + (best_suitability * 0.55))
@@ -534,16 +711,29 @@ impl ForestDistribution {
         let aboveground_biomass_kg_per_square_meter =
             canopy_cover_fraction * mean_canopy_height_meters * (0.38 + (maturity * 0.34));
 
-        Some(ForestSample {
+        let sample = ForestSample {
             canopy_cover_fraction,
             tree_density_per_hectare,
             aboveground_biomass_kg_per_square_meter,
             mean_canopy_height_meters,
-            stand_age_years: history.stand_age_years,
-            disturbance_severity: history.severity,
-            dominant_disturbance: history.dominant_disturbance,
+            stand_age_years,
+            disturbance_severity,
+            dominant_disturbance,
             composition,
-        })
+        };
+        FOREST_SAMPLE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= ECOLOGY_SAMPLE_CACHE_ENTRIES {
+                cache.pop_front();
+            }
+            cache.push_back(ForestCacheEntry {
+                world: self.world,
+                x_bits,
+                z_bits,
+                sample,
+            });
+        });
+        Some(sample)
     }
 }
 
@@ -1113,6 +1303,95 @@ fn forest_composition(
     )
 }
 
+fn forest_composition_v18(
+    environment: Environment,
+    permanent_snow_fraction: f64,
+    disturbance_severity: f64,
+    ecosystem: EcosystemSample,
+    province: &ProvinceSample,
+) -> (ForestComposition, f64) {
+    let memory = province.ecological_memory;
+    let memory_bands = [
+        1.0 - smoothstep(((memory - 0.08) / 0.34).clamp(0.0, 1.0)),
+        triangular(memory, 0.36, 0.34),
+        triangular(memory, 0.68, 0.34),
+        smoothstep(((memory - 0.62) / 0.32).clamp(0.0, 1.0)),
+    ];
+    let regional_identity = [
+        (0.16
+            + ((1.0 - environment.temperature) * 0.28)
+            + (province.mountain * 0.18)
+            + (province.glacial * 0.12)
+            + (memory_bands[0] * 0.26))
+            .clamp(0.0, 1.0),
+        (0.14
+            + ((1.0 - environment.temperature) * 0.20)
+            + (environment.moisture * 0.18)
+            + (province.crust_age * 0.12)
+            + (memory_bands[1] * 0.36))
+            .clamp(0.0, 1.0),
+        (0.10
+            + (environment.temperature * 0.20)
+            + (environment.moisture * 0.26)
+            + (province.sediment * 0.10)
+            + (memory_bands[2] * 0.34))
+            .clamp(0.0, 1.0),
+        (0.12
+            + (province.aridity * 0.22)
+            + (ecosystem.open_woodland_potential * 0.18)
+            + (ecosystem.shrubland_potential * 0.14)
+            + (memory_bands[3] * 0.34))
+            .clamp(0.0, 1.0),
+    ];
+    let mut scores = TreeFunctionalGroup::ALL.map(|group| {
+        let index = match group {
+            TreeFunctionalGroup::EvergreenNeedleleaf => 0,
+            TreeFunctionalGroup::ColdDeciduous => 1,
+            TreeFunctionalGroup::TemperateBroadleaf => 2,
+            TreeFunctionalGroup::DryWoodland => 3,
+        };
+        let succession_response = match group {
+            TreeFunctionalGroup::EvergreenNeedleleaf => 1.0 - (disturbance_severity * 0.18),
+            TreeFunctionalGroup::ColdDeciduous => 0.82 + (disturbance_severity * 0.18),
+            TreeFunctionalGroup::TemperateBroadleaf => 1.0 - (disturbance_severity * 0.42),
+            TreeFunctionalGroup::DryWoodland => 0.88 + (disturbance_severity * 0.12),
+        };
+        group.preference().suitability(environment)
+            * succession_response
+            * (1.0 - (permanent_snow_fraction * 0.92))
+            * (0.025 + (regional_identity[index] * regional_identity[index] * 2.40))
+    });
+    let score_total = scores.iter().sum::<f64>();
+    if score_total <= f64::EPSILON {
+        scores = [0.25; 4];
+    } else {
+        for score in &mut scores {
+            *score /= score_total;
+        }
+    }
+    let tree_envelope = (ecosystem.closed_forest_potential
+        + (ecosystem.open_woodland_potential * 0.56))
+        .clamp(0.0, 1.0);
+    let best_suitability = TreeFunctionalGroup::ALL
+        .into_iter()
+        .map(|group| group.preference().suitability(environment))
+        .fold(0.0, f64::max)
+        * tree_envelope;
+    (
+        ForestComposition {
+            evergreen_needleleaf_fraction: scores[0],
+            cold_deciduous_fraction: scores[1],
+            temperate_broadleaf_fraction: scores[2],
+            dry_woodland_fraction: scores[3],
+        },
+        best_suitability,
+    )
+}
+
+fn triangular(value: f64, center: f64, half_width: f64) -> f64 {
+    (1.0 - ((value - center).abs() / half_width)).clamp(0.0, 1.0)
+}
+
 fn value_field(world: WorldIdentity, domain: u64, x: f64, z: f64, edge: f64) -> Option<f64> {
     let cell = CellIndex::containing(x, z, 0, edge)?;
     let right_x = cell.x.checked_add(1)?;
@@ -1481,6 +1760,251 @@ mod tests {
             trees
                 .iter()
                 .any(|tree| tree.condition != TreeCondition::Mature)
+        );
+    }
+
+    #[test]
+    fn version_seventeen_ecology_retains_its_pre_reset_contract() {
+        let world = WorldIdentity::new(0x5eed, ECOSYSTEM_GENERATOR_VERSION - 1, 0);
+        let hydrology = WetlandHydrology::new(1.5, 0.12, 0.68, 14.0).expect("valid hydrology");
+        let words = [
+            [-91_125.0, -37_375.0],
+            [-64_250.0, 63_875.0],
+            [28_625.0, -52_375.0],
+        ]
+        .into_iter()
+        .flat_map(|[x, z]| {
+            let soil = Soil::new(world).sample(x, z).expect("soil");
+            let forest = ForestDistribution::new(world).sample(x, z).expect("forest");
+            let ground = GroundVegetationDistribution::new(world)
+                .sample(x, z)
+                .expect("ground vegetation");
+            let wetland = WetlandDistribution::new(world)
+                .sample(x, z, hydrology)
+                .expect("wetland");
+            [
+                soil.composition.sand_fraction.to_bits(),
+                soil.composition.silt_fraction.to_bits(),
+                soil.composition.clay_fraction.to_bits(),
+                soil.surface_moisture.to_bits(),
+                soil.acidity_ph.to_bits(),
+                forest.canopy_cover_fraction.to_bits(),
+                forest.tree_density_per_hectare.to_bits(),
+                forest.composition.evergreen_needleleaf_fraction.to_bits(),
+                forest.composition.cold_deciduous_fraction.to_bits(),
+                forest.composition.temperate_broadleaf_fraction.to_bits(),
+                forest.composition.dry_woodland_fraction.to_bits(),
+                ground.ground_cover_fraction.to_bits(),
+                ground.composition.graminoid_fraction.to_bits(),
+                ground.composition.low_shrub_fraction.to_bits(),
+                ground.composition.moss_fraction.to_bits(),
+                wetland.coverage_fraction.to_bits(),
+                wetland.salinity_fraction.to_bits(),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_hash(&words),
+            3_251_190_482_585_119_889,
+            "changing this value changes the frozen generator version 17 ecology contract"
+        );
+    }
+
+    #[test]
+    fn version_eighteen_produces_large_contiguous_open_landscapes() {
+        let world = WorldIdentity::new(0x5eed, ECOSYSTEM_GENERATOR_VERSION, 0);
+        let ecosystem = EcosystemDistribution::new(world);
+        let forest = ForestDistribution::new(world);
+        let mut best_center = [0.0, 0.0];
+        let mut best_open_excess = f64::NEG_INFINITY;
+        for z in -8..=8 {
+            for x in -8..=8 {
+                let center = [f64::from(x) * 384_000.0, f64::from(z) * 384_000.0];
+                let sample = ecosystem.sample(center[0], center[1]).expect("ecosystem");
+                let open_excess = sample.open_land_potential()
+                    - sample.closed_forest_potential
+                    - (sample.open_woodland_potential * 0.35);
+                if open_excess > best_open_excess {
+                    best_open_excess = open_excess;
+                    best_center = center;
+                }
+            }
+        }
+        assert!(
+            best_open_excess > 0.18,
+            "best open-land excess was only {best_open_excess}"
+        );
+
+        let mut open_samples = 0;
+        for z in -2..=2 {
+            for x in -2..=2 {
+                let sample = forest
+                    .sample(
+                        best_center[0] + (f64::from(x) * 8_000.0),
+                        best_center[1] + (f64::from(z) * 8_000.0),
+                    )
+                    .expect("forest");
+                open_samples += usize::from(sample.canopy_cover_fraction < 0.20);
+            }
+        }
+        assert!(
+            open_samples >= 20,
+            "only {open_samples}/25 nearby samples were genuinely open"
+        );
+    }
+
+    #[test]
+    fn version_eighteen_mesic_causes_close_broad_forests_without_erasing_open_country() {
+        let world = WorldIdentity::new(0x5eed, ECOSYSTEM_GENERATOR_VERSION, 0);
+        let ecosystem = EcosystemDistribution::new(world);
+        let forest = ForestDistribution::new(world);
+        let mesic_centers = [
+            [3_072_000.0, 1_920_000.0],
+            [-3_072_000.0, -1_152_000.0],
+            [-768_000.0, -3_072_000.0],
+        ];
+        let mut minimum_mesic_canopy = 1.0_f64;
+        for center in mesic_centers {
+            let mut closed_forest = 0.0;
+            let mut open_land = 0.0;
+            let mut water_balance = 0.0;
+            let mut canopy = 0.0;
+            let mut visibly_closed = 0;
+            for patch_z in -2..=2 {
+                for patch_x in -2..=2 {
+                    let x = center[0] + (f64::from(patch_x) * 8_000.0);
+                    let z = center[1] + (f64::from(patch_z) * 8_000.0);
+                    let causes = ecosystem.sample(x, z).expect("mesic ecosystem");
+                    let trees = forest.sample(x, z).expect("mesic forest");
+                    closed_forest += causes.closed_forest_potential;
+                    open_land += causes.open_land_potential();
+                    water_balance += causes.water_balance_fraction;
+                    canopy += trees.canopy_cover_fraction;
+                    visibly_closed += usize::from(
+                        trees.canopy_cover_fraction >= 0.48
+                            && trees.mean_canopy_height_meters >= 8.0,
+                    );
+                }
+            }
+            let mean_closed_forest = closed_forest / 25.0;
+            let mean_open_land = open_land / 25.0;
+            let mean_water_balance = water_balance / 25.0;
+            let mean_canopy = canopy / 25.0;
+            minimum_mesic_canopy = minimum_mesic_canopy.min(mean_canopy);
+            assert!(
+                mean_closed_forest >= 0.58
+                    && mean_closed_forest >= mean_open_land + 0.24
+                    && mean_water_balance >= 0.82,
+                "site {center:?} was not causally mesic: forest {mean_closed_forest}, \
+                 open {mean_open_land}, water {mean_water_balance}"
+            );
+            assert!(
+                mean_canopy >= 0.58 && visibly_closed >= 20,
+                "site {center:?} only reached canopy {mean_canopy} with \
+                 {visibly_closed}/25 visibly closed samples"
+            );
+        }
+
+        let mut best_open_center = [0.0, 0.0];
+        let mut best_open_excess = f64::NEG_INFINITY;
+        for z in -8..=8 {
+            for x in -8..=8 {
+                let position = [f64::from(x) * 384_000.0, f64::from(z) * 384_000.0];
+                let causes = ecosystem
+                    .sample(position[0], position[1])
+                    .expect("ecosystem");
+                let open_excess = causes.open_land_potential()
+                    - causes.closed_forest_potential
+                    - (causes.open_woodland_potential * 0.35);
+                if open_excess > best_open_excess {
+                    best_open_excess = open_excess;
+                    best_open_center = position;
+                }
+            }
+        }
+        let mut open_canopy = 0.0;
+        let mut genuinely_open = 0;
+        for patch_z in -2..=2 {
+            for patch_x in -2..=2 {
+                let trees = forest
+                    .sample(
+                        best_open_center[0] + (f64::from(patch_x) * 8_000.0),
+                        best_open_center[1] + (f64::from(patch_z) * 8_000.0),
+                    )
+                    .expect("open-country forest sample");
+                open_canopy += trees.canopy_cover_fraction;
+                genuinely_open += usize::from(trees.canopy_cover_fraction < 0.20);
+            }
+        }
+        let mean_open_canopy = open_canopy / 25.0;
+        assert!(best_open_excess > 0.18, "{best_open_excess}");
+        assert!(
+            genuinely_open >= 20
+                && mean_open_canopy < 0.20
+                && minimum_mesic_canopy >= mean_open_canopy + 0.38,
+            "open contrast failed: {genuinely_open}/25 open, open canopy \
+             {mean_open_canopy}, weakest mesic canopy {minimum_mesic_canopy}"
+        );
+    }
+
+    #[test]
+    fn version_eighteen_forests_have_strong_regional_tree_group_identities() {
+        let world = WorldIdentity::new(0x5eed, ECOSYSTEM_GENERATOR_VERSION, 0);
+        let forest = ForestDistribution::new(world);
+        let mut maxima = [0.0_f64; 4];
+        for z in -8..=8 {
+            for x in -8..=8 {
+                let sample = forest
+                    .sample(f64::from(x) * 384_000.0, f64::from(z) * 384_000.0)
+                    .expect("forest");
+                let fractions = [
+                    sample.composition.evergreen_needleleaf_fraction,
+                    sample.composition.cold_deciduous_fraction,
+                    sample.composition.temperate_broadleaf_fraction,
+                    sample.composition.dry_woodland_fraction,
+                ];
+                for (maximum, fraction) in maxima.iter_mut().zip(fractions) {
+                    *maximum = maximum.max(fraction);
+                }
+            }
+        }
+        for (group, maximum) in maxima.into_iter().enumerate() {
+            assert!(
+                maximum > 0.55,
+                "tree functional group {group} peaked at only {maximum}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_eighteen_deep_ocean_has_no_terrestrial_vegetation() {
+        let world = WorldIdentity::new(0x5eed, ECOSYSTEM_GENERATOR_VERSION, 0);
+        let mut ocean = None;
+        'outer: for z in -12..=12 {
+            for x in -12..=12 {
+                let position = [f64::from(x) * 512_000.0, f64::from(z) * 512_000.0];
+                let ecosystem = EcosystemDistribution::new(world)
+                    .sample(position[0], position[1])
+                    .expect("ecosystem");
+                if ecosystem.land_fraction <= 1.0e-6 {
+                    ocean = Some(position);
+                    break 'outer;
+                }
+            }
+        }
+        let [x, z] = ocean.expect("survey contains deep ocean");
+        let forest = ForestDistribution::new(world).sample(x, z).expect("forest");
+        let ground = GroundVegetationDistribution::new(world)
+            .sample(x, z)
+            .expect("ground");
+
+        assert_eq!(forest.canopy_cover_fraction.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(forest.tree_density_per_hectare.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(ground.ground_cover_fraction.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            ground.patch_density_per_hectare.to_bits(),
+            0.0_f64.to_bits()
         );
     }
 

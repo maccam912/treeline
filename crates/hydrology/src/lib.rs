@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition};
 use treeline_geography::{
-    Climate, DRAINAGE_CELL_EDGE_METERS, DrainageCellIndex, MacroElevation,
-    OROGRAPHIC_CLIMATE_GENERATOR_VERSION, RegionalProfile, SEASONAL_CLIMATE_GENERATOR_VERSION,
-    WatershedRegion, WatershedRegionIndex,
+    Climate, DRAINAGE_CELL_EDGE_METERS, DrainageBasin, DrainageCellIndex, MacroElevation,
+    OROGRAPHIC_CLIMATE_GENERATOR_VERSION, PROVINCE_GENERATOR_VERSION, ProvincePlan,
+    RegionalProfile, SEASONAL_CLIMATE_GENERATOR_VERSION, Season, WatershedRegion,
+    WatershedRegionIndex,
 };
 
 const SECONDS_PER_YEAR: f64 = 31_556_952.0;
@@ -387,12 +388,16 @@ impl RiverNetwork {
             .enumerate()
             .map(|(slot, cell)| (cell.index, slot))
             .collect::<BTreeMap<_, _>>();
+        let closed_basins = closed_surface_basins(watershed);
+        let effective_flow_to =
+            |cell| effective_river_flow_target(cell, cells, &slots, &closed_basins);
         let mut incoming = vec![0_usize; cells.len()];
         let mut discharge = Vec::with_capacity(cells.len());
+        let mut effective_accumulation = vec![1_u64; cells.len()];
 
         for cell in cells {
             discharge.push(local_runoff(watershed.world, cell.index)?);
-            if let Some(target) = cell.flow_to.and_then(|target| slots.get(&target)) {
+            if let Some(target) = effective_flow_to(cell).and_then(|target| slots.get(&target)) {
                 incoming[*target] = incoming[*target].checked_add(1)?;
             }
         }
@@ -405,10 +410,14 @@ impl RiverNetwork {
         let mut processed = 0_usize;
         while let Some(slot) = ready.pop_first() {
             processed = processed.checked_add(1)?;
-            let Some(target) = cells[slot].flow_to.and_then(|target| slots.get(&target)) else {
+            let Some(target) =
+                effective_flow_to(&cells[slot]).and_then(|target| slots.get(&target))
+            else {
                 continue;
             };
             discharge[*target] += discharge[slot];
+            effective_accumulation[*target] =
+                effective_accumulation[*target].checked_add(effective_accumulation[slot])?;
             incoming[*target] = incoming[*target].checked_sub(1)?;
             if incoming[*target] == 0 {
                 ready.insert(*target);
@@ -423,10 +432,16 @@ impl RiverNetwork {
             DRAINAGE_CELL_EDGE_METERS * DRAINAGE_CELL_EDGE_METERS / 1_000_000.0;
         let mut segments = Vec::new();
         for (slot, cell) in cells.iter().enumerate() {
-            if cell.flow_accumulation_cells < MIN_CHANNEL_CATCHMENT_CELLS {
+            let flow_accumulation_cells =
+                if watershed.world.generator_version >= PROVINCE_GENERATOR_VERSION {
+                    effective_accumulation[slot]
+                } else {
+                    cell.flow_accumulation_cells
+                };
+            if flow_accumulation_cells < MIN_CHANNEL_CATCHMENT_CELLS {
                 continue;
             }
-            let Some(mouth_cell) = cell.flow_to else {
+            let Some(mouth_cell) = effective_flow_to(cell) else {
                 continue;
             };
             let [source_x, source_z] = cell.index.center();
@@ -442,7 +457,7 @@ impl RiverNetwork {
                 mouth_cell,
                 source: WorldPosition::new(source_x, source_y, source_z),
                 mouth: WorldPosition::new(mouth_x, mouth_y, mouth_z),
-                drainage_area_square_kilometers: u64_as_f64(cell.flow_accumulation_cells)
+                drainage_area_square_kilometers: u64_as_f64(flow_accumulation_cells)
                     * cell_area_square_kilometers,
                 discharge_cubic_meters_per_second: discharge[slot],
             };
@@ -472,23 +487,111 @@ impl RiverNetwork {
     }
 }
 
+fn closed_surface_basins(watershed: &WatershedRegion) -> BTreeSet<u64> {
+    if watershed.world.generator_version < PROVINCE_GENERATOR_VERSION {
+        return BTreeSet::new();
+    }
+    watershed
+        .basins()
+        .iter()
+        .filter_map(|basin| {
+            lake_from_basin(watershed.world, *basin)
+                .filter(|lake| lake.surface_outlet.is_none())
+                .map(|_| basin.id)
+        })
+        .collect()
+}
+
+fn effective_river_flow_target(
+    cell: &treeline_geography::DrainageCell,
+    cells: &[treeline_geography::DrainageCell],
+    slots: &BTreeMap<DrainageCellIndex, usize>,
+    closed_basins: &BTreeSet<u64>,
+) -> Option<DrainageCellIndex> {
+    let target = cell.flow_to?;
+    if let Some(basin) = cell.basin
+        && closed_basins.contains(&basin)
+        && slots
+            .get(&target)
+            .and_then(|&target_slot| cells[target_slot].basin)
+            != Some(basin)
+    {
+        return None;
+    }
+    Some(target)
+}
+
 /// One deterministic lake occupying a filled drainage depression.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lake {
     pub id: u64,
     pub bottom: DrainageCellIndex,
     pub bottom_elevation_meters: f64,
+    /// Representative annual-equilibrium surface, which may sit below the spill.
     pub surface_elevation_meters: f64,
+    /// The lowest topographic escape route, whether or not water currently reaches it.
     pub outlet: DrainageCellIndex,
     pub cell_count: u64,
+    /// Elevation at which this depression begins surface outflow.
+    pub spill_elevation_meters: f64,
+    /// Active equilibrium outlet; `None` identifies an internally drained basin.
+    pub surface_outlet: Option<DrainageCellIndex>,
+    /// Fraction of topographic capacity occupied at annual equilibrium.
+    pub fill_fraction: f64,
+    /// Climate and province-conditioned water availability.
+    pub water_balance_fraction: f64,
+    /// Strength of internal drainage and evaporative concentration.
+    pub closed_basin_fraction: f64,
+    /// Expected annual low-to-high water variability.
+    pub seasonal_fraction: f64,
+    /// Dissolved-salt concentration tendency, including dry evaporite surfaces.
+    pub salinity_fraction: f64,
+    /// Dry or intermittently flooded lake-bed expression.
+    pub playa_fraction: f64,
 }
 
 impl Lake {
     /// Returns the equilibrium water depth above a terrain elevation.
     pub fn water_depth_at(self, terrain_elevation_meters: f64) -> Option<f64> {
-        terrain_elevation_meters
-            .is_finite()
-            .then_some((self.surface_elevation_meters - terrain_elevation_meters).max(0.0))
+        if !terrain_elevation_meters.is_finite()
+            || (self.surface_elevation_meters <= self.bottom_elevation_meters
+                && self.surface_outlet.is_none())
+        {
+            return None;
+        }
+        Some((self.surface_elevation_meters - terrain_elevation_meters).max(0.0))
+    }
+
+    /// Returns the deterministic low- or high-water surface for one season.
+    ///
+    /// Spring represents the high-water quarter, while summer represents the
+    /// evaporative low. A dry playa can therefore hold seasonal spring water
+    /// without claiming a permanent annual-equilibrium surface.
+    pub fn surface_elevation_for_season(self, season: Season) -> f64 {
+        let capacity_meters = (self.spill_elevation_meters - self.bottom_elevation_meters).max(0.0);
+        let seasonal_range_meters = capacity_meters * self.seasonal_fraction * 0.42;
+        let offset_meters = match season {
+            Season::Winter => seasonal_range_meters * 0.08,
+            Season::Spring => seasonal_range_meters,
+            Season::Summer => -seasonal_range_meters,
+            Season::Autumn => seasonal_range_meters * -0.22,
+        };
+        (self.surface_elevation_meters + offset_meters)
+            .clamp(self.bottom_elevation_meters, self.spill_elevation_meters)
+    }
+
+    /// Returns seasonal water depth when that season puts water above the basin bottom.
+    pub fn water_depth_at_season(
+        self,
+        terrain_elevation_meters: f64,
+        season: Season,
+    ) -> Option<f64> {
+        if !terrain_elevation_meters.is_finite() {
+            return None;
+        }
+        let surface = self.surface_elevation_for_season(season);
+        (surface > self.bottom_elevation_meters)
+            .then_some((surface - terrain_elevation_meters).max(0.0))
     }
 }
 
@@ -515,15 +618,8 @@ impl LakeNetwork {
         let lakes = watershed
             .basins()
             .iter()
-            .map(|basin| Lake {
-                id: basin.id,
-                bottom: basin.bottom,
-                bottom_elevation_meters: basin.bottom_elevation_meters,
-                surface_elevation_meters: basin.spill_elevation_meters,
-                outlet: basin.outlet,
-                cell_count: basin.cell_count,
-            })
-            .collect::<Vec<_>>();
+            .map(|basin| lake_from_basin(watershed.world, *basin))
+            .collect::<Option<Vec<_>>>()?;
         let lake_slots = lakes
             .iter()
             .enumerate()
@@ -562,6 +658,177 @@ impl LakeNetwork {
             .and_then(|&slot| self.lakes.get(slot))
             .copied()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LakeHydrology {
+    fill_fraction: f64,
+    water_balance_fraction: f64,
+    closed_basin_fraction: f64,
+    seasonal_fraction: f64,
+    salinity_fraction: f64,
+    playa_fraction: f64,
+    has_surface_outlet: bool,
+}
+
+fn lake_from_basin(world: WorldIdentity, basin: DrainageBasin) -> Option<Lake> {
+    if world.generator_version < PROVINCE_GENERATOR_VERSION {
+        return Some(Lake {
+            id: basin.id,
+            bottom: basin.bottom,
+            bottom_elevation_meters: basin.bottom_elevation_meters,
+            surface_elevation_meters: basin.spill_elevation_meters,
+            outlet: basin.outlet,
+            cell_count: basin.cell_count,
+            spill_elevation_meters: basin.spill_elevation_meters,
+            surface_outlet: Some(basin.outlet),
+            fill_fraction: 1.0,
+            water_balance_fraction: 1.0,
+            closed_basin_fraction: 0.0,
+            seasonal_fraction: 0.0,
+            salinity_fraction: 0.0,
+            playa_fraction: 0.0,
+        });
+    }
+
+    if !basin.bottom_elevation_meters.is_finite()
+        || !basin.spill_elevation_meters.is_finite()
+        || basin.spill_elevation_meters < basin.bottom_elevation_meters
+    {
+        return None;
+    }
+    let [x, z] = basin.bottom.center();
+    let climate = Climate::new(world).sample(x, z)?;
+    let province = ProvincePlan::sample_at(world, x, z)?;
+    let potential_evapotranspiration_millimeters = (300.0
+        + (climate.warmth_fraction() * 1_620.0)
+        + (climate.continentality_fraction * 190.0)
+        + (climate.precipitation_seasonality_fraction * 140.0)
+        - (climate.ocean_proximity_fraction * 90.0))
+        .clamp(240.0, 2_260.0);
+    let available_water_millimeters =
+        climate.annual_precipitation_millimeters + (climate.annual_snowmelt_millimeters * 0.12);
+    let climatic_balance_fraction = smoothstep_range(
+        -1_100.0,
+        850.0,
+        available_water_millimeters - potential_evapotranspiration_millimeters,
+    );
+    let water_balance_fraction = ((climatic_balance_fraction * 0.62)
+        + (province.moisture * 0.24)
+        + ((1.0 - province.aridity) * 0.14))
+        .clamp(0.0, 1.0);
+    let closed_basin_fraction = ((province.closed_basin * 0.68)
+        + ((1.0 - province.drainage) * 0.17)
+        + (province.continentalness * 0.08)
+        + (climate.continentality_fraction * 0.07))
+        .clamp(0.0, 1.0);
+    let catchment_support = smoothstep_range(1.0, 32.0, u64_as_f64(basin.cell_count));
+    let hydrology = lake_hydrology(
+        water_balance_fraction,
+        closed_basin_fraction,
+        province.moisture,
+        province.drainage,
+        province.aridity,
+        province.salinity,
+        climate.warmth_fraction(),
+        climate.precipitation_seasonality_fraction,
+        climate.seasonal_temperature_amplitude_celsius,
+        catchment_support,
+    );
+    let fill_fraction = if hydrology.has_surface_outlet {
+        1.0
+    } else {
+        hydrology.fill_fraction
+    };
+    let surface_elevation_meters = basin.bottom_elevation_meters
+        + ((basin.spill_elevation_meters - basin.bottom_elevation_meters) * fill_fraction);
+
+    Some(Lake {
+        id: basin.id,
+        bottom: basin.bottom,
+        bottom_elevation_meters: basin.bottom_elevation_meters,
+        surface_elevation_meters,
+        outlet: basin.outlet,
+        cell_count: basin.cell_count,
+        spill_elevation_meters: basin.spill_elevation_meters,
+        surface_outlet: hydrology.has_surface_outlet.then_some(basin.outlet),
+        fill_fraction,
+        water_balance_fraction: hydrology.water_balance_fraction,
+        closed_basin_fraction: hydrology.closed_basin_fraction,
+        seasonal_fraction: hydrology.seasonal_fraction,
+        salinity_fraction: hydrology.salinity_fraction,
+        playa_fraction: hydrology.playa_fraction,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lake_hydrology(
+    water_balance_fraction: f64,
+    closed_basin_fraction: f64,
+    moisture_fraction: f64,
+    drainage_fraction: f64,
+    aridity_fraction: f64,
+    province_salinity_fraction: f64,
+    warmth_fraction: f64,
+    precipitation_seasonality_fraction: f64,
+    temperature_seasonality_celsius: f64,
+    catchment_support: f64,
+) -> LakeHydrology {
+    let evaporative_deficit = 1.0 - water_balance_fraction;
+    let storage_supply = (water_balance_fraction * 0.62)
+        + (moisture_fraction * 0.16)
+        + (drainage_fraction * 0.12)
+        + (catchment_support * 0.10);
+    let evaporative_loss = evaporative_deficit
+        * (0.30
+            + (closed_basin_fraction * 0.32)
+            + (warmth_fraction * 0.18)
+            + (aridity_fraction * 0.20));
+    let equilibrium_support =
+        storage_supply - evaporative_loss + 0.28 - (closed_basin_fraction * 0.08);
+    let mut fill_fraction = smoothstep_range(0.08, 0.72, equilibrium_support);
+    let overflow_support = ((water_balance_fraction * 0.55)
+        + (drainage_fraction * 0.22)
+        + ((1.0 - closed_basin_fraction) * 0.15)
+        + (catchment_support * 0.08))
+        .clamp(0.0, 1.0);
+    let seasonal_fraction = ((precipitation_seasonality_fraction * 0.35)
+        + ((temperature_seasonality_celsius / 32.0).clamp(0.0, 1.0) * 0.20)
+        + (evaporative_deficit * 0.24)
+        + (closed_basin_fraction * 0.12)
+        + ((1.0 - fill_fraction) * 0.09))
+        .clamp(0.0, 1.0);
+    let salinity_fraction = ((province_salinity_fraction * 0.44)
+        + (closed_basin_fraction * 0.34)
+        + (evaporative_deficit * 0.34)
+        + (aridity_fraction * 0.22)
+        - (overflow_support * 0.34))
+        .clamp(0.0, 1.0);
+    let playa_fraction = smoothstep_range(
+        0.22,
+        0.62,
+        (closed_basin_fraction * 0.38) + (evaporative_deficit * 0.30) + (salinity_fraction * 0.32)
+            - (fill_fraction * 0.36),
+    );
+    if playa_fraction >= 0.72 {
+        fill_fraction = 0.0;
+    }
+    let has_surface_outlet = overflow_support >= 0.76 && playa_fraction < 0.18;
+
+    LakeHydrology {
+        fill_fraction,
+        water_balance_fraction,
+        closed_basin_fraction,
+        seasonal_fraction,
+        salinity_fraction,
+        playa_fraction,
+        has_surface_outlet,
+    }
+}
+
+fn smoothstep_range(edge0: f64, edge1: f64, value: f64) -> f64 {
+    let amount = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    amount * amount * (3.0 - (2.0 * amount))
 }
 
 fn local_runoff(world: WorldIdentity, cell: DrainageCellIndex) -> Option<f64> {
@@ -1145,6 +1412,7 @@ mod tests {
         WorldIdentity::new(0x5eed, OROGRAPHIC_CLIMATE_GENERATOR_VERSION, 0);
     const SEASONAL_WORLD: WorldIdentity =
         WorldIdentity::new(0x5eed, SEASONAL_CLIMATE_GENERATOR_VERSION, 0);
+    const RESET_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
 
     #[test]
     fn river_direction_rejects_uphill_segments() {
@@ -1302,6 +1570,17 @@ mod tests {
         for lake in network.lakes() {
             assert!(lake.surface_elevation_meters >= lake.bottom_elevation_meters);
             assert!(lake.cell_count > 0);
+            assert_eq!(
+                lake.surface_elevation_meters.to_bits(),
+                lake.spill_elevation_meters.to_bits()
+            );
+            assert_eq!(lake.surface_outlet, Some(lake.outlet));
+            assert_eq!(lake.fill_fraction.to_bits(), 1.0_f64.to_bits());
+            assert_eq!(lake.water_balance_fraction.to_bits(), 1.0_f64.to_bits());
+            assert_eq!(lake.closed_basin_fraction.to_bits(), 0.0_f64.to_bits());
+            assert_eq!(lake.seasonal_fraction.to_bits(), 0.0_f64.to_bits());
+            assert_eq!(lake.salinity_fraction.to_bits(), 0.0_f64.to_bits());
+            assert_eq!(lake.playa_fraction.to_bits(), 0.0_f64.to_bits());
             assert!(
                 watershed
                     .cells()
@@ -1317,6 +1596,201 @@ mod tests {
                     .map(|basin| (basin.spill_elevation_meters, basin.outlet)),
                 Some((lake.surface_elevation_meters, lake.outlet))
             );
+        }
+    }
+
+    #[test]
+    fn version_seventeen_lakes_retain_the_exact_filled_basin_contract() {
+        let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION - 1, 0);
+        let basin = DrainageBasin {
+            id: 42,
+            bottom: DrainageCellIndex::new(-17, 23),
+            bottom_elevation_meters: 70.0,
+            spill_elevation_meters: 82.5,
+            outlet: DrainageCellIndex::new(-16, 24),
+            cell_count: 9,
+        };
+        let lake = lake_from_basin(world, basin).expect("legacy lake");
+
+        assert_eq!(
+            lake.surface_elevation_meters.to_bits(),
+            basin.spill_elevation_meters.to_bits()
+        );
+        assert_eq!(lake.surface_outlet, Some(basin.outlet));
+        assert_eq!(
+            lake.water_depth_at(72.5).expect("legacy water").to_bits(),
+            10.0_f64.to_bits()
+        );
+        assert_eq!(
+            lake.water_depth_at(90.0)
+                .expect("legacy query remains defined")
+                .to_bits(),
+            0.0_f64.to_bits()
+        );
+        let level_basin = DrainageBasin {
+            bottom_elevation_meters: 82.5,
+            spill_elevation_meters: 82.5,
+            ..basin
+        };
+        let level_lake = lake_from_basin(world, level_basin).expect("level legacy lake");
+        assert_eq!(
+            level_lake
+                .water_depth_at(82.5)
+                .expect("legacy zero-capacity query remains defined")
+                .to_bits(),
+            0.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn climate_controls_distinguish_overflow_lakes_from_saline_playas() {
+        let wet = lake_hydrology(1.0, 0.05, 1.0, 1.0, 0.0, 0.0, 0.45, 0.10, 8.0, 1.0);
+        let dry = lake_hydrology(0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.30, 30.0, 0.1);
+
+        assert!(wet.has_surface_outlet);
+        assert_eq!(wet.fill_fraction.to_bits(), 1.0_f64.to_bits());
+        assert!(wet.salinity_fraction < 0.1);
+        assert!(wet.playa_fraction < 0.1);
+        assert!(!dry.has_surface_outlet);
+        assert_eq!(dry.fill_fraction.to_bits(), 0.0_f64.to_bits());
+        assert!(dry.salinity_fraction > 0.9);
+        assert!(dry.playa_fraction > 0.9);
+        assert!(dry.seasonal_fraction > wet.seasonal_fraction);
+
+        let playa = Lake {
+            id: 7,
+            bottom: DrainageCellIndex::new(-2, -3),
+            bottom_elevation_meters: 20.0,
+            surface_elevation_meters: 20.0,
+            outlet: DrainageCellIndex::new(-1, -3),
+            cell_count: 4,
+            spill_elevation_meters: 40.0,
+            surface_outlet: None,
+            fill_fraction: dry.fill_fraction,
+            water_balance_fraction: dry.water_balance_fraction,
+            closed_basin_fraction: dry.closed_basin_fraction,
+            seasonal_fraction: dry.seasonal_fraction,
+            salinity_fraction: dry.salinity_fraction,
+            playa_fraction: dry.playa_fraction,
+        };
+        assert_eq!(playa.water_depth_at(20.0), None);
+        assert!(
+            playa
+                .water_depth_at_season(20.0, Season::Spring)
+                .expect("seasonal playa flood")
+                > 0.0
+        );
+        assert_eq!(playa.water_depth_at_season(20.0, Season::Summer), None);
+    }
+
+    #[test]
+    fn reset_lakes_are_deterministic_bounded_and_keep_topographic_spills() {
+        let negative_region = WatershedRegionIndex::new(-1, -3);
+        let negative_first =
+            LakeNetwork::generate(RESET_WORLD, negative_region).expect("negative first");
+        let region = WatershedRegionIndex::new(-7, -8);
+        let first = LakeNetwork::generate(RESET_WORLD, region).expect("first");
+        let second = LakeNetwork::generate(RESET_WORLD, region).expect("second");
+        let negative_second =
+            LakeNetwork::generate(RESET_WORLD, negative_region).expect("negative second");
+
+        assert_eq!(first, second);
+        assert_eq!(negative_first, negative_second);
+        assert!(!first.lakes().is_empty());
+        assert!(
+            first
+                .lakes()
+                .iter()
+                .any(|lake| lake.surface_outlet.is_none() && lake.fill_fraction < 1.0)
+        );
+        assert!(
+            first
+                .lakes()
+                .iter()
+                .any(|lake| lake.salinity_fraction > 0.0 && lake.playa_fraction > 0.0)
+        );
+        let maximum_playa = first
+            .lakes()
+            .iter()
+            .map(|lake| lake.playa_fraction)
+            .fold(0.0_f64, f64::max);
+        let dry_playa = first
+            .lakes()
+            .iter()
+            .find(|lake| lake.fill_fraction == 0.0 && lake.playa_fraction >= 0.72)
+            .unwrap_or_else(|| panic!("maximum playa strength was {maximum_playa}"));
+        assert_eq!(
+            dry_playa.water_depth_at(dry_playa.bottom_elevation_meters),
+            None
+        );
+        assert!(
+            dry_playa
+                .water_depth_at_season(dry_playa.bottom_elevation_meters, Season::Spring)
+                .is_some()
+        );
+        for lake in first.lakes() {
+            assert!(lake.bottom_elevation_meters <= lake.surface_elevation_meters);
+            assert!(lake.surface_elevation_meters <= lake.spill_elevation_meters);
+            for fraction in [
+                lake.fill_fraction,
+                lake.water_balance_fraction,
+                lake.closed_basin_fraction,
+                lake.seasonal_fraction,
+                lake.salinity_fraction,
+                lake.playa_fraction,
+            ] {
+                assert!((0.0..=1.0).contains(&fraction), "{fraction}");
+            }
+            if lake.surface_outlet.is_some() {
+                assert_eq!(
+                    lake.surface_elevation_meters.to_bits(),
+                    lake.spill_elevation_meters.to_bits()
+                );
+                assert_eq!(lake.surface_outlet, Some(lake.outlet));
+            }
+            assert!(
+                lake.surface_elevation_for_season(Season::Spring)
+                    >= lake.surface_elevation_for_season(Season::Summer)
+            );
+        }
+    }
+
+    #[test]
+    fn reset_rivers_accumulate_inside_closed_basins_without_leaking() {
+        let region = WatershedRegionIndex::new(-7, -8);
+        let watershed = WatershedRegion::generate(RESET_WORLD, region).expect("watershed");
+        let lakes = LakeNetwork::from_watershed(&watershed).expect("lakes");
+        let rivers = RiverNetwork::from_watershed(&watershed).expect("rivers");
+        let closed = lakes
+            .lakes()
+            .iter()
+            .filter(|lake| lake.surface_outlet.is_none())
+            .map(|lake| lake.id)
+            .collect::<BTreeSet<_>>();
+        assert!(!closed.is_empty(), "golden region needs a closed basin");
+
+        for segment in rivers.segments() {
+            let source = watershed
+                .cells()
+                .iter()
+                .find(|cell| cell.index == segment.source_cell)
+                .expect("river source cell");
+            if let Some(basin) = source.basin
+                && closed.contains(&basin)
+            {
+                let mouth = watershed
+                    .cells()
+                    .iter()
+                    .find(|cell| cell.index == segment.mouth_cell)
+                    .expect("closed-basin river mouth remains inside the regional artifact");
+                assert_eq!(
+                    mouth.basin,
+                    Some(basin),
+                    "closed basin {basin:#x} leaked from {:?} to {:?}",
+                    segment.source_cell,
+                    segment.mouth_cell
+                );
+            }
         }
     }
 
@@ -1358,6 +1832,44 @@ mod tests {
             stable_hash(&words),
             12_959_953_739_099_618_601,
             "changing this value changes generated regional lakes"
+        );
+    }
+
+    #[test]
+    fn reset_lake_network_has_a_golden_fingerprint() {
+        let network =
+            LakeNetwork::generate(RESET_WORLD, WatershedRegionIndex::new(-7, -8)).expect("network");
+        let mut words = Vec::new();
+        for lake in network.lakes() {
+            let surface_outlet = lake.surface_outlet.map_or([0_u64, 0_u64], |outlet| {
+                [
+                    u64::from_le_bytes(outlet.x.to_le_bytes()),
+                    u64::from_le_bytes(outlet.z.to_le_bytes()),
+                ]
+            });
+            words.extend([
+                lake.id,
+                u64::from_le_bytes(lake.bottom.x.to_le_bytes()),
+                u64::from_le_bytes(lake.bottom.z.to_le_bytes()),
+                lake.bottom_elevation_meters.to_bits(),
+                lake.surface_elevation_meters.to_bits(),
+                lake.spill_elevation_meters.to_bits(),
+                u64::from(lake.surface_outlet.is_some()),
+                surface_outlet[0],
+                surface_outlet[1],
+                lake.fill_fraction.to_bits(),
+                lake.water_balance_fraction.to_bits(),
+                lake.closed_basin_fraction.to_bits(),
+                lake.seasonal_fraction.to_bits(),
+                lake.salinity_fraction.to_bits(),
+                lake.playa_fraction.to_bits(),
+            ]);
+        }
+
+        assert_eq!(
+            stable_hash(&words),
+            7_108_183_395_937_497_205,
+            "changing this value changes v18 climate-conditioned lakes"
         );
     }
 

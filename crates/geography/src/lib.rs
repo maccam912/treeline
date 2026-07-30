@@ -1,9 +1,18 @@
 //! Deterministic, spatially continuous regional parameter fields.
 
+mod province;
+
+use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
 use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
+
+pub use province::{
+    DuneGeometry, PROVINCE_EDGE_METERS, PROVINCE_GENERATOR_VERSION, PROVINCE_HALO_METERS,
+    ProvinceBoundaryCondition, ProvinceBoundaryConditions, ProvinceIndex, ProvincePlan,
+    ProvinceSample, ScarpGeometry,
+};
 
 const DOMAIN_UPLIFT: u64 = 0x5550_4c49_4654;
 const DOMAIN_EROSION: u64 = 0x0045_524f_5349_4f4e;
@@ -15,6 +24,22 @@ const DOMAIN_BASE_ELEVATION: u64 = 0x4241_5345_454c_4556;
 const DOMAIN_MOUNTAIN_RIDGE: u64 = 0x4d4f_554e_5441_494e;
 const DOMAIN_DRAINAGE_BASIN: u64 = 0x4452_4149_4e42_4153;
 const DOMAIN_WIND_X: u64 = 0x5749_4e44_5f58;
+// Exact-coordinate memoization only: eviction and visitation order cannot
+// change generated values.
+const CLIMATE_SAMPLE_CACHE_ENTRIES: usize = 64;
+
+thread_local! {
+    static CLIMATE_SAMPLE_CACHE: RefCell<VecDeque<ClimateCacheEntry>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+#[derive(Clone, Copy)]
+struct ClimateCacheEntry {
+    world: WorldIdentity,
+    x_bits: u64,
+    z_bits: u64,
+    sample: ClimateSample,
+}
 const DOMAIN_WIND_Z: u64 = 0x5749_4e44_5f5a;
 
 const MACRO_CELL_EDGE_METERS: f64 = 64_000.0;
@@ -121,6 +146,17 @@ pub struct RegionalProfile {
 impl RegionalProfile {
     /// Samples correlated fields whose values remain in the inclusive range 0–1.
     pub fn sample(world: WorldIdentity, x: f64, z: f64) -> Option<Self> {
+        if world.generator_version >= PROVINCE_GENERATOR_VERSION {
+            let province = ProvincePlan::sample_at(world, x, z)?;
+            return Some(Self {
+                uplift: province.uplift,
+                erosion_age: province.erosion,
+                rock_hardness: province.rock_hardness,
+                precipitation: province.moisture,
+                mean_temperature: province.temperature,
+                karst_probability: province.carbonate_fraction,
+            });
+        }
         Some(Self {
             uplift: value_field(world, DOMAIN_UPLIFT, x, z, CLIMATE_CELL_EDGE_METERS)?,
             erosion_age: value_field(world, DOMAIN_EROSION, x, z, CLIMATE_CELL_EDGE_METERS)?,
@@ -139,6 +175,10 @@ pub struct MacroTerrainSample {
     pub base_elevation_meters: f64,
     pub mountain_uplift_meters: f64,
     pub dominant_ridge: Option<CellIndex>,
+    /// Province responsible for the top-down plan in generator version 18+.
+    pub province: Option<ProvinceIndex>,
+    /// Non-legacy relief contributed by the province morphology plan.
+    pub province_relief_meters: f64,
 }
 
 /// Deterministic continental relief assembled from elongated mountain features.
@@ -160,6 +200,17 @@ impl MacroElevation {
 
     /// Samples broad elevation and reports the ridge responsible for uplift.
     pub fn sample(self, x: f64, z: f64) -> Option<MacroTerrainSample> {
+        if self.world.generator_version >= PROVINCE_GENERATOR_VERSION {
+            let province = ProvincePlan::sample_at(self.world, x, z)?;
+            return Some(MacroTerrainSample {
+                elevation_meters: province.elevation_meters,
+                base_elevation_meters: province.base_elevation_meters,
+                mountain_uplift_meters: province.macro_relief_meters.max(0.0),
+                dominant_ridge: None,
+                province: Some(province.province),
+                province_relief_meters: province.macro_relief_meters,
+            });
+        }
         let containing = CellIndex::containing(x, z, 0, MACRO_CELL_EDGE_METERS)?;
         let uplift = value_field(self.world, DOMAIN_UPLIFT, x, z, 100_000.0)?;
         let base_control = value_field(self.world, DOMAIN_BASE_ELEVATION, x, z, 160_000.0)?;
@@ -190,6 +241,8 @@ impl MacroElevation {
             base_elevation_meters,
             mountain_uplift_meters,
             dominant_ridge,
+            province: None,
+            province_relief_meters: 0.0,
         })
     }
 }
@@ -217,6 +270,20 @@ impl Climate {
     /// seasonal `f64` operations are part of the generation contract.
     /// Normalization uses `libm` instead of platform math implementations.
     pub fn sample(self, x: f64, z: f64) -> Option<ClimateSample> {
+        let x_bits = x.to_bits();
+        let z_bits = z.to_bits();
+        if let Some(sample) = CLIMATE_SAMPLE_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.world == self.world && entry.x_bits == x_bits && entry.z_bits == z_bits
+                })
+                .map(|entry| entry.sample)
+        }) {
+            return Some(sample);
+        }
         let profile = RegionalProfile::sample(self.world, x, z)?;
         let elevation_meters = MacroElevation::new(self.world)
             .sample(x, z)?
@@ -265,7 +332,7 @@ impl Climate {
             SnowCycle::default()
         };
 
-        Some(ClimateSample {
+        let sample = ClimateSample {
             elevation_meters,
             prevailing_wind,
             upwind_elevation_meters,
@@ -290,7 +357,20 @@ impl Climate {
             permanent_snowpack_water_equivalent_millimeters: snow.permanent_snowpack,
             maximum_snowpack_water_equivalent_millimeters: snow.maximum_snowpack,
             annual_snowmelt_millimeters: snow.annual_snowmelt,
-        })
+        };
+        CLIMATE_SAMPLE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= CLIMATE_SAMPLE_CACHE_ENTRIES {
+                cache.pop_front();
+            }
+            cache.push_back(ClimateCacheEntry {
+                world: self.world,
+                x_bits,
+                z_bits,
+                sample,
+            });
+        });
+        Some(sample)
     }
 
     /// Samples one explicit season without consulting simulation or wall-clock state.

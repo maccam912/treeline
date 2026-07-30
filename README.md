@@ -15,7 +15,11 @@ This repository now includes a small playable terrain toy alongside the
 test-backed foundations described in the design. The prototype provides:
 
 - stable world identity and coordinate hashing;
+- deterministic 512 km geographical-province artifacts with explicit shared
+  boundary conditions, parent-scale controls, and fixed generation halos;
 - deterministic macro elevation and elongated mountain systems;
+- condition-driven plains, rolling uplands, plateaus, scarps, rugged and
+  weathered mountains, glacial valleys, dune fields, and closed salt basins;
 - explainable terrain samples that identify base elevation and dominant uplift;
 - Marching Cubes terrain extraction;
 - a native `winit` + `wgpu` client with simple lighting;
@@ -45,8 +49,9 @@ test-backed foundations described in the design. The prototype provides:
   ocean-proximity and continentality effects, prevailing winds, elevation
   cooling, windward precipitation, lee-side rain shadows, explicit seasons,
   deterministic snowpack and meltwater-fed runoff;
-- deterministic lakes derived from filled drainage basins, with level water
-  surfaces, stable identities, spill outlets, and near/far rendering;
+- deterministic climate-conditioned lakes derived from drainage basins, with
+  stable identities, topographic and active outlets, seasonal high/low water,
+  saline closed basins, dry playas, and near/far rendering;
 - deterministic soil profiles, continuous forest distributions, and globally
   anchored procedural tree individuals with varied architecture, age, damage,
   wind response, competition response, and life history;
@@ -54,6 +59,9 @@ test-backed foundations described in the design. The prototype provides:
   bark, and foliage grammars rather than a fixed tree-model library;
 - deterministic surface rocks, ground vegetation, wetlands, reefs, and
   seasonal snow surface treatment;
+- overlapping, cause-driven closed forest, open woodland, prairie, grassland,
+  steppe, shrubland, desert, tundra, exposed alpine, wetland, and salt-playa
+  potentials without mutually exclusive biome IDs;
 - geology-, climate-, and drainage-driven karst, lava-tube, fault, sea, talus,
   glacial, and erosional cave systems with connected passages, chambers,
   entrances, sinkholes, shafts, sumps, and underground rivers;
@@ -65,7 +73,7 @@ test-backed foundations described in the design. The prototype provides:
   generated cascades, waterfalls, plunge pools and gorges, and compact frozen
   summaries reconstructed as the player moves;
 - an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
-  terrain/watershed/flow/river/lake/erosion/temperature/precipitation/snowpack
+  terrain/watershed/flow/river/lake/erosion/province/temperature/precipitation/snowpack
   /soil/forest/ground-vegetation/rock/wetland/reef/cave/living-water views,
   selectable seasons, controlled water-response scenarios, and explainable
   ecosystem and cave inspection;
@@ -89,6 +97,10 @@ their previous platform-math behavior. Surface rocks begin with version 12,
 ground vegetation with version 13, wetlands with version 14, reefs with version
 15, cave subtraction with version 16, and fast-water terrain morphology with
 version 17. Expedition survival and live networking have not been added yet.
+Generator version 18 is an intentional pristine-world reset: top-down
+geographical provinces now coordinate geology, landforms, climate controls,
+soil, hydrology, and broad overlapping ecosystem regimes. Version 17 and older
+world identities retain their previous generation paths.
 
 ## Getting started
 
@@ -110,10 +122,10 @@ In Generator Lab, use WASD or the arrow keys to pan, `+`/`-` or the mouse wheel
 to zoom, `R` to advance the seed, and `1` through `9` to view terrain,
 watersheds, flow accumulation, rivers, lakes, erosion, seasonal temperature,
 seasonal precipitation, or snowpack. Press `0` for soil and `F` for forest
-distribution. Press `C` to advance the displayed season. Left-click to inspect
-a location, and right-click to teleport the view. Additional ecosystem layers
-use `V` for ground vegetation, `G` for rocks, `M` for wetlands, `Q` for reefs,
-and `K` for caves.
+distribution. Press `P` for the province/causal-landform layer and `C` to
+advance the displayed season. Left-click to inspect a location, and right-click
+to teleport the view. Additional ecosystem layers use `V` for ground
+vegetation, `G` for rocks, `M` for wetlands, `Q` for reefs, and `K` for caves.
 
 Run the deterministic world-quality survey with:
 
@@ -121,13 +133,16 @@ Run the deterministic world-quality survey with:
 cargo run -p world-viewer -- audit
 ```
 
-The survey samples terrain, drainage, climate, forest, soil, wetlands, reefs,
-and caves across far-apart regions. It writes descriptor data, a seven-view
-contact sheet, novelty and plausibility findings, and a stable regression
-fingerprint to `artifacts/world-quality`. Existing baselines are retained when
-results change; after reviewing the report and contact sheet, pass `--accept`
-to adopt an intentional visual change. Use `--help` to see seed, region-count,
-and output-path controls.
+The survey samples terrain morphology, province causes, overlapping ecosystem
+potentials, drainage, climate, forest identity, soil, wetlands, reefs, and caves
+across far-apart regions. It writes descriptor data, a 17-view deterministic
+contact sheet with explicit fallback frames, novelty and plausibility findings,
+required-outcome coverage, and a stable regression fingerprint to
+`artifacts/world-quality`. Existing baselines are retained when results change;
+after reviewing the report and contact sheet, pass `--accept` to adopt an
+intentional visual change. Use `--help` to see seed, region-count, and
+output-path controls; pass `--require-coverage` when the audit should fail on
+any missing required outcome or qualified viewpoint family.
 
 Run the playable terrain toy with:
 
