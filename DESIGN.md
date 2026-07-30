@@ -124,6 +124,41 @@ Large features must remain coherent across tens or hundreds of kilometers.
 
 ---
 
+## Landscape diversity is core content
+
+The wilderness cannot be mostly one forest with water interrupting it.
+
+Long-distance travel must cross landscapes with fundamentally different
+silhouettes, traversal, exposure, vegetation, and geological character.
+Required landscape families include:
+
+* closed deciduous, coniferous, and mixed forests with strong regional identity
+* open woodland, savanna-like country, prairie, grassland, and steppe
+* shrubland, desert pavement, sand sheets, and coherent dune fields
+* playas, saline lakes, salt flats, and seasonal closed basins
+* broad plains, rolling uplands, plateaus, mesas, and deeply incised valleys
+* coastal bluffs, river bluffs, escarpments, cliffs, and canyon walls
+* rugged young mountain ranges, rounded old mountains, and glacial landforms
+* exposed alpine rock, scree, tundra, snowfields, and summits above the tree line
+* wetlands, lakes, rivers, coasts, reefs, caves, and rare natural wonders
+
+These are not cosmetic biome palettes placed over interchangeable terrain.
+They must arise from different combinations of landmass structure, geology,
+uplift, faulting, erosion, drainage, sediment, climate, soil, exposure, and
+disturbance. Those causes must affect both terrain shape and ecology.
+
+The world needs quiet plains as well as dramatic relief. It needs gradual
+slopes, steep traversable slopes, and genuinely abrupt terrain. Steepness must
+occur as coherent ridges, scarps, bluffs, cliffs, canyon walls, and mountain
+faces rather than isolated noise spikes.
+
+Ten distant regions that differ only in tree mixture, material color, or hill
+amplitude have failed this pillar. Interesting geographical diversity is not a
+later content pass. It is one of the primary products of world generation and a
+precondition for expedition gameplay.
+
+---
+
 # 3. Technology Direction
 
 ## Use a thin Rust engine
@@ -386,6 +421,52 @@ hash(
 ```
 
 This allows a region to have persistent characteristics without storing them.
+
+## Generate large regions top-down before local terrain
+
+Adopt the useful part of world-map-first generation without giving up an
+effectively endless world.
+
+Generate deterministic geographical provinces on the order of hundreds of
+kilometers before generating their local voxel detail. A province should contain
+an explainable coarse plan for:
+
+```text
+landmass and coast topology
+        ↓
+uplift, faults, strata, volcanism, and glacial history
+        ↓
+mountain systems, plateaus, escarpments, plains, and basins
+        ↓
+drainage, lakes, sediment movement, and erosion
+        ↓
+wind, temperature, precipitation, and rain shadows
+        ↓
+soil, salinity, surface moisture, exposure, and disturbance
+        ↓
+forest, woodland, grassland, shrubland, desert, alpine, and wetland cover
+        ↓
+local height and signed-density features
+```
+
+This is a bounded deterministic artifact, not an eagerly generated global map.
+A complete island may be owned by one province or coordinated by a coarser
+parent artifact; a continent may span many provinces. Parent-scale fields,
+explicit boundary conditions, and generation halos must make coasts, ranges,
+climate, and drainage agree across province boundaries. Generation and results
+must remain independent of visitation order and job completion order.
+
+The province plan must describe overlapping causes and continuous environmental
+fields, not assign a single primary biome ID to every cell. Names such as
+“prairie,” “salt flat,” or “alpine desert” may be useful for audits, maps, and
+player language, but they describe an outcome. They are not the input that
+causes the terrain.
+
+Broad terrain can remain height-based where appropriate. Cliffs, undercuts,
+overhangs, arches, bluff faces, and similarly volumetric landforms must use
+signed-density operations when a heightfield cannot express them. Near and far
+representations must derive from the same province plan and remain spatially
+aligned.
 
 ---
 
@@ -2192,7 +2273,9 @@ This is the first major success criterion.
 
 ## Phase 2 — Geography
 
-**Phase status: Complete**
+**Phase status: PARTIAL — deterministic macro terrain, drainage, and erosion
+foundations exist, but the current landform vocabulary does not yet deliver the
+required landscape diversity or steep terrain**
 
 - [x] Macro terrain
 - [x] Elongated mountain systems
@@ -2203,6 +2286,11 @@ This is the first major success criterion.
 - [x] Multi-scale erosion: regional mountain weathering and sediment
       deposition, drainage-graph gullies, and slope/geology-driven rock,
       scree, soil depth, and micro-relief.
+- [ ] **PARTIAL** — Geographical province planning and condition-driven
+      landform morphology remain. The Phase 5 generation-diversity reset owns
+      the work required to turn these foundations into distinct plains,
+      plateaus, bluffs, cliffs, mountain families, glacial terrain, dunes, and
+      closed salt basins.
 
 No gameplay.
 
@@ -2214,7 +2302,9 @@ The world generator is the game.
 
 ## Phase 3 — Ecosystems
 
-**Phase status: Complete**
+**Phase status: PARTIAL — climate, soil, forest, ground-cover, wetland, and reef
+systems exist, but the visible world remains too consistently forested and
+ecological regimes are not yet geographically distinct enough**
 
 - [x] Climate. Spatially correlated prevailing winds, latitude-like structure,
       continentality, elevation cooling, orographic precipitation, rain
@@ -2268,6 +2358,10 @@ The world generator is the game.
       fringing, patch, and barrier-like forms with lagoon potential. Sea-level
       ocean surfaces make reef-bearing coasts visible in the client, and
       Generator Lab maps and explains the generated structure.
+- [ ] **PARTIAL** — Broad open ecological regimes and stronger forest identity
+      remain. The Phase 5 generation-diversity reset owns large contiguous
+      prairie, grassland, steppe, shrubland, desert, tundra, alpine, open
+      woodland, and regionally distinct closed-forest outcomes.
 
 Target:
 
@@ -2316,14 +2410,43 @@ the world while those phases are in progress.
 
 ## Phase 5 — World Quality
 
-**Phase status: In progress; deterministic audits and geography-aware surface
-presentation are usable, while major visual systems remain**
+**Phase status: In progress; the generation-diversity reset is next.
+Deterministic audits and geography-aware presentation are usable foundations,
+but the current generator does not yet satisfy the landscape-diversity pillar**
 
 Goal:
 
-> The generated systems should read as a beautiful, coherent place without
-> debug overlays or an explanation of the underlying model.
+> Traveling far should reveal places with fundamentally different landforms,
+> ecology, silhouettes, and traversal. The generated causes should read as a
+> beautiful, coherent place without debug overlays or an explanation of the
+> underlying model.
 
+- [ ] **NEXT — Generation-diversity reset.** Add deterministic, top-down
+      geographical province artifacts that plan landmass and coast topology,
+      geological structure, large landforms, drainage, erosion, climate, soil,
+      and broad ecosystem regimes before local terrain is sampled. Provinces
+      must coordinate through parent-scale fields, explicit boundary
+      conditions, and generation halos while preserving effectively endless,
+      visitation-order-independent generation.
+- [ ] Landform morphology families. Replace the current reliance on a narrow
+      family of smooth mountain ridges and low-amplitude local relief with
+      condition-driven plains, rolling uplands, plateaus, mesas, escarpments,
+      river and coastal bluffs, cliffs, canyon walls, rugged and weathered
+      mountain families, glacial terrain, exposed alpine terrain, dune fields,
+      playas, and salt basins. These are algorithms and interacting processes,
+      not pasted terrain prefabs.
+- [ ] Steep and volumetric surface terrain. Produce coherent traversable steep
+      slopes and genuinely abrupt faces. Use signed-density morphology for
+      cliffs, undercuts, overhangs, arches, and other forms a heightfield cannot
+      represent, with aligned far-surface approximations. Do not satisfy this
+      item by increasing noise amplitude or creating isolated spikes.
+- [ ] Open-land ecological regimes. Make climate water balance, soil,
+      elevation, tree line, exposure, fire, sediment, salinity, and disturbance
+      produce large contiguous prairie, grassland, steppe, shrubland, desert,
+      tundra, exposed alpine, wetland, open woodland, and closed-forest
+      landscapes. Forests should have strong deciduous, coniferous, mixed,
+      successional, and structural identities rather than converging on a
+      similarly dense mixture everywhere.
 - [ ] **PARTIAL** — Deterministic screenshot exploration. The headless
       world-quality audit selects valley, ridge, river, forest, lake-shore,
       cave, and summit sites for curated and random seeds, emits deterministic
@@ -2342,7 +2465,7 @@ Goal:
       exposure, forest and ground cover, wetlands, reefs, cave family, and
       seasonal snow. Inputs are sampled in world space and travel with the
       shared near/far mesh path so material geography stays aligned across LODs.
-- [ ] **NEXT, PARTIAL** — World lighting and atmosphere. Warm directional sun,
+- [ ] **PARTIAL** — World lighting and atmosphere. Warm directional sun,
       cool sky fill, ground bounce, exponential aerial perspective, and
       locally climate-controlled lowland distance haze now preserve landform
       legibility into the horizon. A real sky model and cast
@@ -2366,21 +2489,37 @@ Goal:
       remain. This phase does not include survival consequences.
 - [ ] Rare natural-wonder generation. Add condition-driven families for major
       arches and sinkholes, extreme canyon and karst landscapes, volcanic and
-      glacial landforms, dune and salt basins, craters, and similarly rare
-      geographic destinations. These remain algorithms, not placed prefabs.
-- [ ] Visual acceptance pass. Ten screenshots from ten far-apart regions must
-      look immediately distinct, the deterministic viewpoint suite must not
-      expose obvious generation or LOD failures, and representative forest,
-      mountain, river, lake, coast, wetland, reef, and cave scenes must all read
-      clearly.
+      glacial extremes, giant dune and salt-basin systems, craters, and
+      similarly rare geographic destinations. Common dune, salt, canyon,
+      glacial, and karst landscapes belong to the landform reset above; this
+      item is for exceptional expressions of those processes. These remain
+      algorithms, not placed prefabs.
+- [ ] Landscape-diversity acceptance pass.
+    - Ten screenshots from ten far-apart regions must look immediately distinct
+      in silhouette, openness, vegetation structure, surface character, and
+      traversal—not merely in tint or tree mixture.
+    - Curated perspective captures must include recognizable forest, prairie or
+      grassland, steppe or shrubland, desert or salt-basin, dune, exposed alpine,
+      cliff or bluff, mountainous, river, lake, coast, wetland, reef, and cave
+      scenes.
+    - Audits must show large contiguous open landscapes as well as closed forest,
+      and strong regional tree-group identities rather than only similar mixed
+      stands.
+    - Slope and curvature audits must demonstrate quiet plains, rolling terrain,
+      sustained steep slopes, and abrupt cliff-class faces as coherent landforms,
+      without implausible spikes or broken drainage.
+    - The deterministic viewpoint suite must not expose obvious generation,
+      hydrology, cave-opening, or LOD failures.
 
 Do not call the world finished merely because its generators return structured
 data. This phase is complete only when their causes are visible in the rendered
 landscape.
 
-The Phase 5 work changes renderer presentation and read-only audit artifacts
-only. Phase 6 below advances the current generator contract to version 17 for
-fast-water terrain morphology.
+The generation-diversity reset intentionally changes pristine terrain and must
+advance the generator version when it lands. Existing generator versions retain
+their previous terrain contract. Phase 6 below records the already-landed
+version 17 fast-water terrain morphology; do not reuse that version for this
+reset.
 
 ---
 
