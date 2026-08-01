@@ -97,6 +97,25 @@ class TerrainCalibrationTests(unittest.TestCase):
             self.assertEqual(metadata["source_sha256"], "abc")
             self.assertEqual(metadata["spacing_meters"], 2_000.0)
 
+    def test_parameter_schema_retains_inactive_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            schema_path = Path(directory) / "schema.json"
+            pipeline._json_write(
+                schema_path,
+                {
+                    "vary": {"default": 2.0, "minimum": 1.0, "maximum": 3.0},
+                    "fixed": {
+                        "default": 7.0,
+                        "minimum": 7.0,
+                        "maximum": 7.0,
+                        "active": False,
+                    },
+                },
+            )
+            active, defaults = pipeline._load_parameter_schema(schema_path)
+            self.assertEqual([name for name, _ in active], ["vary"])
+            self.assertEqual(defaults, {"vary": 2.0, "fixed": 7.0})
+
 
 if __name__ == "__main__":
     unittest.main()

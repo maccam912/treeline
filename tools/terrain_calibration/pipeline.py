@@ -687,12 +687,12 @@ def _load_parameter_schema(path: Path):
     active = [(name, spec) for name, spec in schema.items() if spec.get("active", True)]
     if not active:
         raise ValueError("parameter schema has no active parameters")
-    return active
+    defaults = {name: float(spec["default"]) for name, spec in schema.items()}
+    return active, defaults
 
 
 def sensitivity(args) -> None:
-    active = _load_parameter_schema(Path(args.schema))
-    defaults = {name: float(spec["default"]) for name, spec in active}
+    active, defaults = _load_parameter_schema(Path(args.schema))
     work = Path(args.work)
     baseline_output = work / "baseline"
     if not (baseline_output / "descriptors.json").exists():
@@ -741,7 +741,7 @@ def sensitivity(args) -> None:
 
 def optimize(args) -> None:
     reference = _json_read(Path(args.reference))["descriptors"]
-    active = _load_parameter_schema(Path(args.schema))
+    active, fixed_parameters = _load_parameter_schema(Path(args.schema))
     names = [name for name, _ in active]
     lower = np.asarray([spec["minimum"] for _, spec in active], dtype=np.float64)
     upper = np.asarray([spec["maximum"] for _, spec in active], dtype=np.float64)
@@ -766,7 +766,8 @@ def optimize(args) -> None:
         scored = []
         for candidate_index, normalized in enumerate(proposals):
             values = lower + normalized * (upper - lower)
-            parameters = dict(zip(names, map(float, values)))
+            parameters = fixed_parameters.copy()
+            parameters.update(zip(names, map(float, values)))
             digest = hashlib.sha256(json.dumps(parameters, sort_keys=True).encode()).hexdigest()[:16]
             output = work / f"candidate-{digest}"
             descriptors_path = output / "descriptors.json"
