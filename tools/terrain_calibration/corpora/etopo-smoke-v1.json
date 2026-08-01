@@ -31,7 +31,7 @@
     {"id": "train_alaska_01", "source": "ETOPO_2022_v1_15s_N75W150_surface.tif", "latitude": 63.0, "longitude": -144.0, "split": "train"},
     {"id": "train_alaska_02", "source": "ETOPO_2022_v1_15s_N75W150_surface.tif", "latitude": 68.0, "longitude": -142.0, "split": "train"},
     {"id": "train_norway_01", "source": "ETOPO_2022_v1_15s_N75E000_surface.tif", "latitude": 64.0, "longitude": 7.5, "split": "train"},
-    {"id": "train_norway_02", "source": "ETOPO_2022_v1_15s_N75E000_surface.tif", "latitude": 69.0, "longitude": 7.5, "split": "train"},
+    {"id": "train_norway_02", "source": "ETOPO_2022_v1_15s_N75E000_surface.tif", "latitude": 62.5, "longitude": 7.5, "split": "train"},
     {"id": "validation_ecuador_01", "source": "ETOPO_2022_v1_15s_N00W090_surface.tif", "latitude": -3.0, "longitude": -80.5, "split": "validation"},
     {"id": "validation_ecuador_02", "source": "ETOPO_2022_v1_15s_N00W090_surface.tif", "latitude": -8.0, "longitude": -78.5, "split": "validation"},
     {"id": "validation_japan_01", "source": "ETOPO_2022_v1_15s_N45E135_surface.tif", "latitude": 36.0, "longitude": 140.0, "split": "validation"},

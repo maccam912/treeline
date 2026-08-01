@@ -1,0 +1,12 @@
+{
+  "province.base_elevation_meters": {"default": -640.0, "minimum": -900.0, "maximum": -300.0, "active": true},
+  "province.continental_relief_meters": {"default": 1280.0, "minimum": 800.0, "maximum": 2400.0, "active": true},
+  "province.closed_basin_depth_range_meters": {"default": 240.0, "minimum": 80.0, "maximum": 700.0, "active": true},
+  "province.tectonic_half_length_base_meters": {"default": 170000.0, "minimum": 100000.0, "maximum": 260000.0, "active": true},
+  "province.tectonic_width_base_meters": {"default": 28000.0, "minimum": 14000.0, "maximum": 70000.0, "active": true},
+  "province.tectonic_peak_base_meters": {"default": 900.0, "minimum": 350.0, "maximum": 2200.0, "active": true},
+  "province.tectonic_peak_range_meters": {"default": 2650.0, "minimum": 900.0, "maximum": 6000.0, "active": true},
+  "regional_wavelength_meters": {"default": 9600.0, "minimum": 4000.0, "maximum": 24000.0, "active": true},
+  "rolling_regional_relief_meters": {"default": 142.0, "minimum": 40.0, "maximum": 500.0, "active": true},
+  "rugged_uplift_relief_meters": {"default": 290.0, "minimum": 80.0, "maximum": 1000.0, "active": true}
+}
