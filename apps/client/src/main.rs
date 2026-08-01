@@ -18,7 +18,6 @@ use wasm_bindgen::{JsCast, closure::Closure};
 #[cfg(test)]
 use glam::DVec2;
 use glam::{DVec3, Mat4, Vec2, Vec3};
-#[cfg(not(target_arch = "wasm32"))]
 use treeline_coordinates::stable_hash;
 use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition};
 use treeline_ecology::{
