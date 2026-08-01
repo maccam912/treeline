@@ -100,7 +100,10 @@ version 17. Expedition survival and live networking have not been added yet.
 Generator version 18 is an intentional pristine-world reset: top-down
 geographical provinces now coordinate geology, landforms, climate controls,
 soil, hydrology, and broad overlapping ecosystem regimes. Version 17 and older
-world identities retain their previous generation paths.
+world identities retain their previous generation paths. Generator version 19
+promotes the first ETOPO-calibrated multiscale terrain parameters and is the
+default for new prototype worlds; version 18 remains reproducible for direct
+comparison.
 
 ## Getting started
 

@@ -13,6 +13,8 @@ use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
 
 /// Generator contract that introduces geographical provinces and landscape diversity.
 pub const PROVINCE_GENERATOR_VERSION: u32 = 18;
+/// Generator version that promotes the first ETOPO-calibrated province model.
+pub const CALIBRATED_PROVINCE_GENERATOR_VERSION: u32 = 19;
 /// Horizontal edge of one bounded geographical province.
 pub const PROVINCE_EDGE_METERS: f64 = 512_000.0;
 /// Fixed feature-ownership halo evaluated around every province.
@@ -49,11 +51,7 @@ const DOMAIN_DUNE_DIRECTION: u64 = 0x4455_4e45_4449_5245;
 // change generated values.
 const PROVINCE_SAMPLE_CACHE_ENTRIES: usize = 256;
 
-/// Offline-calibratable coefficients for version-18+ province morphology.
-///
-/// Production generation always uses [`Self::VERSION_18`]. Explicit values are
-/// accepted only by inspection and calibration entry points, so an optimizer
-/// cannot change an existing world contract or contaminate the normal cache.
+/// Versioned and offline-calibratable coefficients for province morphology.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProvinceParameters {
     pub base_elevation_meters: f64,
@@ -103,6 +101,23 @@ impl ProvinceParameters {
         dune_sediment_amplitude_meters: 41.0,
         dune_aridity_amplitude_meters: 18.0,
     };
+
+    pub const VERSION_19: Self = Self {
+        base_elevation_meters: -5_504.986_520_313_399_5,
+        continental_relief_meters: 9_862.848_668_866_529,
+        tectonic_width_base_meters: 80_955.657_327_730_53,
+        tectonic_peak_base_meters: 602.456_197_885_268_2,
+        tectonic_peak_range_meters: 1_254.974_178_179_418_2,
+        ..Self::VERSION_18
+    };
+
+    pub const fn for_generator_version(generator_version: u32) -> Self {
+        if generator_version >= CALIBRATED_PROVINCE_GENERATOR_VERSION {
+            Self::VERSION_19
+        } else {
+            Self::VERSION_18
+        }
+    }
 
     /// Rejects non-finite and physically unusable optimizer proposals.
     pub fn is_valid(self) -> bool {
@@ -320,7 +335,11 @@ impl ProvincePlan {
 
     /// Samples inside the province or its fixed generation halo.
     pub fn sample(self, x: f64, z: f64) -> Option<ProvinceSample> {
-        self.sample_with_parameters(x, z, ProvinceParameters::VERSION_18)
+        self.sample_with_parameters(
+            x,
+            z,
+            ProvinceParameters::for_generator_version(self.world.generator_version),
+        )
     }
 
     /// Samples with explicit offline calibration parameters.
@@ -376,7 +395,7 @@ impl ProvincePlan {
             ProvincePlan::generate(world, owner)?,
             x,
             z,
-            ProvinceParameters::VERSION_18,
+            ProvinceParameters::for_generator_version(world.generator_version),
         )?;
         PROVINCE_SAMPLE_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -1100,6 +1119,36 @@ mod tests {
             .expect("explicit sample");
             assert_eq!(cached, explicit);
         }
+    }
+
+    #[test]
+    fn version_nineteen_uses_calibrated_province_parameters() {
+        let world = WorldIdentity::new(0x5eed, CALIBRATED_PROVINCE_GENERATOR_VERSION, 0);
+        let mut differs_from_version_eighteen = false;
+        for [x, z] in [
+            [-712_000.0, 943_000.0],
+            [0.0, 0.0],
+            [3_500_000.0, -840_000.0],
+        ] {
+            let production = ProvincePlan::sample_at(world, x, z).expect("production sample");
+            let explicit = ProvincePlan::sample_at_with_parameters(
+                world,
+                x,
+                z,
+                ProvinceParameters::VERSION_19,
+            )
+            .expect("explicit sample");
+            let legacy = ProvincePlan::sample_at_with_parameters(
+                world,
+                x,
+                z,
+                ProvinceParameters::VERSION_18,
+            )
+            .expect("legacy sample");
+            assert_eq!(production, explicit);
+            differs_from_version_eighteen |= production != legacy;
+        }
+        assert!(differs_from_version_eighteen);
     }
 
     #[test]

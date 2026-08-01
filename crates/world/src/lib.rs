@@ -50,8 +50,11 @@ pub const EROSION_GENERATOR_VERSION: u32 = 5;
 pub const LIVING_WATER_GENERATOR_VERSION: u32 = 17;
 /// Generator version that resets generation around top-down geographical provinces.
 pub const LANDSCAPE_DIVERSITY_GENERATOR_VERSION: u32 = PROVINCE_GENERATOR_VERSION;
+/// Generator version that makes calibrated multiscale terrain the default.
+pub const CALIBRATED_TERRAIN_GENERATOR_VERSION: u32 =
+    treeline_geography::CALIBRATED_PROVINCE_GENERATOR_VERSION;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = LANDSCAPE_DIVERSITY_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = CALIBRATED_TERRAIN_GENERATOR_VERSION;
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
 const DOMAIN_SURFACE_WATER_CELL: u64 = 0x5355_5246_5741_5445;
@@ -2848,12 +2851,9 @@ mod tests {
     use treeline_terrain::RollingHills;
 
     #[test]
-    fn version_eighteen_is_the_top_down_landscape_reset() {
+    fn version_nineteen_is_the_calibrated_terrain_default() {
         assert_eq!(LANDSCAPE_DIVERSITY_GENERATOR_VERSION, 18);
-        assert_eq!(
-            CURRENT_GENERATOR_VERSION,
-            LANDSCAPE_DIVERSITY_GENERATOR_VERSION
-        );
+        assert_eq!(CURRENT_GENERATOR_VERSION, 19);
 
         let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
         let terrain = GeneratedWorldTerrain::new(world);

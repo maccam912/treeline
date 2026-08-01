@@ -169,7 +169,7 @@ fn parse_seeds(value: &str) -> Result<Vec<u64>, Box<dyn Error>> {
 }
 
 fn print_terrain_parameters() -> Result<(), Box<dyn Error>> {
-    let values = LandformParameters::VERSION_18
+    let values = LandformParameters::for_generator_version(CURRENT_GENERATOR_VERSION)
         .named_values()
         .into_iter()
         .map(|(name, value)| (name.to_owned(), serde_json::Value::from(value)))
@@ -222,7 +222,7 @@ fn run_heightmap_batch(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         return Err("heightmap calibration requires generator version 18 or newer".into());
     }
 
-    let mut parameters = LandformParameters::VERSION_18;
+    let mut parameters = LandformParameters::for_generator_version(generator_version);
     if let Some(overrides) = object.get("parameters") {
         for (name, value) in overrides
             .as_object()
@@ -3015,13 +3015,14 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_parameter_schema_matches_rust_version_eighteen_defaults() {
+    fn checked_in_parameter_schema_matches_current_rust_defaults() {
         let schema: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tools/terrain_calibration/parameters.json"
         ))
         .expect("parameter schema JSON");
         let schema = schema.as_object().expect("parameter schema object");
-        let named = LandformParameters::VERSION_18.named_values();
+        let named =
+            LandformParameters::for_generator_version(CURRENT_GENERATOR_VERSION).named_values();
         assert_eq!(schema.len(), named.len());
         for (name, value) in named {
             assert_eq!(

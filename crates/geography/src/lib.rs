@@ -9,9 +9,10 @@ use std::collections::{BinaryHeap, VecDeque};
 use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
 
 pub use province::{
-    DuneGeometry, PROVINCE_EDGE_METERS, PROVINCE_GENERATOR_VERSION, PROVINCE_HALO_METERS,
-    ProvinceBoundaryCondition, ProvinceBoundaryConditions, ProvinceIndex, ProvinceParameters,
-    ProvincePlan, ProvinceSample, ScarpGeometry,
+    CALIBRATED_PROVINCE_GENERATOR_VERSION, DuneGeometry, PROVINCE_EDGE_METERS,
+    PROVINCE_GENERATOR_VERSION, PROVINCE_HALO_METERS, ProvinceBoundaryCondition,
+    ProvinceBoundaryConditions, ProvinceIndex, ProvinceParameters, ProvincePlan, ProvinceSample,
+    ScarpGeometry,
 };
 
 const DOMAIN_UPLIFT: u64 = 0x5550_4c49_4654;

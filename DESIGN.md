@@ -1803,10 +1803,10 @@ Already explored regions must not silently transform.
 Persistent region metadata can retain:
 
 ```text
-generated_with_version = 17
+generated_with_version = 18
 ```
 
-while newly explored regions use version 18.
+while newly explored regions use version 19.
 
 Alternatively major updates can explicitly require new worlds.
 
@@ -2422,10 +2422,11 @@ the world while those phases are in progress.
 
 ## Phase 5 — World Quality
 
-**Phase status: In progress; the version 18 generation-diversity reset has
-landed and the landscape-diversity acceptance pass is next. Deterministic audits
-and geography-aware presentation are usable foundations, but the current
-generator has not yet satisfied the complete landscape-diversity pillar**
+**Phase status: In progress; the version 18 generation-diversity reset and
+version 19 real-terrain calibration pass have landed, and the
+landscape-diversity acceptance pass is next. Deterministic audits and
+geography-aware presentation are usable foundations, but the current generator
+has not yet satisfied the complete landscape-diversity pillar**
 
 Goal:
 
@@ -2489,17 +2490,20 @@ Goal:
       artifacts, and an optional strict mode that fails on coverage gaps.
 - [ ] **PARTIAL** — Real-terrain calibration. A headless Rust batch sampler now
       exposes bounded offline parameters for province and local landform
-      morphology while preserving version-18 production defaults and golden
+      morphology while preserving versioned production defaults and golden
       outputs. A Python/GDAL pipeline prepares fixed-meter ETOPO and NASADEM
       patches, measures multi-scale elevation, relief, slope, curvature,
       spectra, drainage, coasts, and morphology prevalence, runs sensitivity
       and bounded CMA-style searches, and emits labeled or blind heightmap
       galleries without per-tile normalization. The first 512 km ETOPO/Treeline
-      comparison confirms that version 18 concentrates relief into sparse
-      features over terrain that is much quieter than the real reference. The
-      full spatially separated dataset, optimization campaign, untouched
-      holdout review, perspective captures, and accepted version-19 constants
-      remain before this item can be complete.
+      comparison confirmed that version 18 concentrates relief into sparse
+      features over terrain much quieter than the real reference. A reproducible
+      28-patch, 14-source-tile smoke corpus and staged search now have a first
+      multiscale candidate that improves train, validation, and holdout distance,
+      and those constants are now the generator-version-19 default while version
+      18 remains reproducible. The larger spatially separated dataset,
+      drainage/range coherence, and blind and perspective review remain before
+      this item can be complete.
 - [x] Geography-aware terrain materials. Rendered terrain now blends explicit
       regional rock hardness and carbonate character, soil sand/clay and
       organic content, surface moisture, sediment deposition, rock and scree
@@ -2556,8 +2560,9 @@ Do not call the world finished merely because its generators return structured
 data. This phase is complete only when their causes are visible in the rendered
 landscape.
 
-The generation-diversity reset intentionally changes pristine terrain in
-generator version 18. Existing generator versions retain their previous terrain
+The generation-diversity reset intentionally changed pristine terrain in
+generator version 18, and the calibrated multiscale surface changes it again in
+generator version 19. Existing generator versions retain their previous terrain
 contract. Phase 6 below records version 17 fast-water terrain morphology.
 
 ---

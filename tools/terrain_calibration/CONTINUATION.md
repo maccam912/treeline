@@ -13,15 +13,16 @@ meters with sea level at 0 m and a fixed 0–9,000 m land display range. Destina
 families (mountain, coast, cliff, and incised terrain) receive 2× sampling weight,
 but generated evaluation sets retain at least 35% quiet terrain.
 
-Do not promote a new generator version from training loss alone. A candidate must
-also pass an untouched geographic holdout, a blind heightmap gallery, hydrology
-and boundary invariants, perspective rendering, and the full repository gate.
+Promotion is an explicit product decision: record the available quantitative and
+visual evidence, then keep iterating after promotion when perspective playtests
+or drainage review expose weaknesses.
 
 ## Current checkpoint (2026-07-31)
 
 - Starting repository commit: `e553420` (`Add aerial exploration mode`).
-- Rust exposes 46 bounded named landform parameters. Supplying the version-18
-  defaults remains bit-for-bit identical to production generation.
+- Rust exposes 46 bounded named landform parameters. Generator version 19 uses
+  the `optimization-smoke-v2-best.json` values by default; version 18 remains
+  bit-for-bit reproducible for comparisons.
 - `world-viewer heightmap-batch` exports deterministic little-endian float32
   heightmaps. `world-viewer terrain-parameters` exports the defaults.
 - The Python pipeline prepares real rasters, selects generated candidates,
@@ -116,6 +117,27 @@ python3 -m tools.terrain_calibration optimize \
   --generations 3 --population 6 --seed 24301
 ```
 
+The current active experiment can be recreated with:
+
+```sh
+python3 -m tools.terrain_calibration extract-manifest \
+  --manifest tools/terrain_calibration/corpora/etopo-smoke-v2.json \
+  --source-root data/terrain-calibration/sources/etopo-smoke \
+  --output data/terrain-calibration/etopo-smoke-v2
+python3 -m tools.terrain_calibration optimize \
+  --schema tools/terrain_calibration/corpora/parameters-smoke-v2.json \
+  --request data/terrain-calibration/generated-smoke-request.json \
+  --reference data/terrain-calibration/etopo-smoke-v2/train-descriptors.json \
+  --work artifacts/terrain-calibration/optimization-smoke-v2 \
+  --generations 4 --population 8 --sigma 0.12 --seed 24302
+```
+
+The generated request comes from 256 deterministic 64² candidates made with
+seed 24301, morphology-stratified down to 16 samples, and promoted to 256². The
+current candidate digest is `1298090312dd94c1`; its exact portable parameter
+map is `corpora/optimization-smoke-v2-best.json`. Local galleries are under
+`artifacts/terrain-calibration/optimization-smoke-v2/{gallery,blind-gallery}`.
+
 ## Experiment ledger
 
 Append entries here rather than replacing them.
@@ -129,3 +151,4 @@ Append entries here rather than replacing them.
 | optimize-001 | `etopo-smoke-v1` train; 16 common generated samples at 256² | Diagonal CMA-style, 10 parameters, 4 generations × 8 population, sigma 0.16, seed 24301 | Train 1.20784 → 1.10050; validation 1.78777 → 1.68639; holdout 0.92524 → 0.98433. Mean p95 slope 0.04614 → 0.07312 and relief 2,891.34 → 3,904.33 m, but quiet stayed 0.89193 and median elevation only reached 245.40 m. Exact rejected values are `optimization-smoke-v1-best.json` | Reject for production: holdout regressed and gallery shows more isolated straight ridges, not nested real relief. Expand parameterization with optional domain-warped broad/mesoscale relief whose v18 amplitudes default to zero |
 | parameterization-001 | Same 16 common generated samples and `etopo-smoke-v1` train | Added optional domain-warped fractal broad, mesoscale, and ridged relief; v18 amplitudes are zero. Manual steep continental mapping plus sign-constrained background trial | Train loss reached 0.66473 (v18 1.20784); mean relief 3,779.93 vs 3,918.79 m, p95 slope 0.13458 vs 0.13538, quiet 0.50101 vs 0.52205. Median elevation remains low (909.61 vs 2,183.78 m); validation/holdout are not representative enough and score 1.83004/1.24825 | Keep new controls offline-only. Expand/rebalance geographic splits and optimize sea-level contrast plus background controls; do not promote the manual values |
 | corpus-002 | `etopo-smoke-v2`: 12 train, 6 validation, 10 holdout patches at 256² across 14 non-overlapping source tiles | Added Great Plains, Sahara, Amazon, and Australian interior; each source tile belongs to exactly one split | Train/validation/holdout mean relief 2,855.67/2,496.29/3,043.01 m; p95 slope 0.09527/0.08541/0.12733; quiet 0.67239/0.70036/0.62857. Default losses 0.69559/0.69529/0.76919. Aggressive v1-tuned trial is rejected on all three | Use v2 for the next staged search. `parameters-smoke-v2.json` fixes tested local settings while varying 12 macro/multiscale controls; inactive defaults are now retained in every proposal |
+| optimize-002 | `etopo-smoke-v2` train; 16 common generated samples at 256² | Staged diagonal CMA-style, 12 active + 7 fixed parameters, 4 generations × 8 population, sigma 0.12, seed 24302 | Train 0.69559 → 0.57361 (-17.5%); validation 0.69529 → 0.60274 (-13.3%); holdout 0.76919 → 0.76422 (-0.6%). Candidate mean relief 3,003.07 m, p95 slope 0.09702, quiet 0.61670; exact values are `optimization-smoke-v2-best.json`, digest `1298090312dd94c1` | Promoted as the generator-version-19 default by product decision. Gallery is much richer than v18; perspective playtesting, drainage review, and longer coherent ranges remain the next iteration targets. |

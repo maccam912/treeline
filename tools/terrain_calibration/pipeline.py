@@ -601,10 +601,11 @@ def make_generated_request(args) -> None:
     rng = random.Random(args.seed)
     rasters = []
     for index in range(args.count):
+        world_seed = args.world_seed or f"0x{rng.getrandbits(64):016x}"
         rasters.append(
             {
                 "id": f"generated_{index:05d}",
-                "seed": f"0x{rng.getrandbits(64):016x}",
+                "seed": world_seed,
                 "center_x_meters": float(rng.randrange(-64_000_000, 64_000_001, 64_000)),
                 "center_z_meters": float(rng.randrange(-64_000_000, 64_000_001, 64_000)),
                 "span_meters": args.span,
@@ -613,7 +614,7 @@ def make_generated_request(args) -> None:
         )
     _json_write(
         Path(args.output),
-        {"generator_version": 18, "parameters": {}, "rasters": rasters},
+        {"generator_version": args.generator_version, "parameters": {}, "rasters": rasters},
     )
 
 
@@ -935,6 +936,10 @@ def main(argv: list[str] | None = None) -> None:
     request.add_argument("--output", required=True)
     request.add_argument("--count", type=int, required=True)
     request.add_argument("--seed", type=int, default=24301)
+    request.add_argument(
+        "--world-seed", help="reuse one Rust-style seed such as 0x5eed for every position"
+    )
+    request.add_argument("--generator-version", type=int, default=19)
     request.add_argument("--span", type=float, default=MACRO_SPAN_METERS)
     request.add_argument("--edge", type=int, default=256)
     request.set_defaults(func=make_generated_request)

@@ -3,8 +3,9 @@
 use treeline_coordinates::WorldPosition;
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_geography::{
-    Climate, MacroElevation, MacroTerrainSample, OROGRAPHIC_CLIMATE_GENERATOR_VERSION,
-    PROVINCE_GENERATOR_VERSION, ProvinceParameters, ProvincePlan, ProvinceSample, RegionalProfile,
+    CALIBRATED_PROVINCE_GENERATOR_VERSION, Climate, MacroElevation, MacroTerrainSample,
+    OROGRAPHIC_CLIMATE_GENERATOR_VERSION, PROVINCE_GENERATOR_VERSION, ProvinceParameters,
+    ProvincePlan, ProvinceSample, RegionalProfile,
 };
 
 const DOMAIN_ROLLING_HILLS: u64 = 0x524f_4c4c_494e_4753;
@@ -152,7 +153,7 @@ pub struct WildernessTerrain {
     pub world: WorldIdentity,
 }
 
-/// Offline-calibratable coefficients for the version-18 landform surface.
+/// Offline-calibratable coefficients for versioned landform surfaces.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LandformParameters {
     pub province: ProvinceParameters,
@@ -212,6 +213,35 @@ impl LandformParameters {
         glacial_landscape_relief_meters: 38.0,
         ground_detail_relief_meters: 2.6,
     };
+
+    /// ETOPO-calibrated version-19 production parameters.
+    pub const VERSION_19: Self = Self {
+        province: ProvinceParameters::VERSION_19,
+        broad_wavelength_meters: 150_145.717_777_411_1,
+        broad_relief_meters: 233.517_592_844_709_7,
+        mesoscale_wavelength_meters: 12_000.0,
+        mesoscale_relief_meters: 687.357_975_543_275_5,
+        ridged_relief_meters: 1_356.016_687_524_716_4,
+        // Exact f64 evaluated by the JSON-driven optimizer for 16238.017314669307.
+        regional_wavelength_meters: f64::from_bits(4_670_152_558_753_216_822),
+        landscape_wavelength_meters: 7_000.0,
+        rugged_wavelength_meters: 10_000.0,
+        rolling_regional_relief_meters: 634.208_576_353_188_3,
+        rolling_landscape_relief_meters: 150.0,
+        rugged_base_relief_meters: 350.0,
+        rugged_uplift_relief_meters: 675.0,
+        weathered_regional_relief_meters: 375.0,
+        weathered_landscape_relief_meters: 150.0,
+        ..Self::VERSION_18
+    };
+
+    pub const fn for_generator_version(generator_version: u32) -> Self {
+        if generator_version >= CALIBRATED_PROVINCE_GENERATOR_VERSION {
+            Self::VERSION_19
+        } else {
+            Self::VERSION_18
+        }
+    }
 
     pub fn is_valid(self) -> bool {
         self.province.is_valid()
@@ -614,7 +644,11 @@ impl WildernessTerrain {
     /// vocabulary without changing the parent drainage surface or falling
     /// back to one globally uniform hill amplitude.
     pub fn landform_at(self, x: f64, z: f64) -> Option<LandformSurfaceSample> {
-        self.landform_at_with_parameters(x, z, LandformParameters::VERSION_18)
+        self.landform_at_with_parameters(
+            x,
+            z,
+            LandformParameters::for_generator_version(self.world.generator_version),
+        )
     }
 
     /// Samples the same landform formulas with explicit offline parameters.
@@ -631,7 +665,9 @@ impl WildernessTerrain {
         if !parameters.is_valid() {
             return None;
         }
-        let (macro_sample, province) = if parameters == LandformParameters::VERSION_18 {
+        let production_parameters =
+            LandformParameters::for_generator_version(self.world.generator_version);
+        let (macro_sample, province) = if parameters == production_parameters {
             (
                 MacroElevation::new(self.world).sample(x, z)?,
                 ProvincePlan::sample_at(self.world, x, z)?,
@@ -1406,6 +1442,25 @@ mod tests {
                 calibrated.height_at(x, z).expect("calibrated").to_bits(),
             );
         }
+    }
+
+    #[test]
+    fn version_nineteen_defaults_to_calibrated_landform() {
+        let world = WorldIdentity::new(0x5eed, CALIBRATED_PROVINCE_GENERATOR_VERSION, 0);
+        let production = WildernessTerrain::new(world);
+        let calibrated = CalibratedTerrain::new(world, LandformParameters::VERSION_19)
+            .expect("calibrated terrain");
+        let legacy =
+            CalibratedTerrain::new(world, LandformParameters::VERSION_18).expect("legacy terrain");
+        let mut differs_from_legacy = false;
+        for [x, z] in [[-812_375.0, 1_440_125.0], [48_000_000.0, -36_700_000.0]] {
+            let production_height = production.height_at(x, z).expect("production");
+            let calibrated_height = calibrated.height_at(x, z).expect("calibrated");
+            let legacy_height = legacy.height_at(x, z).expect("legacy");
+            assert_eq!(production_height.to_bits(), calibrated_height.to_bits());
+            differs_from_legacy |= production_height.to_bits() != legacy_height.to_bits();
+        }
+        assert!(differs_from_legacy);
     }
 
     #[test]

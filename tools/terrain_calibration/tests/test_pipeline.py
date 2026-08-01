@@ -116,6 +116,30 @@ class TerrainCalibrationTests(unittest.TestCase):
             self.assertEqual([name for name, _ in active], ["vary"])
             self.assertEqual(defaults, {"vary": 2.0, "fixed": 7.0})
 
+    def test_generated_request_can_pin_world_seed_and_generator_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "request.json"
+            args = type(
+                "Args",
+                (),
+                {
+                    "output": str(output),
+                    "count": 3,
+                    "seed": 24303,
+                    "world_seed": "0x5eed",
+                    "generator_version": 19,
+                    "span": 512_000.0,
+                    "edge": 64,
+                },
+            )()
+            pipeline.make_generated_request(args)
+            request = pipeline._json_read(output)
+            self.assertEqual(request["generator_version"], 19)
+            self.assertEqual(
+                [raster["seed"] for raster in request["rasters"]],
+                ["0x5eed", "0x5eed", "0x5eed"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
