@@ -9,10 +9,13 @@ use treeline_geography::{
     RegionalProfile, SEASONAL_CLIMATE_GENERATOR_VERSION, Season, WatershedRegion,
     WatershedRegionIndex,
 };
+use treeline_terrain::WildernessTerrain;
 
 const SECONDS_PER_YEAR: f64 = 31_556_952.0;
 const MIN_CHANNEL_CATCHMENT_CELLS: u64 = 8;
 const DOMAIN_GULLY_BEND: u64 = 0x4755_4c4c_5942_454e;
+/// Generator version that aligns channel centerlines with calibrated local terrain.
+pub const LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION: u32 = 20;
 pub const MAX_RIVER_INFLUENCE_METERS: f64 = 900.0;
 pub const MAX_GULLY_INFLUENCE_METERS: f64 = 120.0;
 
@@ -241,9 +244,11 @@ impl GullyNetwork {
             .enumerate()
             .map(|(slot, cell)| (cell.index, slot))
             .collect::<BTreeMap<_, _>>();
+        let flow_targets = cells.iter().map(|cell| cell.flow_to).collect::<Vec<_>>();
+        let channel_elevations = versioned_channel_elevations(watershed, &flow_targets)?;
         let terrain = MacroElevation::new(watershed.world);
         let mut segments = Vec::new();
-        for cell in cells {
+        for (slot, cell) in cells.iter().enumerate() {
             if cell.flow_accumulation_cells >= MIN_CHANNEL_CATCHMENT_CELLS || cell.basin.is_some() {
                 continue;
             }
@@ -252,11 +257,12 @@ impl GullyNetwork {
             };
             let [source_x, source_z] = cell.index.center();
             let [mouth_x, mouth_z] = mouth_cell.center();
-            let source_y = cell.filled_elevation_meters;
+            let source_y = channel_elevations.at(slot, cell.filled_elevation_meters);
             let mouth_y = if let Some(&mouth_slot) = slots.get(&mouth_cell) {
-                cells[mouth_slot].filled_elevation_meters
+                channel_elevations.at(mouth_slot, cells[mouth_slot].filled_elevation_meters)
             } else {
-                terrain.sample(mouth_x, mouth_z)?.elevation_meters
+                external_channel_elevation(watershed.world, mouth_cell, source_y)
+                    .unwrap_or(terrain.sample(mouth_x, mouth_z)?.elevation_meters)
             };
             if mouth_y > source_y {
                 return None;
@@ -335,6 +341,114 @@ impl GullyNetwork {
     }
 }
 
+/// Fits shared channel nodes to the calibrated local surface while preserving
+/// the drainage DAG. Repeated pairwise projections distribute an uphill
+/// violation across both endpoints instead of carving its entire downstream
+/// path; the final topological pass guarantees exact downhill ordering.
+fn aligned_channel_elevations(
+    watershed: &WatershedRegion,
+    flow_targets: &[Option<DrainageCellIndex>],
+) -> Option<Vec<f64>> {
+    let cells = watershed.cells();
+    if flow_targets.len() != cells.len() {
+        return None;
+    }
+    let terrain = WildernessTerrain::new(watershed.world);
+    let slots = cells
+        .iter()
+        .enumerate()
+        .map(|(slot, cell)| (cell.index, slot))
+        .collect::<BTreeMap<_, _>>();
+    let mut elevations = cells
+        .iter()
+        .map(|cell| {
+            let [x, z] = cell.index.center();
+            terrain.height_at(x, z)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let edges = flow_targets
+        .iter()
+        .enumerate()
+        .filter_map(|(source, target)| {
+            target.and_then(|target| slots.get(&target).map(|&target| (source, target)))
+        })
+        .collect::<Vec<_>>();
+    for _ in 0..64 {
+        let mut changed = false;
+        for &(source, target) in &edges {
+            if elevations[target] > elevations[source] {
+                let shared = (elevations[source] + elevations[target]) * 0.5;
+                elevations[source] = shared;
+                elevations[target] = shared;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut incoming = vec![0_usize; cells.len()];
+    for &(_, target) in &edges {
+        incoming[target] = incoming[target].checked_add(1)?;
+    }
+    let mut ready = incoming
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, &count)| (count == 0).then_some(slot))
+        .collect::<BTreeSet<_>>();
+    let mut processed = 0_usize;
+    while let Some(source) = ready.pop_first() {
+        processed = processed.checked_add(1)?;
+        if let Some(target) = flow_targets[source].and_then(|target| slots.get(&target)) {
+            elevations[*target] = elevations[*target].min(elevations[source]);
+            incoming[*target] = incoming[*target].checked_sub(1)?;
+            if incoming[*target] == 0 {
+                ready.insert(*target);
+            }
+        }
+    }
+    (processed == cells.len()).then_some(elevations)
+}
+
+enum ChannelElevations {
+    Macro,
+    Aligned(Vec<f64>),
+}
+
+impl ChannelElevations {
+    fn at(&self, slot: usize, macro_elevation_meters: f64) -> f64 {
+        match self {
+            Self::Macro => macro_elevation_meters,
+            Self::Aligned(elevations) => elevations[slot],
+        }
+    }
+}
+
+fn versioned_channel_elevations(
+    watershed: &WatershedRegion,
+    flow_targets: &[Option<DrainageCellIndex>],
+) -> Option<ChannelElevations> {
+    if watershed.world.generator_version >= LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION {
+        aligned_channel_elevations(watershed, flow_targets).map(ChannelElevations::Aligned)
+    } else {
+        Some(ChannelElevations::Macro)
+    }
+}
+
+fn external_channel_elevation(
+    world: WorldIdentity,
+    cell: DrainageCellIndex,
+    source_elevation_meters: f64,
+) -> Option<f64> {
+    if world.generator_version < LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION {
+        return None;
+    }
+    let [x, z] = cell.center();
+    let local_height = WildernessTerrain::new(world).height_at(x, z)?;
+    Some(local_height.min(source_elevation_meters))
+}
+
 fn closest_on_segment(
     x: f64,
     z: f64,
@@ -391,6 +505,8 @@ impl RiverNetwork {
         let closed_basins = closed_surface_basins(watershed);
         let effective_flow_to =
             |cell| effective_river_flow_target(cell, cells, &slots, &closed_basins);
+        let flow_targets = cells.iter().map(effective_flow_to).collect::<Vec<_>>();
+        let channel_elevations = versioned_channel_elevations(watershed, &flow_targets)?;
         let mut incoming = vec![0_usize; cells.len()];
         let mut discharge = Vec::with_capacity(cells.len());
         let mut effective_accumulation = vec![1_u64; cells.len()];
@@ -445,12 +561,13 @@ impl RiverNetwork {
                 continue;
             };
             let [source_x, source_z] = cell.index.center();
-            let source_y = cell.filled_elevation_meters;
+            let source_y = channel_elevations.at(slot, cell.filled_elevation_meters);
             let [mouth_x, mouth_z] = mouth_cell.center();
             let mouth_y = if let Some(&mouth_slot) = slots.get(&mouth_cell) {
-                cells[mouth_slot].filled_elevation_meters
+                channel_elevations.at(mouth_slot, cells[mouth_slot].filled_elevation_meters)
             } else {
-                terrain.sample(mouth_x, mouth_z)?.elevation_meters
+                external_channel_elevation(watershed.world, mouth_cell, source_y)
+                    .unwrap_or(terrain.sample(mouth_x, mouth_z)?.elevation_meters)
             };
             let segment = RiverSegment {
                 source_cell: cell.index,
@@ -1413,6 +1530,10 @@ mod tests {
     const SEASONAL_WORLD: WorldIdentity =
         WorldIdentity::new(0x5eed, SEASONAL_CLIMATE_GENERATOR_VERSION, 0);
     const RESET_WORLD: WorldIdentity = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
+    const CALIBRATED_WORLD: WorldIdentity =
+        WorldIdentity::new(0x5eed, LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION - 1, 0);
+    const ALIGNED_WORLD: WorldIdentity =
+        WorldIdentity::new(0x5eed, LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION, 0);
 
     #[test]
     fn river_direction_rejects_uphill_segments() {
@@ -1896,6 +2017,89 @@ mod tests {
             );
             assert!(segment.drainage_area_square_kilometers >= 32.0);
         }
+    }
+
+    #[test]
+    fn aligned_channels_follow_local_terrain_and_still_descend() {
+        let region = WatershedRegionIndex::new(-1, 0);
+        let watershed = WatershedRegion::generate(ALIGNED_WORLD, region).expect("watershed");
+        let rivers = RiverNetwork::generate(ALIGNED_WORLD, region).expect("aligned rivers");
+        let gullies = GullyNetwork::generate(ALIGNED_WORLD, region).expect("aligned gullies");
+        assert!(!rivers.segments().is_empty());
+        assert!(!gullies.segments().is_empty());
+        let mut shifted_from_macro = false;
+        for segment in rivers.segments() {
+            if let Some(downstream) = rivers.segment_from(segment.mouth_cell) {
+                assert_eq!(
+                    segment.mouth.y.to_bits(),
+                    downstream.source.y.to_bits(),
+                    "connected river segments must share one endpoint elevation"
+                );
+            }
+            let source = watershed
+                .cells()
+                .iter()
+                .find(|cell| cell.index == segment.source_cell)
+                .expect("river source cell");
+            shifted_from_macro |=
+                segment.source.y.to_bits() != source.filled_elevation_meters.to_bits();
+            assert!(segment.descends_or_is_level());
+        }
+        assert!(shifted_from_macro, "version 20 must apply local alignment");
+        assert!(
+            gullies
+                .segments()
+                .iter()
+                .all(|segment| segment.descends_or_is_level())
+        );
+    }
+
+    #[test]
+    fn version_nineteen_retains_macro_only_channel_elevations() {
+        let region_index = WatershedRegionIndex::new(-1, 0);
+        let watershed = WatershedRegion::generate(CALIBRATED_WORLD, region_index)
+            .expect("version-19 watershed");
+        let rivers = RiverNetwork::from_watershed(&watershed).expect("version-19 river network");
+        for segment in rivers.segments() {
+            let source = watershed
+                .cells()
+                .iter()
+                .find(|cell| cell.index == segment.source_cell)
+                .expect("river source cell");
+            assert_eq!(
+                segment.source.y.to_bits(),
+                source.filled_elevation_meters.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn aligned_channel_networks_have_a_golden_fingerprint() {
+        let region = WatershedRegionIndex::new(-1, 2);
+        let rivers = RiverNetwork::generate(ALIGNED_WORLD, region).expect("aligned rivers");
+        let gullies = GullyNetwork::generate(ALIGNED_WORLD, region).expect("aligned gullies");
+        let mut words = Vec::new();
+        for segment in rivers.segments().iter().step_by(17) {
+            words.extend([
+                u64::from_le_bytes(segment.source_cell.x.to_le_bytes()),
+                u64::from_le_bytes(segment.source_cell.z.to_le_bytes()),
+                segment.source.y.to_bits(),
+                segment.mouth.y.to_bits(),
+            ]);
+        }
+        for segment in gullies.segments().iter().step_by(97) {
+            words.extend([
+                u64::from_le_bytes(segment.source_cell.x.to_le_bytes()),
+                u64::from_le_bytes(segment.source_cell.z.to_le_bytes()),
+                segment.source.y.to_bits(),
+                segment.mouth.y.to_bits(),
+            ]);
+        }
+        assert_eq!(
+            stable_hash(&words),
+            4_050_639_150_563_997_736,
+            "changing this value changes version-20 aligned channels"
+        );
     }
 
     #[test]

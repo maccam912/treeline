@@ -2048,6 +2048,7 @@ dependencies = [
  "libm",
  "treeline-coordinates",
  "treeline-geography",
+ "treeline-terrain",
 ]
 
 [[package]]

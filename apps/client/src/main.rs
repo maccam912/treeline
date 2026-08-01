@@ -29,6 +29,8 @@ use treeline_geography::Climate;
 use treeline_mesher::Mesh;
 use treeline_renderer::{AtmosphereSettings, TerrainMesh, TerrainRenderer, TreeMeshDetail};
 use treeline_simulation::{ActiveRegionId, ActiveWaterSimulation};
+#[cfg(test)]
+use treeline_terrain::WildernessTerrain;
 use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::ChunkIndex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -58,9 +60,9 @@ const WALK_SPEED: f64 = 8.0;
 const SPRINT_SPEED: f64 = 16.0;
 const AERIAL_HEIGHT_METERS: f64 = 1_000.0;
 const AERIAL_SPEED_MULTIPLIER: f64 = 10.0;
-// Reviewed version-19 low country between two visible mountain systems.
+// Version-20 low country retains the reviewed version-19 regional setting.
 const START_X: f64 = 26_176_064.0;
-const START_Z: f64 = 39_040_064.0;
+const START_Z: f64 = 39_040_066.0;
 const START_YAW: f64 = 1.924_842_228_418_599_5;
 const START_PITCH: f64 = -0.08;
 const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
@@ -2786,7 +2788,7 @@ mod tests {
     #[test]
     fn water_warp_places_the_player_on_dry_ground_facing_visible_water() {
         let terrain = GeneratedWorldTerrain::new(WORLD);
-        let (body, destination, shore_water) = [
+        let lake_site = [
             [-36_032_000.0, -15_744_000.0],
             [-192_000.0, -192_000.0],
             [-64_000.0, -64_000.0],
@@ -2805,8 +2807,40 @@ mod tests {
                         dry_water_shore(&terrain, body, deep_water, 0.0)?;
                     Some((body, destination, shore_water))
                 })
-        })
-        .expect("the representative regions should have a reachable lake shore");
+        });
+        let ocean_site = || {
+            let landform = WildernessTerrain::new(WORLD);
+            for z_index in -64_i32..=64 {
+                let z = f64::from(z_index) * 64_000.0;
+                for x_index in -64_i32..64 {
+                    let left = [f64::from(x_index) * 64_000.0, z];
+                    let right = [left[0] + 64_000.0, z];
+                    let left_height = landform.height_at(left[0], left[1])?;
+                    let right_height = landform.height_at(right[0], right[1])?;
+                    let (water, direction_fraction) = if left_height < 0.0 && right_height >= 0.0 {
+                        (left, 0.0)
+                    } else if right_height < 0.0 && left_height >= 0.0 {
+                        (right, 0.5)
+                    } else {
+                        continue;
+                    };
+                    if terrain
+                        .ocean_surface_at(water[0], water[1])
+                        .is_some_and(|sample| {
+                            sample.water_depth_meters >= WATER_WARP_MIN_DEPTH_METERS
+                        })
+                        && let Some((destination, shore_water)) =
+                            dry_water_shore(&terrain, WaterBody::Ocean, water, direction_fraction)
+                    {
+                        return Some((WaterBody::Ocean, destination, shore_water));
+                    }
+                }
+            }
+            None
+        };
+        let (body, destination, shore_water) = lake_site
+            .or_else(ocean_site)
+            .expect("the representative regions should have a reachable water shore");
 
         assert!(surface_feature_has_dry_ground(
             &terrain,
@@ -2867,15 +2901,25 @@ mod tests {
             .into_iter()
             .filter(|tree| surface_feature_has_dry_ground(&terrain, tree.x, tree.z))
             .collect::<Vec<_>>();
-        let crown_clearance = retained
+        let nearest_tree = retained
             .iter()
-            .map(|tree| (tree.x - START_X).hypot(tree.z - START_Z) - tree.crown_radius_meters)
-            .fold(f64::INFINITY, f64::min);
+            .min_by(|left, right| {
+                let left_clearance =
+                    (left.x - START_X).hypot(left.z - START_Z) - left.crown_radius_meters;
+                let right_clearance =
+                    (right.x - START_X).hypot(right.z - START_Z) - right.crown_radius_meters;
+                left_clearance.total_cmp(&right_clearance)
+            })
+            .expect("visible stand has a nearest tree");
+        let crown_clearance = (nearest_tree.x - START_X).hypot(nearest_tree.z - START_Z)
+            - nearest_tree.crown_radius_meters;
 
         assert!(retained.len() >= 20, "spawn should retain a visible stand");
         assert!(
             crown_clearance >= 2.0,
-            "spawn should not begin inside a tree crown; clearance is {crown_clearance:.2} m"
+            "spawn should not begin inside a tree crown; clearance is {crown_clearance:.2} m near ({:.2}, {:.2})",
+            nearest_tree.x,
+            nearest_tree.z
         );
 
         let rock_bounds =
@@ -2886,16 +2930,23 @@ mod tests {
             .into_iter()
             .filter(|rock| surface_feature_has_dry_ground(&terrain, rock.x, rock.z))
             .collect::<Vec<_>>();
-        let rock_clearance = rocks
+        let nearest_rock = rocks
             .iter()
-            .map(|rock| {
-                (rock.x - START_X).hypot(rock.z - START_Z)
-                    - rock.radii_meters[0].max(rock.radii_meters[2])
+            .min_by(|left, right| {
+                let clearance = |rock: &&treeline_ecology::SurfaceRock| {
+                    (rock.x - START_X).hypot(rock.z - START_Z)
+                        - rock.radii_meters[0].max(rock.radii_meters[2])
+                };
+                clearance(left).total_cmp(&clearance(right))
             })
-            .fold(f64::INFINITY, f64::min);
+            .expect("spawn region has a nearest surface rock");
+        let rock_clearance = (nearest_rock.x - START_X).hypot(nearest_rock.z - START_Z)
+            - nearest_rock.radii_meters[0].max(nearest_rock.radii_meters[2]);
         assert!(
             rock_clearance >= 1.0,
-            "spawn should not begin inside a surface rock"
+            "spawn should not begin inside a surface rock; clearance is {rock_clearance:.2} m near ({:.2}, {:.2})",
+            nearest_rock.x,
+            nearest_rock.z
         );
 
         let vegetation_bounds = GroundVegetationBounds::new(min.x, min.z, max.x, max.z)
@@ -2920,8 +2971,8 @@ mod tests {
         let mut valley = None;
         for z_index in -16_i32..=16 {
             for x_index in -16_i32..=16 {
-                let x = f64::from(x_index) * 2_000.0 + 1_000.0;
-                let z = f64::from(z_index) * 2_000.0 + 1_000.0;
+                let x = START_X + (f64::from(x_index) * 2_000.0) + 1_000.0;
+                let z = START_Z + (f64::from(z_index) * 2_000.0) + 1_000.0;
                 let Some(river) = terrain.river_influence_at(x, z) else {
                     continue;
                 };
@@ -2932,7 +2983,9 @@ mod tests {
                     let length = segment_x.hypot(segment_z);
                     let perpendicular = DVec2::new(-segment_z / length, segment_x / length);
                     for side in [-1.0, 1.0] {
-                        let distance = river.channel_half_width_meters * 2.2;
+                        let distance = river.channel_half_width_meters
+                            + ((river.valley_half_width_meters - river.channel_half_width_meters)
+                                * 0.33);
                         let candidate_x = x + (perpendicular.x * distance * side);
                         let candidate_z = z + (perpendicular.y * distance * side);
                         if terrain

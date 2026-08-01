@@ -29,6 +29,9 @@ bathymetry remain negative, sea level is zero, and no patch is min-max scaled.
 Maps use one fixed 0–9,000 m land palette.
 
 - Macro: 1,024×1,024 cells, 500 m spacing, 512×512 km.
+- Meso smoke audit: 256×256 cells, 240 m spacing, 61.44×61.44 km. ETOPO's
+  native 15-arc-second resolution supports the 1–8 km comparisons here, but it
+  does not replace the intended 30 m local corpus.
 - Local: 512×512 cells, 30 m spacing, 15.36×15.36 km.
 - Intended manifests: 1,536/256/256 ETOPO train/validation/holdout patches and
   768/128/128 NASADEM patches, grouped into 30-degree geographic blocks with a
@@ -69,6 +72,11 @@ python3 -m tools.terrain_calibration select-request \
   --output data/terrain-calibration/calibration-request.json \
   --count 64 --edge 512
 ```
+
+Generated requests use the calibratable pre-hydrology `landform` sampler by
+default. Pass `--sampler composed` to `make-request` or `select-request` when
+auditing the final surface with non-fluvial erosion, gullies, and rivers. The
+composed sampler deliberately rejects offline landform overrides.
 
 Measure references, rank sensitivity, and optimize. The search uses common
 world seeds for every proposal, bounded diagonal CMA-style updates, progressive

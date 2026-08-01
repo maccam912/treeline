@@ -30,8 +30,9 @@ use treeline_geography::{
 };
 pub use treeline_hydrology::Lake;
 use treeline_hydrology::{
-    ActiveWaterError, ActiveWaterRegion, GullyNetwork, GullyTerrainInfluence, LakeNetwork,
-    RiverNetwork, RiverTerrainInfluence, WaterCell, WaterCellId, WaterCellKind, WaterConnection,
+    ActiveWaterError, ActiveWaterRegion, GullyNetwork, GullyTerrainInfluence,
+    LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION, LakeNetwork, RiverNetwork, RiverTerrainInfluence,
+    WaterCell, WaterCellId, WaterCellKind, WaterConnection,
 };
 use treeline_mesher::{Mesh, MeshingError, SurfaceGridSpec, surface_grid, transvoxel_chunk};
 use treeline_terrain::{
@@ -54,7 +55,7 @@ pub const LANDSCAPE_DIVERSITY_GENERATOR_VERSION: u32 = PROVINCE_GENERATOR_VERSIO
 pub const CALIBRATED_TERRAIN_GENERATOR_VERSION: u32 =
     treeline_geography::CALIBRATED_PROVINCE_GENERATOR_VERSION;
 /// Latest generator contract used for newly created prototype worlds.
-pub const CURRENT_GENERATOR_VERSION: u32 = CALIBRATED_TERRAIN_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION;
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
 const DOMAIN_SURFACE_WATER_CELL: u64 = 0x5355_5246_5741_5445;
@@ -2851,9 +2852,10 @@ mod tests {
     use treeline_terrain::RollingHills;
 
     #[test]
-    fn version_nineteen_is_the_calibrated_terrain_default() {
+    fn version_twenty_aligns_channels_over_the_calibrated_terrain_default() {
         assert_eq!(LANDSCAPE_DIVERSITY_GENERATOR_VERSION, 18);
-        assert_eq!(CURRENT_GENERATOR_VERSION, 19);
+        assert_eq!(CALIBRATED_TERRAIN_GENERATOR_VERSION, 19);
+        assert_eq!(CURRENT_GENERATOR_VERSION, 20);
 
         let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
         let terrain = GeneratedWorldTerrain::new(world);
@@ -2878,7 +2880,7 @@ mod tests {
 
     #[test]
     fn version_eighteen_composes_scarp_volume_with_the_final_shaped_surface() {
-        let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+        let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
         let terrain = GeneratedWorldTerrain::new(world);
         let mut candidate = None;
         'outer: for z in -64..=64 {
@@ -3590,11 +3592,17 @@ mod tests {
 
     #[test]
     fn snow_coverage_is_seasonal_and_independent_of_sampling_order() {
-        let world = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
+        const SURVEY_CENTER: [f64; 2] = [-41_088_000.0, 13_248_000.0];
+        let world = WorldIdentity::new(0x0aa7_6435_6961_e927, CURRENT_GENERATOR_VERSION, 0);
         let forward = GeneratedWorldTerrain::new(world);
         let reverse = GeneratedWorldTerrain::new(world);
         let mut positions = (-8_i32..=8).flat_map(|z| {
-            (-8_i32..=8).map(move |x| [f64::from(x) * 16_000.0, f64::from(z) * 16_000.0])
+            (-8_i32..=8).map(move |x| {
+                [
+                    SURVEY_CENTER[0] + (f64::from(x) * 16_000.0),
+                    SURVEY_CENTER[1] + (f64::from(z) * 16_000.0),
+                ]
+            })
         });
         let [x, z] = positions
             .find(|&[x, z]| {

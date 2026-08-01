@@ -1,0 +1,38 @@
+{
+  "name": "etopo-meso-v1",
+  "tier": "macro",
+  "source_product": "NOAA ETOPO 2022 v1 15-arc-second surface elevation",
+  "source_url_prefix": "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/15s/15s_surface_elev_gtif/",
+  "access_date": "2026-07-31",
+  "vertical_datum": "EGM2008 height",
+  "span_meters": 61440.0,
+  "edge": 256,
+  "sources": {
+    "ETOPO_2022_v1_15s_N00W075_surface.tif": {"sha256": "7999b66f36018b630a0b55db7b6d9edc2230e9833c1ae3223e541a4ad21269ec"},
+    "ETOPO_2022_v1_15s_N15E030_surface.tif": {"sha256": "100faf017c91e699173519dbbda30fccb1f82941eace98ddaca3f085e2697455"},
+    "ETOPO_2022_v1_15s_N30E015_surface.tif": {"sha256": "1ee225cb379eb7c95d446337004f413a2eb270a4682383afb6930270ec04515c"},
+    "ETOPO_2022_v1_15s_N45E075_surface.tif": {"sha256": "27cdc5ae5b0851f25de45902a86145c7f22ab49435a79cf1f6ae5f8fdb62be1c"},
+    "ETOPO_2022_v1_15s_N45E135_surface.tif": {"sha256": "3bc9f9dd2d6403b20e8d2b9e0142ef41c6d0c8ed2c79bdbac4531bb09862308e"},
+    "ETOPO_2022_v1_15s_N45W105_surface.tif": {"sha256": "dd4f28c910c29c296f6078bd514c630efff2f469a9812e741d439b9552d39364"},
+    "ETOPO_2022_v1_15s_N45W120_surface.tif": {"sha256": "806d5dbc40838e1b89c6afb7836fd62c92c47485bfc9a3aa453c3efa05b01a43"},
+    "ETOPO_2022_v1_15s_N60E000_surface.tif": {"sha256": "d69dbf93dcf2f11fb008a57223da41092921ea2f81ef6eeb1807d50609586557"},
+    "ETOPO_2022_v1_15s_N75W150_surface.tif": {"sha256": "71c138fc20b23b560781ffd6c88a673923b81e24c9a5525353c05bee6650c343"},
+    "ETOPO_2022_v1_15s_S15E120_surface.tif": {"sha256": "6b2c4a501d72c35252981a4c150a3325a94ce407166ac71193b25aac5ee244a2"},
+    "ETOPO_2022_v1_15s_S15W075_surface.tif": {"sha256": "1872b57145c8d18ebd44cf6d08de601bd34c067dc5a780038b0754398444eaf9"},
+    "ETOPO_2022_v1_15s_S30E165_surface.tif": {"sha256": "0fe78242ffa136c7d181e9ebe8dfc44617f589631c57388b155ee8137ca37ddb"}
+  },
+  "rasters": [
+    {"id": "train_southwest_us", "source": "ETOPO_2022_v1_15s_N45W120_surface.tif", "latitude": 39.0, "longitude": -112.5, "split": "train"},
+    {"id": "train_central_andes", "source": "ETOPO_2022_v1_15s_S15W075_surface.tif", "latitude": -25.0, "longitude": -67.0, "split": "train"},
+    {"id": "train_east_african_rift", "source": "ETOPO_2022_v1_15s_N15E030_surface.tif", "latitude": 7.0, "longitude": 36.0, "split": "train"},
+    {"id": "train_great_plains", "source": "ETOPO_2022_v1_15s_N45W105_surface.tif", "latitude": 39.0, "longitude": -99.0, "split": "train"},
+    {"id": "train_sahara", "source": "ETOPO_2022_v1_15s_N30E015_surface.tif", "latitude": 23.0, "longitude": 22.0, "split": "train"},
+    {"id": "train_alps", "source": "ETOPO_2022_v1_15s_N60E000_surface.tif", "latitude": 47.2, "longitude": 9.2, "split": "train"},
+    {"id": "validation_himalaya", "source": "ETOPO_2022_v1_15s_N45E075_surface.tif", "latitude": 33.0, "longitude": 82.0, "split": "validation"},
+    {"id": "validation_japan", "source": "ETOPO_2022_v1_15s_N45E135_surface.tif", "latitude": 36.0, "longitude": 140.0, "split": "validation"},
+    {"id": "validation_amazon", "source": "ETOPO_2022_v1_15s_N00W075_surface.tif", "latitude": -5.0, "longitude": -66.0, "split": "validation"},
+    {"id": "holdout_alaska", "source": "ETOPO_2022_v1_15s_N75W150_surface.tif", "latitude": 63.0, "longitude": -144.0, "split": "holdout"},
+    {"id": "holdout_new_zealand", "source": "ETOPO_2022_v1_15s_S30E165_surface.tif", "latitude": -42.5, "longitude": 172.0, "split": "holdout"},
+    {"id": "holdout_australia", "source": "ETOPO_2022_v1_15s_S15E120_surface.tif", "latitude": -21.0, "longitude": 128.0, "split": "holdout"}
+  ]
+}

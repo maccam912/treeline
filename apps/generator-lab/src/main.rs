@@ -2170,7 +2170,7 @@ mod tests {
     fn ground_vegetation_view_generates_varied_opaque_distribution_colors() {
         let mesh = generate_mesh(
             0x5eed,
-            [-80_000.0, -80_000.0],
+            [26_176_064.0, 39_040_064.0],
             64_000.0,
             64,
             64,

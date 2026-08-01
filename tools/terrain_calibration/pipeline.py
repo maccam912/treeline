@@ -31,6 +31,17 @@ LOCAL_SPAN_METERS = 15_360.0
 LOCAL_EDGE = 512
 LAND_HEIGHT_LIMIT_METERS = 9_000.0
 METRIC_QUANTILES = np.asarray([0.05, 0.25, 0.5, 0.75, 0.95])
+RELIEF_WINDOWS_METERS = (
+    500.0,
+    1_000.0,
+    2_000.0,
+    4_000.0,
+    8_000.0,
+    16_000.0,
+    32_000.0,
+    128_000.0,
+    512_000.0,
+)
 
 
 def _json_read(path: Path):
@@ -103,10 +114,11 @@ def _spectrum_metrics(height: np.ndarray) -> tuple[float, float]:
     return spectral_slope, anisotropy
 
 
-def _drainage_metrics(height: np.ndarray) -> tuple[float, float]:
+def _drainage_metrics(height: np.ndarray, land: np.ndarray) -> tuple[float, float]:
     # D8 accumulation on a decimated grid keeps measurement cheap and stable.
     stride = max(1, min(height.shape) // 192)
     grid = height[::stride, ::stride]
+    land = land[::stride, ::stride]
     rows, columns = grid.shape
     count = rows * columns
     flat = grid.ravel()
@@ -128,14 +140,19 @@ def _drainage_metrics(height: np.ndarray) -> tuple[float, float]:
                             best = flat[candidate]
                             target = candidate
             receiver[index] = target
-            sinks += target == index
+            sinks += land[row, column] and target == index
     accumulation = np.ones(count, dtype=np.float64)
     for index in np.argsort(flat)[::-1]:
         target = receiver[index]
         if target != index:
             accumulation[target] += accumulation[index]
-    threshold = max(8.0, float(np.quantile(accumulation, 0.98)))
-    return float(np.mean(accumulation >= threshold)), sinks / count
+    land_flat = land.ravel()
+    land_count = int(np.count_nonzero(land_flat))
+    if land_count == 0:
+        return 0.0, 0.0
+    threshold = max(8.0, float(np.quantile(accumulation[land_flat], 0.98)))
+    drainage_fraction = float(np.count_nonzero((accumulation >= threshold) & land_flat)) / land_count
+    return drainage_fraction, sinks / land_count
 
 
 def _largest_component_fraction(mask: np.ndarray) -> float:
@@ -201,7 +218,7 @@ def terrain_metrics(height: np.ndarray, spacing: float) -> dict[str, float]:
     ) * 0.25
     prominence = np.abs(height - local_mean) / spacing
     spectral_slope, anisotropy = _spectrum_metrics(land_height)
-    drainage_density, sink_fraction = _drainage_metrics(land_height)
+    drainage_density, sink_fraction = _drainage_metrics(land_height, land)
     connectivity = _surface_connectivity_metrics(land, slope >= 0.75)
     metrics: dict[str, float] = {
         "land_fraction": float(np.mean(land)),
@@ -228,8 +245,16 @@ def terrain_metrics(height: np.ndarray, spacing: float) -> dict[str, float]:
     ):
         for quantile, value in zip(METRIC_QUANTILES, np.quantile(values, METRIC_QUANTILES)):
             metrics[f"{prefix}_q{int(quantile * 100):02d}"] = float(value)
-    for window_meters in (500.0, 2_000.0, 8_000.0, 32_000.0, 128_000.0, 512_000.0):
-        relief = _block_relief(land_height, int(round(window_meters / spacing)))
+    for window_meters in RELIEF_WINDOWS_METERS:
+        cells = int(round(window_meters / spacing))
+        # A one-cell window is identically zero and therefore contains no
+        # relief evidence. Likewise, a window larger than the raster is only a
+        # clamped duplicate of whole-patch relief. Omitting unsupported scales
+        # lets mixed-resolution corpora compare only measurements that both
+        # sides actually resolve.
+        if cells < 2 or cells > min(height.shape):
+            continue
+        relief = _block_relief(land_height, cells)
         metrics[f"relief_{int(window_meters)}m_q50"] = float(np.quantile(relief, 0.5))
         metrics[f"relief_{int(window_meters)}m_q95"] = float(np.quantile(relief, 0.95))
     if np.std(land_values) > 1.0e-9 and np.std(slope_values) > 1.0e-9:
@@ -614,7 +639,12 @@ def make_generated_request(args) -> None:
         )
     _json_write(
         Path(args.output),
-        {"generator_version": args.generator_version, "parameters": {}, "rasters": rasters},
+        {
+            "generator_version": args.generator_version,
+            "sampler": getattr(args, "sampler", "landform"),
+            "parameters": {},
+            "rasters": rasters,
+        },
     )
 
 
@@ -657,6 +687,7 @@ def select_generated_request(args) -> None:
         Path(args.output),
         {
             "generator_version": request.get("generator_version", 18),
+            "sampler": args.sampler or request.get("sampler", "landform"),
             "parameters": request.get("parameters", {}),
             "rasters": selected_rasters,
             "selection": {
@@ -940,6 +971,12 @@ def main(argv: list[str] | None = None) -> None:
         "--world-seed", help="reuse one Rust-style seed such as 0x5eed for every position"
     )
     request.add_argument("--generator-version", type=int, default=19)
+    request.add_argument(
+        "--sampler",
+        choices=("landform", "composed"),
+        default="landform",
+        help="sample the calibratable landform or the final erosion/hydrology surface",
+    )
     request.add_argument("--span", type=float, default=MACRO_SPAN_METERS)
     request.add_argument("--edge", type=int, default=256)
     request.set_defaults(func=make_generated_request)
@@ -951,6 +988,7 @@ def main(argv: list[str] | None = None) -> None:
     select.add_argument("--count", type=int, required=True)
     select.add_argument("--minimum-land-fraction", type=float, default=0.15)
     select.add_argument("--edge", type=int)
+    select.add_argument("--sampler", choices=("landform", "composed"))
     select.set_defaults(func=select_generated_request)
 
     export = subparsers.add_parser("export", help="invoke the Rust batch sampler")

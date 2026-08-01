@@ -1803,10 +1803,10 @@ Already explored regions must not silently transform.
 Persistent region metadata can retain:
 
 ```text
-generated_with_version = 18
+generated_with_version = 19
 ```
 
-while newly explored regions use version 19.
+while newly explored regions use version 20.
 
 Alternatively major updates can explicitly require new worlds.
 
@@ -2422,8 +2422,9 @@ the world while those phases are in progress.
 
 ## Phase 5 — World Quality
 
-**Phase status: In progress; the version 18 generation-diversity reset and
-version 19 real-terrain calibration pass have landed, and the
+**Phase status: In progress; the version 18 generation-diversity reset,
+version 19 macro calibration, and version 20 meso-scale channel-conformance
+pass have landed, and the
 landscape-diversity acceptance pass is next. Deterministic audits and
 geography-aware presentation are usable foundations, but the current generator
 has not yet satisfied the complete landscape-diversity pillar**
@@ -2501,9 +2502,16 @@ Goal:
       28-patch, 14-source-tile smoke corpus and staged search now have a first
       multiscale candidate that improves train, validation, and holdout distance,
       and those constants are now the generator-version-19 default while version
-      18 remains reproducible. The larger spatially separated dataset,
-      drainage/range coherence, and blind and perspective review remain before
-      this item can be complete.
+      18 remains reproducible. A separate 12-patch, 61.44 km ETOPO audit now
+      resolves the 1–8 km band and samples the final composed terrain. It found
+      that version 19 macro-only river and gully centerlines cut false
+      cliff-class walls through calibrated terrain; version 20 fits shared
+      channel nodes to the non-fluvial local surface over each drainage graph
+      while preserving exact downhill ordering, bringing meso relief and slope
+      distributions substantially closer to the reference. A native 30 m local
+      corpus, the larger spatially
+      separated macro dataset, longer-range drainage/range coherence, and blind
+      perspective review remain before this item can be complete.
 - [x] Geography-aware terrain materials. Rendered terrain now blends explicit
       regional rock hardness and carbonate character, soil sand/clay and
       organic content, surface moisture, sediment deposition, rock and scree
@@ -2561,9 +2569,11 @@ data. This phase is complete only when their causes are visible in the rendered
 landscape.
 
 The generation-diversity reset intentionally changed pristine terrain in
-generator version 18, and the calibrated multiscale surface changes it again in
-generator version 19. Existing generator versions retain their previous terrain
-contract. Phase 6 below records version 17 fast-water terrain morphology.
+generator version 18, the calibrated multiscale surface changes it again in
+generator version 19, and version 20 aligns river and gully centerlines with
+that calibrated local surface. Existing generator versions retain their
+previous terrain contract. Phase 6 below records version 17 fast-water terrain
+morphology.
 
 ---
 

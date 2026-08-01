@@ -25,6 +25,22 @@ class TerrainCalibrationTests(unittest.TestCase):
             self.assertGreater(metrics["relief"], 0.0)
             self.assertGreater(metrics["mean_slope"], 0.0)
 
+    def test_relief_metrics_only_include_resolved_windows(self):
+        ramp = np.add.outer(np.arange(16), np.arange(16)).astype(np.float64)
+        metrics = pipeline.terrain_metrics(ramp, 2_000.0)
+        self.assertNotIn("relief_500m_q50", metrics)
+        self.assertNotIn("relief_1000m_q50", metrics)
+        self.assertNotIn("relief_2000m_q50", metrics)
+        self.assertIn("relief_4000m_q50", metrics)
+        self.assertIn("relief_8000m_q95", metrics)
+        self.assertNotIn("relief_128000m_q50", metrics)
+
+    def test_ocean_cells_are_not_counted_as_drainage_sinks(self):
+        profile = np.asarray([-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0])
+        coast = np.tile(profile, (8, 1))
+        metrics = pipeline.terrain_metrics(coast, 100.0)
+        self.assertEqual(metrics["sink_fraction"], 0.0)
+
     def test_distribution_distance_is_zero_for_identical_descriptors(self):
         item = {
             "id": "same",
@@ -139,6 +155,7 @@ class TerrainCalibrationTests(unittest.TestCase):
                 [raster["seed"] for raster in request["rasters"]],
                 ["0x5eed", "0x5eed", "0x5eed"],
             )
+            self.assertEqual(request["sampler"], "landform")
 
 
 if __name__ == "__main__":

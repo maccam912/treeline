@@ -17,14 +17,16 @@ Promotion is an explicit product decision: record the available quantitative and
 visual evidence, then keep iterating after promotion when perspective playtests
 or drainage review expose weaknesses.
 
-## Current checkpoint (2026-07-31)
+## Current checkpoint (2026-08-01)
 
 - Starting repository commit: `e553420` (`Add aerial exploration mode`).
 - Rust exposes 46 bounded named landform parameters. Generator version 19 uses
   the `optimization-smoke-v2-best.json` values by default; version 18 remains
   bit-for-bit reproducible for comparisons.
 - `world-viewer heightmap-batch` exports deterministic little-endian float32
-  heightmaps. `world-viewer terrain-parameters` exports the defaults.
+  heightmaps from either the calibratable landform or the final composed
+  erosion/hydrology surface. `world-viewer terrain-parameters` exports the
+  defaults.
 - The Python pipeline prepares real rasters, selects generated candidates,
   measures descriptors, ranks sensitivity, optimizes parameters, and builds
   labeled or blind galleries.
@@ -43,8 +45,22 @@ or drainage review expose weaknesses.
   straight diagonal artifact.
 - The ignored first gallery is
   `artifacts/terrain-calibration/initial-512km-comparison/index.html`.
-- The initial implementation passed formatting, strict Clippy, 284 Rust tests,
-  warning-free Rustdoc, Python unit tests, and `git diff --check`.
+- The checked-in `etopo-meso-v1` manifest reuses twelve geographically blocked
+  ETOPO sources at 61.44 km span and 240 m cells, resolving 1, 2, 4, and 8 km
+  relief. The comparison also exposed and fixed unsupported one-cell relief
+  metrics and ocean cells being counted as drainage sinks.
+- On matched nearly all-land samples, version 19's landform is plausible at
+  4–8 km, but the composed surface made all twelve generated patches
+  cliff-class because river and gully centerlines still followed macro-only
+  elevation. Version 20 fits shared channel nodes to the non-fluvial local
+  surface over the drainage DAG, then enforces exact downhill ordering. The
+  composed real-terrain distance improves from 1.31788 to 0.74582; mean/p95
+  slope move from 0.15136/0.67762 to 0.08963/0.24986 against
+  0.09844/0.24294 real, and 2 km p95 relief moves from 473.93 m to 366.10 m
+  against 371.79 m real. Generated morphology changes from 12/12 cliff-class
+  patches to 3 cliff, 7 mountain, 1 incised, and 1 rolling.
+- The version-20 checkpoint passes formatting, strict Clippy, 290 Rust tests,
+  warning-free Rustdoc, nine Python calibration tests, and `git diff --check`.
 
 ## Local toolchain state
 
@@ -152,3 +168,4 @@ Append entries here rather than replacing them.
 | parameterization-001 | Same 16 common generated samples and `etopo-smoke-v1` train | Added optional domain-warped fractal broad, mesoscale, and ridged relief; v18 amplitudes are zero. Manual steep continental mapping plus sign-constrained background trial | Train loss reached 0.66473 (v18 1.20784); mean relief 3,779.93 vs 3,918.79 m, p95 slope 0.13458 vs 0.13538, quiet 0.50101 vs 0.52205. Median elevation remains low (909.61 vs 2,183.78 m); validation/holdout are not representative enough and score 1.83004/1.24825 | Keep new controls offline-only. Expand/rebalance geographic splits and optimize sea-level contrast plus background controls; do not promote the manual values |
 | corpus-002 | `etopo-smoke-v2`: 12 train, 6 validation, 10 holdout patches at 256² across 14 non-overlapping source tiles | Added Great Plains, Sahara, Amazon, and Australian interior; each source tile belongs to exactly one split | Train/validation/holdout mean relief 2,855.67/2,496.29/3,043.01 m; p95 slope 0.09527/0.08541/0.12733; quiet 0.67239/0.70036/0.62857. Default losses 0.69559/0.69529/0.76919. Aggressive v1-tuned trial is rejected on all three | Use v2 for the next staged search. `parameters-smoke-v2.json` fixes tested local settings while varying 12 macro/multiscale controls; inactive defaults are now retained in every proposal |
 | optimize-002 | `etopo-smoke-v2` train; 16 common generated samples at 256² | Staged diagonal CMA-style, 12 active + 7 fixed parameters, 4 generations × 8 population, sigma 0.12, seed 24302 | Train 0.69559 → 0.57361 (-17.5%); validation 0.69529 → 0.60274 (-13.3%); holdout 0.76919 → 0.76422 (-0.6%). Candidate mean relief 3,003.07 m, p95 slope 0.09702, quiet 0.61670; exact values are `optimization-smoke-v2-best.json`, digest `1298090312dd94c1` | Promoted as the generator-version-19 default by product decision. Gallery is much richer than v18; perspective playtesting, drainage review, and longer coherent ranges remain the next iteration targets. |
+| meso-001 | `etopo-meso-v1`: 12 blocked ETOPO patches at 61.44 km × 240 m; 12 morphology-stratified generated land patches | Compare v19 landform, v19 composed terrain, and versioned shared-node channel alignment on the same generated samples | V19 landform distance 0.78483 showed reasonable 4–8 km relief, but v19 composed distance 1.31788 made 12/12 patches cliff-class. V20 composed distance is 0.74582; mean slope 0.08963 vs real 0.09844, p95 slope 0.24986 vs 0.24294, and 2 km p95 relief 366.10 m vs 371.79 m | Promote channel alignment as generator version 20. Keep ETOPO meso as a smoke audit; obtain 30 m NASADEM-class data before tuning sub-kilometer terrain. |

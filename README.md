@@ -102,8 +102,14 @@ geographical provinces now coordinate geology, landforms, climate controls,
 soil, hydrology, and broad overlapping ecosystem regimes. Version 17 and older
 world identities retain their previous generation paths. Generator version 19
 promotes the first ETOPO-calibrated multiscale terrain parameters and is the
-default for new prototype worlds; version 18 remains reproducible for direct
-comparison.
+calibrated landform base; version 18 remains reproducible for direct comparison.
+
+Generator version 20 aligns river and gully centerlines with the calibrated
+non-fluvial surface instead of the older macro-only elevation. Shared nodes are
+fit over each drainage graph before exact downhill ordering is enforced. This
+removes widespread false canyon walls at 1–8 km scales while preserving channel
+connectivity. It is the default for new prototype worlds; version 19 retains
+its original channel contract.
 
 ## Getting started
 

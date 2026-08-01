@@ -178,6 +178,20 @@ fn print_terrain_parameters() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+enum HeightmapSampler {
+    Landform(Box<CalibratedTerrain>),
+    Composed(GeneratedWorldTerrain),
+}
+
+impl HeightmapSampler {
+    fn height_at(&self, x: f64, z: f64) -> Option<f64> {
+        match self {
+            Self::Landform(terrain) => terrain.height_at(x, z),
+            Self::Composed(terrain) => terrain.surface_height(x, z),
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_heightmap_batch(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let mut request_path = None;
@@ -221,13 +235,22 @@ fn run_heightmap_batch(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     if generator_version < treeline_geography::PROVINCE_GENERATOR_VERSION {
         return Err("heightmap calibration requires generator version 18 or newer".into());
     }
+    let sampler_name = object.get("sampler").map_or(Ok("landform"), |value| {
+        value.as_str().ok_or("sampler must be a string")
+    })?;
+    if !matches!(sampler_name, "landform" | "composed") {
+        return Err(format!("unknown heightmap sampler: {sampler_name}").into());
+    }
 
     let mut parameters = LandformParameters::for_generator_version(generator_version);
     if let Some(overrides) = object.get("parameters") {
-        for (name, value) in overrides
+        let overrides = overrides
             .as_object()
-            .ok_or("parameters must be a JSON object")?
-        {
+            .ok_or("parameters must be a JSON object")?;
+        if sampler_name == "composed" && !overrides.is_empty() {
+            return Err("composed heightmaps do not accept offline landform overrides".into());
+        }
+        for (name, value) in overrides {
             let value = value
                 .as_f64()
                 .ok_or("landform parameter values must be numbers")?;
@@ -288,8 +311,14 @@ fn run_heightmap_batch(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         // Keep common random numbers across optimizer proposals. The parameter
         // fingerprint identifies the artifact but must not reseed its fields.
         let world = WorldIdentity::new(seed, generator_version, 0);
-        let terrain = CalibratedTerrain::new(world, parameters)
-            .ok_or("calibrated terrain rejected the request")?;
+        let terrain = match sampler_name {
+            "landform" => HeightmapSampler::Landform(Box::new(
+                CalibratedTerrain::new(world, parameters)
+                    .ok_or("calibrated terrain rejected the request")?,
+            )),
+            "composed" => HeightmapSampler::Composed(GeneratedWorldTerrain::new(world)),
+            _ => unreachable!("sampler name validated above"),
+        };
         let mut bytes = Vec::with_capacity(edge * edge * std::mem::size_of::<f32>());
         let mut minimum_height = f64::INFINITY;
         let mut maximum_height = f64::NEG_INFINITY;
@@ -299,7 +328,7 @@ fn run_heightmap_batch(arguments: &[String]) -> Result<(), Box<dyn Error>> {
                 let x = minimum_x + ((usize_as_f64(column) + 0.5) * spacing);
                 let height = terrain
                     .height_at(x, z)
-                    .ok_or("calibrated terrain sample unavailable")?;
+                    .ok_or("terrain sample unavailable")?;
                 if !height.is_finite() || height.abs() > f64::from(f32::MAX) {
                     return Err("calibrated terrain produced a height outside f32 range".into());
                 }
@@ -319,6 +348,7 @@ fn run_heightmap_batch(arguments: &[String]) -> Result<(), Box<dyn Error>> {
             "center_z_meters": center_z,
             "seed": format!("{seed:016x}"),
             "generator_version": generator_version,
+            "sampler": sampler_name,
             "parameter_fingerprint": format!("{parameter_fingerprint:016x}"),
             "minimum_height_meters": minimum_height,
             "maximum_height_meters": maximum_height,
@@ -3007,9 +3037,51 @@ mod tests {
             serde_json::from_slice(&fs::read(output_path.join("small.json")).expect("metadata"))
                 .expect("metadata JSON");
         assert_eq!(metadata["edge"], 4);
+        assert_eq!(metadata["sampler"], "landform");
         assert_eq!(
             metadata["format"],
             "little-endian-f32-row-major-south-to-north"
+        );
+        fs::remove_dir_all(root).expect("remove precise temporary test root");
+    }
+
+    #[test]
+    fn composed_heightmap_batch_rejects_offline_landform_overrides() {
+        let root = std::env::temp_dir().join(format!(
+            "treeline-composed-heightmap-test-{}",
+            std::process::id()
+        ));
+        let request_path = root.join("request.json");
+        fs::create_dir_all(&root).expect("temporary root");
+        fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "generator_version": 19,
+                "sampler": "composed",
+                "parameters": {"rolling_regional_relief_meters": 180.0},
+                "rasters": [{
+                    "id": "small",
+                    "seed": "0x5eed",
+                    "center_x_meters": 0.0,
+                    "center_z_meters": 0.0,
+                    "span_meters": 1000.0,
+                    "edge": 2
+                }]
+            }))
+            .expect("request JSON"),
+        )
+        .expect("request file");
+        let error = run_heightmap_batch(&[
+            "--request".to_owned(),
+            request_path.display().to_string(),
+            "--output".to_owned(),
+            root.join("output").display().to_string(),
+        ])
+        .expect_err("overrides must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("do not accept offline landform overrides")
         );
         fs::remove_dir_all(root).expect("remove precise temporary test root");
     }
