@@ -15,6 +15,7 @@ const DOMAIN_PROVINCE_LANDSCAPE_RELIEF: u64 = 0x5052_4f56_4c41_4e44;
 const DOMAIN_PROVINCE_RUGGED_RELIEF: u64 = 0x5052_4f56_5255_4747;
 const DOMAIN_PROVINCE_GLACIAL_RELIEF: u64 = 0x5052_4f56_474c_4143;
 const DOMAIN_PROVINCE_DUNE_RIPPLES: u64 = 0x5052_4f56_4455_4e45;
+const DOMAIN_CALIBRATED_BACKGROUND: u64 = 0x4341_4c49_4252_4744;
 const EROSION_SLOPE_SAMPLE_RADIUS_METERS: f64 = 256.0;
 
 /// Broad material channels used before renderer-specific material expansion.
@@ -155,6 +156,11 @@ pub struct WildernessTerrain {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LandformParameters {
     pub province: ProvinceParameters,
+    pub broad_wavelength_meters: f64,
+    pub broad_relief_meters: f64,
+    pub mesoscale_wavelength_meters: f64,
+    pub mesoscale_relief_meters: f64,
+    pub ridged_relief_meters: f64,
     pub regional_wavelength_meters: f64,
     pub landscape_wavelength_meters: f64,
     pub rugged_wavelength_meters: f64,
@@ -180,6 +186,11 @@ pub struct LandformParameters {
 impl LandformParameters {
     pub const VERSION_18: Self = Self {
         province: ProvinceParameters::VERSION_18,
+        broad_wavelength_meters: 128_000.0,
+        broad_relief_meters: 0.0,
+        mesoscale_wavelength_meters: 32_000.0,
+        mesoscale_relief_meters: 0.0,
+        ridged_relief_meters: 0.0,
         regional_wavelength_meters: 9_600.0,
         landscape_wavelength_meters: 2_400.0,
         rugged_wavelength_meters: 1_100.0,
@@ -205,12 +216,21 @@ impl LandformParameters {
     pub fn is_valid(self) -> bool {
         self.province.is_valid()
             && [
+                self.broad_wavelength_meters,
+                self.mesoscale_wavelength_meters,
                 self.regional_wavelength_meters,
                 self.landscape_wavelength_meters,
                 self.rugged_wavelength_meters,
                 self.glacial_wavelength_meters,
                 self.ground_wavelength_meters,
                 self.dune_wavelength_meters,
+            ]
+            .into_iter()
+            .all(|value| value.is_finite() && value > 0.0)
+            && [
+                self.broad_relief_meters,
+                self.mesoscale_relief_meters,
+                self.ridged_relief_meters,
                 self.plain_regional_relief_meters,
                 self.plain_landscape_relief_meters,
                 self.rolling_regional_relief_meters,
@@ -227,7 +247,7 @@ impl LandformParameters {
                 self.ground_detail_relief_meters,
             ]
             .into_iter()
-            .all(|value| value.is_finite() && value > 0.0)
+            .all(|value| value.is_finite() && value >= 0.0)
     }
 
     /// Applies one flat, stable calibration key used by the batch CLI.
@@ -304,6 +324,11 @@ impl LandformParameters {
             "province.dune_aridity_amplitude_meters" => {
                 candidate.province.dune_aridity_amplitude_meters = value;
             }
+            "broad_wavelength_meters" => candidate.broad_wavelength_meters = value,
+            "broad_relief_meters" => candidate.broad_relief_meters = value,
+            "mesoscale_wavelength_meters" => candidate.mesoscale_wavelength_meters = value,
+            "mesoscale_relief_meters" => candidate.mesoscale_relief_meters = value,
+            "ridged_relief_meters" => candidate.ridged_relief_meters = value,
             "regional_wavelength_meters" => candidate.regional_wavelength_meters = value,
             "landscape_wavelength_meters" => candidate.landscape_wavelength_meters = value,
             "rugged_wavelength_meters" => candidate.rugged_wavelength_meters = value,
@@ -429,6 +454,14 @@ impl LandformParameters {
                 "province.dune_aridity_amplitude_meters",
                 self.province.dune_aridity_amplitude_meters,
             ),
+            ("broad_wavelength_meters", self.broad_wavelength_meters),
+            ("broad_relief_meters", self.broad_relief_meters),
+            (
+                "mesoscale_wavelength_meters",
+                self.mesoscale_wavelength_meters,
+            ),
+            ("mesoscale_relief_meters", self.mesoscale_relief_meters),
+            ("ridged_relief_meters", self.ridged_relief_meters),
             (
                 "regional_wavelength_meters",
                 self.regional_wavelength_meters,
@@ -530,6 +563,7 @@ impl SurfaceField for CalibratedTerrain {
 pub struct LandformSurfaceSample {
     pub macro_sample: MacroTerrainSample,
     pub province: ProvinceSample,
+    pub background_relief_meters: f64,
     pub plain_relief_meters: f64,
     pub rolling_upland_relief_meters: f64,
     pub plateau_terrace_meters: f64,
@@ -648,6 +682,21 @@ impl WildernessTerrain {
             DOMAIN_WILDERNESS_DETAIL.wrapping_add(19),
         )?;
 
+        let background_relief_meters = if parameters.broad_relief_meters == 0.0
+            && parameters.mesoscale_relief_meters == 0.0
+            && parameters.ridged_relief_meters == 0.0
+        {
+            0.0
+        } else {
+            let unconstrained = background_relief(self.world, x, z, &province, &parameters)?;
+            let topology_margin = macro_sample.elevation_meters.abs() * 0.75;
+            if macro_sample.elevation_meters >= 0.0 {
+                unconstrained.max(-topology_margin)
+            } else {
+                unconstrained.min(topology_margin)
+            }
+        };
+
         let quiet_ground = (1.0 - province.plains * 0.84)
             * (1.0 - province.closed_basin * 0.76)
             * (1.0 - province.dune * 0.58);
@@ -712,6 +761,7 @@ impl WildernessTerrain {
             * quiet_ground
             * (0.38 + (province.exposure * 0.92));
         let surface_height_meters = macro_sample.elevation_meters
+            + background_relief_meters
             + plain_relief_meters
             + rolling_upland_relief_meters
             + plateau_terrace_meters
@@ -724,6 +774,7 @@ impl WildernessTerrain {
         Some(LandformSurfaceSample {
             macro_sample,
             province,
+            background_relief_meters,
             plain_relief_meters,
             rolling_upland_relief_meters,
             plateau_terrace_meters,
@@ -939,6 +990,76 @@ impl SurfaceField for WildernessTerrain {
     fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
         self.height_at(x, z)
     }
+}
+
+fn background_relief(
+    world: WorldIdentity,
+    x: f64,
+    z: f64,
+    province: &ProvinceSample,
+    parameters: &LandformParameters,
+) -> Option<f64> {
+    let warp_wavelength = parameters.broad_wavelength_meters * 2.4;
+    let warp_x = (height_layer(world, x, z, warp_wavelength, DOMAIN_CALIBRATED_BACKGROUND)? - 0.5)
+        * parameters.broad_wavelength_meters
+        * 0.72;
+    let warp_z = (height_layer(
+        world,
+        x,
+        z,
+        warp_wavelength,
+        DOMAIN_CALIBRATED_BACKGROUND.wrapping_add(1),
+    )? - 0.5)
+        * parameters.broad_wavelength_meters
+        * 0.72;
+    let warped_x = x + warp_x;
+    let warped_z = z + warp_z;
+    let broad = fractal_height_layer(
+        world,
+        warped_x,
+        warped_z,
+        parameters.broad_wavelength_meters,
+        DOMAIN_CALIBRATED_BACKGROUND.wrapping_add(2),
+    )?;
+    let mesoscale = fractal_height_layer(
+        world,
+        warped_x,
+        warped_z,
+        parameters.mesoscale_wavelength_meters,
+        DOMAIN_CALIBRATED_BACKGROUND.wrapping_add(8),
+    )?;
+    let ridge = 1.0 - ((mesoscale * 2.0) - 1.0).abs();
+    let shaped_ridge = smoothstep(ridge);
+    let activity = (0.18
+        + province.rolling_uplands * 0.38
+        + province.mountain * 0.42
+        + province.plateau * 0.18)
+        .clamp(0.0, 1.0)
+        * province.land_fraction;
+    let ridge_activity = (0.12
+        + province.uplift * 0.48
+        + province.mountain * 0.40
+        + province.rolling_uplands * 0.18)
+        .clamp(0.0, 1.0)
+        * province.land_fraction;
+    Some(
+        ((broad - 0.5) * 2.0 * parameters.broad_relief_meters * activity)
+            + ((mesoscale - 0.5) * 2.0 * parameters.mesoscale_relief_meters * activity)
+            + ((shaped_ridge - 0.58) * parameters.ridged_relief_meters * ridge_activity),
+    )
+}
+
+fn fractal_height_layer(
+    world: WorldIdentity,
+    x: f64,
+    z: f64,
+    wavelength: f64,
+    domain: u64,
+) -> Option<f64> {
+    let broad = height_layer(world, x, z, wavelength, domain)?;
+    let middle = height_layer(world, x, z, wavelength * 0.5, domain.wrapping_add(1))?;
+    let fine = height_layer(world, x, z, wavelength * 0.25, domain.wrapping_add(2))?;
+    Some((broad + middle * 0.5 + fine * 0.25) / 1.75)
 }
 
 fn height_layer(world: WorldIdentity, x: f64, z: f64, cell_size: f64, domain: u64) -> Option<f64> {
@@ -1291,16 +1412,8 @@ mod tests {
     fn named_calibration_parameters_are_validated_and_affect_height() {
         let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
         let mut parameters = LandformParameters::VERSION_18;
-        assert!(
-            parameters
-                .set_named("rugged_uplift_relief_meters", 800.0)
-                .is_ok()
-        );
-        assert!(
-            parameters
-                .set_named("rugged_uplift_relief_meters", -1.0)
-                .is_err()
-        );
+        assert!(parameters.set_named("broad_relief_meters", 800.0).is_ok());
+        assert!(parameters.set_named("broad_relief_meters", -1.0).is_err());
         assert!(parameters.set_named("not_a_parameter", 1.0).is_err());
         let original = CalibratedTerrain::new(world, LandformParameters::VERSION_18)
             .expect("original")
