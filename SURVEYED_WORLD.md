@@ -73,11 +73,14 @@ the DEM. Reproject the polygons into the terrain CRS, clip them to the tile,
 and rasterize stable feature identifiers. The current contract uses four-meter
 cells.
 
-Assign each lake a representative level from the median bare-earth elevation
-inside its polygon, quantized to decimeters. Store the feature inventory and
-method in metadata. Runtime water is a horizontal sheet over that mapped
-footprint. This is not bathymetry: the implementation guarantees visible water
-and a stable shoreline mask but does not claim measured lake-bottom depth.
+Assign each lake a representative source level from the median bare-earth
+elevation inside its polygon, quantized to decimeters. Store the feature
+inventory and method in metadata. Runtime water is a horizontal sheet over that
+mapped footprint. The current bundle applies a versioned one-meter runtime
+offset above the source-derived level so the sheet meets the surrounding shore
+slope; metadata records that offset separately from the source value. This is
+not bathymetry: the implementation guarantees visible water and a stable
+shoreline mask but does not claim measured lake-bottom depth.
 
 Rivers and dynamic lake simulation are not inferred for a surveyed bundle
 until authoritative linework, flow direction, and elevation conformance have a

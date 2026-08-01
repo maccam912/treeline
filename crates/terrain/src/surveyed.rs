@@ -13,12 +13,14 @@ const CANOPY_MAGIC: &[u8; 8] = b"TLCAN01\0";
 const HEADER_BYTES: usize = 40;
 const WATER_HEADER_BYTES: usize = 42;
 const QUANTIZATION_METERS: f64 = 0.1;
+/// Raises mapped lake sheets into the surrounding shore slope.
+const SURVEYED_WATER_LEVEL_OFFSET_METERS: f64 = 1.0;
 
 /// Versioned settings identity selecting the default surveyed-world bundle.
 ///
 /// Any incompatible change to the embedded DEM, water, color, or canopy
 /// contract must receive a new value so saved worlds cannot silently change.
-pub const DEFAULT_SURVEYED_SETTINGS_HASH: u64 = 0x5355_5256_4559_0001;
+pub const DEFAULT_SURVEYED_SETTINGS_HASH: u64 = 0x5355_5256_4559_0002;
 /// Edge length of the default surveyed tile in local world meters.
 pub const DEFAULT_SURVEYED_TILE_EDGE_METERS: f64 = 10_000.0;
 /// Requested WGS84 position expressed in local world meters east of the tile edge.
@@ -159,7 +161,10 @@ pub fn michigan_surveyed_lake_at(x: f64, z: f64) -> Option<(u8, f64)> {
         return None;
     }
     let surface = water.surfaces_decimeters[usize::from(lake_id - 1)];
-    Some((lake_id, f64::from(surface) * QUANTIZATION_METERS))
+    Some((
+        lake_id,
+        (f64::from(surface) * QUANTIZATION_METERS) + SURVEYED_WATER_LEVEL_OFFSET_METERS,
+    ))
 }
 
 /// Samples local lidar-derived canopy cover and height in world meters.
@@ -482,9 +487,9 @@ mod tests {
     fn embedded_tile_decodes_with_expected_contract() {
         assert!(
             include_str!("../assets/michigan_tile.json")
-                .contains("\"settings_identity\": \"0x5355525645590001\"")
+                .contains("\"settings_identity\": \"0x5355525645590002\"")
         );
-        assert_eq!(DEFAULT_SURVEYED_SETTINGS_HASH, 0x5355_5256_4559_0001);
+        assert_eq!(DEFAULT_SURVEYED_SETTINGS_HASH, 0x5355_5256_4559_0002);
         let tile = decode_embedded_tile();
         assert_eq!((tile.width, tile.height), (5_000, 5_000));
         assert_eq!(tile.spacing_meters.to_bits(), 2.0_f64.to_bits());
@@ -531,7 +536,7 @@ mod tests {
 
         let upper_holmes_lake = michigan_surveyed_lake_at(7_364.0, 6_894.0).unwrap();
         assert_eq!(upper_holmes_lake.0, 19);
-        assert!((upper_holmes_lake.1 - 415.5).abs() < f64::EPSILON);
+        assert!((upper_holmes_lake.1 - 416.5).abs() < f64::EPSILON);
         assert!(
             michigan_surveyed_lake_at(DEFAULT_SURVEYED_START_X, DEFAULT_SURVEYED_START_Z).is_none()
         );
