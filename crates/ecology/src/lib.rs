@@ -878,6 +878,24 @@ impl ProceduralTrees {
     /// non-basic floating-point operations on the pure-Rust `libm`
     /// implementation across native and WebAssembly targets.
     pub fn trees_in(self, bounds: TreeBounds) -> Option<Vec<ProceduralTree>> {
+        self.trees_in_with_stand_adjustment(bounds, |_x, _z, stand| stand)
+    }
+
+    /// Generates trees while allowing a caller-owned stand field to replace
+    /// local cover, density, and height observations at each placement cell.
+    ///
+    /// Species composition, individual architecture, soil response, and stable
+    /// placement IDs still come from the versioned ecology generator. This is
+    /// intended for surveyed landscapes whose measured stand structure should
+    /// drive the otherwise procedural individuals.
+    pub fn trees_in_with_stand_adjustment<F>(
+        self,
+        bounds: TreeBounds,
+        mut adjust_stand: F,
+    ) -> Option<Vec<ProceduralTree>>
+    where
+        F: FnMut(f64, f64, ForestSample) -> ForestSample,
+    {
         if self.world.generator_version < TREE_GENERATOR_VERSION {
             return None;
         }
@@ -930,8 +948,9 @@ impl ProceduralTrees {
                     environments.insert(environment_key, environment);
                     environment
                 };
+                let local_forest = adjust_stand(center_x, center_z, environment.forest);
                 let cell_key = cell.generation_key(self.world, DOMAIN_TREE_INDIVIDUALS);
-                let expected_stems = environment.forest.tree_density_per_hectare
+                let expected_stems = local_forest.tree_density_per_hectare
                     * TREE_PLACEMENT_CELL_EDGE_METERS
                     * TREE_PLACEMENT_CELL_EDGE_METERS
                     / 10_000.0;
@@ -950,7 +969,7 @@ impl ProceduralTrees {
                             id,
                             x,
                             z,
-                            environment.forest,
+                            local_forest,
                             environment.soil,
                             environment.prevailing_wind,
                         ));
@@ -1686,6 +1705,44 @@ mod tests {
                     < 1.0e-12
         }));
         assert!(first.windows(2).all(|pair| pair[0].id <= pair[1].id));
+    }
+
+    #[test]
+    fn measured_stand_adjustment_controls_local_tree_density() {
+        let generator = ProceduralTrees::new(TREE_WORLD);
+        let bounds = TreeBounds::new(0.0, 0.0, 96.0, 96.0).expect("valid bounds");
+        let empty = generator
+            .trees_in_with_stand_adjustment(bounds, |_x, _z, mut stand| {
+                stand.canopy_cover_fraction = 0.0;
+                stand.tree_density_per_hectare = 0.0;
+                stand
+            })
+            .expect("adjusted tree generation");
+        let dense = generator
+            .trees_in_with_stand_adjustment(bounds, |_x, _z, mut stand| {
+                stand.canopy_cover_fraction = 0.92;
+                stand.tree_density_per_hectare = 1_600.0;
+                stand.mean_canopy_height_meters = 22.0;
+                stand
+            })
+            .expect("same adjusted tree generation");
+
+        assert!(empty.is_empty());
+        assert!(
+            dense.len() >= 120,
+            "dense measured stands retain many stems"
+        );
+        assert_eq!(
+            dense,
+            generator
+                .trees_in_with_stand_adjustment(bounds, |_x, _z, mut stand| {
+                    stand.canopy_cover_fraction = 0.92;
+                    stand.tree_density_per_hectare = 1_600.0;
+                    stand.mean_canopy_height_meters = 22.0;
+                    stand
+                })
+                .expect("deterministic adjusted tree generation")
+        );
     }
 
     #[test]

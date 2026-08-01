@@ -1,0 +1,448 @@
+{
+  "schema_version": 1,
+  "settings_identity": "0x5355525645590001",
+  "artifact_sha256": "731e484fd076332ec4796a0f748e5c40b2c97abb9eb18c53caa0b1c63f8b44d8",
+  "artifact_size_bytes": 25005040,
+  "center_wgs84": [
+    46.16084629042455,
+    -88.3374704874157
+  ],
+  "horizontal_crs": "EPSG:26916 (NAD83 / UTM zone 16N)",
+  "vertical_datum": "NAVD88",
+  "bounds_utm_meters": [
+    390000.0,
+    5110000.0,
+    400000.0,
+    5120000.0
+  ],
+  "spacing_meters": 2.0,
+  "quantization_meters": 0.1,
+  "width": 5000,
+  "height": 5000,
+  "minimum_elevation_meters": 406.07049560546875,
+  "maximum_elevation_meters": 487.4372863769531,
+  "source_title": "USGS 1 Meter 16 x39y512 MI_FEMA_2019_C19",
+  "source_url": "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1m/Projects/MI_FEMA_2019_C19/TIFF/USGS_1M_16_x39y512_MI_FEMA_2019_C19.tif",
+  "source_publication_date": "2023-01-14",
+  "source_last_updated": "2024-02-07",
+  "source_size_bytes": 311082711,
+  "source_rights": "Public domain (USGS 3DEP)",
+  "resampling": "2 meter average from the 1 meter bare-earth DEM",
+  "color": {
+    "artifact_sha256": "c6c7f0929df2fff76c0d07bdf21d1ddf07eb39f48a8fdac551a6a8978c2fa347",
+    "artifact_size_bytes": 3125040,
+    "spacing_meters": 8.0,
+    "encoding": "RGB565",
+    "source": "USGS NAIP Imagery ImageServer, NaturalColor",
+    "source_url": "https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPImagery/ImageServer",
+    "source_rights": "Public domain (USGS/USDA)"
+  },
+  "water": {
+    "artifact_sha256": "5105d36d9babe8c57531669519aadec3daa33c98860037e9f2e596062ea569f1",
+    "artifact_size_bytes": 36715,
+    "spacing_meters": 4.0,
+    "source": "USGS National Hydrography Dataset, Waterbody - Large Scale",
+    "source_url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",
+    "source_rights": "Open and non-proprietary (USGS)",
+    "surface_method": "median bare-earth DEM elevation inside each polygon",
+    "features": [
+      {
+        "id": 19,
+        "permanent_identifier": "111860751",
+        "name": "Upper Holmes Lake",
+        "area_square_kilometers": 0.263,
+        "centroid_local_meters": [
+          7363.922708017053,
+          3106.168852909468
+        ],
+        "surface_elevation_meters": 415.5,
+        "distance_from_spawn_meters": 702.401384343837
+      },
+      {
+        "id": 6,
+        "permanent_identifier": "110736519",
+        "name": "Unnamed lake 6",
+        "area_square_kilometers": 0.017,
+        "centroid_local_meters": [
+          8514.728620370559,
+          3309.469001849182
+        ],
+        "surface_elevation_meters": 421.5,
+        "distance_from_spawn_meters": 1852.0084134497113
+      },
+      {
+        "id": 17,
+        "permanent_identifier": "111860839",
+        "name": "Lower Holmes Lake",
+        "area_square_kilometers": 0.187,
+        "centroid_local_meters": [
+          6193.94236946851,
+          861.227258852683
+        ],
+        "surface_elevation_meters": 410.5,
+        "distance_from_spawn_meters": 2002.280291200382
+      },
+      {
+        "id": 10,
+        "permanent_identifier": "111860827",
+        "name": "Unnamed lake 10",
+        "area_square_kilometers": 0.044000000000000004,
+        "centroid_local_meters": [
+          5284.433218022052,
+          1298.155022974126
+        ],
+        "surface_elevation_meters": 413.90000000000003,
+        "distance_from_spawn_meters": 2081.3731356099647
+      },
+      {
+        "id": 13,
+        "permanent_identifier": "110736503",
+        "name": "Unnamed lake 13",
+        "area_square_kilometers": 0.01,
+        "centroid_local_meters": [
+          9116.643458912149,
+          3770.757767846808
+        ],
+        "surface_elevation_meters": 419.40000000000003,
+        "distance_from_spawn_meters": 2573.9558327727887
+      },
+      {
+        "id": 29,
+        "permanent_identifier": "111860693",
+        "name": "Unnamed lake 29",
+        "area_square_kilometers": 0.004,
+        "centroid_local_meters": [
+          5607.298590445658,
+          5341.602909096517
+        ],
+        "surface_elevation_meters": 426.1,
+        "distance_from_spawn_meters": 2792.286399927054
+      },
+      {
+        "id": 3,
+        "permanent_identifier": "110736499",
+        "name": "Unnamed lake 3",
+        "area_square_kilometers": 0.045000000000000005,
+        "centroid_local_meters": [
+          9436.577708051947,
+          3778.4226579144597
+        ],
+        "surface_elevation_meters": 420.40000000000003,
+        "distance_from_spawn_meters": 2874.8955757231074
+      },
+      {
+        "id": 7,
+        "permanent_identifier": "111860841",
+        "name": "Shoe Pac Lake",
+        "area_square_kilometers": 0.026000000000000002,
+        "centroid_local_meters": [
+          3737.0387627794407,
+          1278.5312939630821
+        ],
+        "surface_elevation_meters": 413.8,
+        "distance_from_spawn_meters": 3358.9498882853422
+      },
+      {
+        "id": 8,
+        "permanent_identifier": "110736421",
+        "name": "Lost Lake",
+        "area_square_kilometers": 0.17500000000000002,
+        "centroid_local_meters": [
+          6900.962011967495,
+          6329.6365228667855
+        ],
+        "surface_elevation_meters": 420.6,
+        "distance_from_spawn_meters": 3545.1059226898074
+      },
+      {
+        "id": 23,
+        "permanent_identifier": "111860853",
+        "name": "Unnamed lake 23",
+        "area_square_kilometers": 0.003,
+        "centroid_local_meters": [
+          3469.426260043634,
+          997.1884203571826
+        ],
+        "surface_elevation_meters": 414.20000000000005,
+        "distance_from_spawn_meters": 3726.7673354973954
+      },
+      {
+        "id": 28,
+        "permanent_identifier": "111860885",
+        "name": "Unnamed lake 28",
+        "area_square_kilometers": 0.008,
+        "centroid_local_meters": [
+          4168.342071304389,
+          -57.81593549717218
+        ],
+        "surface_elevation_meters": 412.5,
+        "distance_from_spawn_meters": 3834.222753816152
+      },
+      {
+        "id": 25,
+        "permanent_identifier": "110736453",
+        "name": "Unnamed lake 25",
+        "area_square_kilometers": 0.005,
+        "centroid_local_meters": [
+          9591.523357406142,
+          5835.551503015682
+        ],
+        "surface_elevation_meters": 418.70000000000005,
+        "distance_from_spawn_meters": 4175.02573600729
+      },
+      {
+        "id": 31,
+        "permanent_identifier": "111860805",
+        "name": "Swan Lake",
+        "area_square_kilometers": 0.646,
+        "centroid_local_meters": [
+          2259.4991067401133,
+          3116.6400617035106
+        ],
+        "surface_elevation_meters": 426.3,
+        "distance_from_spawn_meters": 4490.085550114247
+      },
+      {
+        "id": 15,
+        "permanent_identifier": "110736365",
+        "name": "Unnamed lake 15",
+        "area_square_kilometers": 0.004,
+        "centroid_local_meters": [
+          9142.393685187737,
+          6924.446220320649
+        ],
+        "surface_elevation_meters": 422.8,
+        "distance_from_spawn_meters": 4784.4465565272285
+      },
+      {
+        "id": 2,
+        "permanent_identifier": "110736341",
+        "name": "Unnamed lake 2",
+        "area_square_kilometers": 0.006,
+        "centroid_local_meters": [
+          6292.369097507268,
+          7664.240508871153
+        ],
+        "surface_elevation_meters": 424.40000000000003,
+        "distance_from_spawn_meters": 4896.224165035012
+      },
+      {
+        "id": 14,
+        "permanent_identifier": "110736311",
+        "name": "Light Lake",
+        "area_square_kilometers": 0.546,
+        "centroid_local_meters": [
+          7320.220118871599,
+          7785.151599216275
+        ],
+        "surface_elevation_meters": 419.3,
+        "distance_from_spawn_meters": 5030.708938963626
+      },
+      {
+        "id": 9,
+        "permanent_identifier": "111860833",
+        "name": "Unnamed lake 9",
+        "area_square_kilometers": 0.001,
+        "centroid_local_meters": [
+          1569.6115753589547,
+          1703.6740729389712
+        ],
+        "surface_elevation_meters": 423.20000000000005,
+        "distance_from_spawn_meters": 5280.543126590117
+      },
+      {
+        "id": 12,
+        "permanent_identifier": "111860795",
+        "name": "Unnamed lake 12",
+        "area_square_kilometers": 0.002,
+        "centroid_local_meters": [
+          1419.6123229815275,
+          2777.9375851433724
+        ],
+        "surface_elevation_meters": 434.90000000000003,
+        "distance_from_spawn_meters": 5317.961177873531
+      },
+      {
+        "id": 18,
+        "permanent_identifier": "111860687",
+        "name": "Unnamed lake 18",
+        "area_square_kilometers": 0.006,
+        "centroid_local_meters": [
+          1880.16820376931,
+          6238.33758748509
+        ],
+        "surface_elevation_meters": 445.70000000000005,
+        "distance_from_spawn_meters": 5957.940897385015
+      },
+      {
+        "id": 5,
+        "permanent_identifier": "111860721",
+        "name": "Camp Lake",
+        "area_square_kilometers": 0.049,
+        "centroid_local_meters": [
+          869.3230109150172,
+          4306.491198458709
+        ],
+        "surface_elevation_meters": 441.40000000000003,
+        "distance_from_spawn_meters": 6061.448279858841
+      },
+      {
+        "id": 26,
+        "permanent_identifier": "111860715",
+        "name": "Unnamed lake 26",
+        "area_square_kilometers": 0.001,
+        "centroid_local_meters": [
+          937.9524057815433,
+          4645.0087881861255
+        ],
+        "surface_elevation_meters": 441.8,
+        "distance_from_spawn_meters": 6089.569925318511
+      },
+      {
+        "id": 11,
+        "permanent_identifier": "110736305",
+        "name": "Liver Lake",
+        "area_square_kilometers": 0.462,
+        "centroid_local_meters": [
+          8704.073487860907,
+          8570.22473718971
+        ],
+        "surface_elevation_meters": 419.3,
+        "distance_from_spawn_meters": 6107.195429903149
+      },
+      {
+        "id": 24,
+        "permanent_identifier": "110736295",
+        "name": "Unnamed lake 24",
+        "area_square_kilometers": 0.012,
+        "centroid_local_meters": [
+          7971.089086885855,
+          8810.070915403776
+        ],
+        "surface_elevation_meters": 420.8,
+        "distance_from_spawn_meters": 6146.8147739792
+      },
+      {
+        "id": 27,
+        "permanent_identifier": "111860719",
+        "name": "Unnamed lake 27",
+        "area_square_kilometers": 0.001,
+        "centroid_local_meters": [
+          734.4394065027591,
+          4485.140864403918
+        ],
+        "surface_elevation_meters": 441.40000000000003,
+        "distance_from_spawn_meters": 6238.330923016748
+      },
+      {
+        "id": 22,
+        "permanent_identifier": "111860743",
+        "name": "Unnamed lake 22",
+        "area_square_kilometers": 0.006,
+        "centroid_local_meters": [
+          349.91077162272995,
+          4121.930676463991
+        ],
+        "surface_elevation_meters": 424.6,
+        "distance_from_spawn_meters": 6525.3874756872865
+      },
+      {
+        "id": 32,
+        "permanent_identifier": "110736271",
+        "name": "Unnamed lake 32",
+        "area_square_kilometers": 0.002,
+        "centroid_local_meters": [
+          9068.756852183607,
+          9003.770272551104
+        ],
+        "surface_elevation_meters": 419.70000000000005,
+        "distance_from_spawn_meters": 6638.264500255359
+      },
+      {
+        "id": 21,
+        "permanent_identifier": "111860685",
+        "name": "Unnamed lake 21",
+        "area_square_kilometers": 0.139,
+        "centroid_local_meters": [
+          879.8181628484745,
+          6339.975349740125
+        ],
+        "surface_elevation_meters": 428.6,
+        "distance_from_spawn_meters": 6850.371502261198
+      },
+      {
+        "id": 1,
+        "permanent_identifier": "110736255",
+        "name": "Unnamed lake 1",
+        "area_square_kilometers": 0.004,
+        "centroid_local_meters": [
+          8245.384659738396,
+          9585.124502152205
+        ],
+        "surface_elevation_meters": 421.70000000000005,
+        "distance_from_spawn_meters": 6962.066668035199
+      },
+      {
+        "id": 20,
+        "permanent_identifier": "111860613",
+        "name": "Unnamed lake 20",
+        "area_square_kilometers": 0.004,
+        "centroid_local_meters": [
+          3255.427313862252,
+          9001.395018380135
+        ],
+        "surface_elevation_meters": 460.0,
+        "distance_from_spawn_meters": 7122.3481713115
+      },
+      {
+        "id": 4,
+        "permanent_identifier": "111860665",
+        "name": "Unnamed lake 4",
+        "area_square_kilometers": 0.004,
+        "centroid_local_meters": [
+          1059.0000365477172,
+          7244.505429557525
+        ],
+        "surface_elevation_meters": 436.20000000000005,
+        "distance_from_spawn_meters": 7218.300670280445
+      },
+      {
+        "id": 30,
+        "permanent_identifier": "111860649",
+        "name": "Gilbert Lake",
+        "area_square_kilometers": 0.29300000000000004,
+        "centroid_local_meters": [
+          272.16719343315344,
+          7406.653516449034
+        ],
+        "surface_elevation_meters": 441.8,
+        "distance_from_spawn_meters": 7945.473790851675
+      },
+      {
+        "id": 16,
+        "permanent_identifier": "110736531",
+        "name": "Michigamme Reservoir",
+        "area_square_kilometers": 22.0258574,
+        "centroid_local_meters": [
+          15659.036954945652,
+          4585.422794458456
+        ],
+        "surface_elevation_meters": 418.3,
+        "distance_from_spawn_meters": 9100.678378020117
+      }
+    ]
+  },
+  "canopy": {
+    "artifact_sha256": "f369631546dcea5a492dd6c231dd612b0bb49688a0312cf9cad5365d2d9fd5e8",
+    "artifact_size_bytes": 5557818,
+    "spacing_meters": 6.0,
+    "width": 1667,
+    "height": 1667,
+    "minimum_tree_height_meters": 2.0,
+    "height_quantization_meters": 0.5,
+    "cover_method": "fraction of 2 m cells with non-ground returns at least 2 m above the bare-earth DEM",
+    "height_method": "maximum terrain-normalized non-ground return in each 6 m cell",
+    "source": "https://usgs-lidar-public.s3.amazonaws.com/MI_FEMA_Dickinson_Iron_Menominee_2019/ept.json",
+    "source_rights": "Public domain (USGS 3DEP)"
+  }
+}

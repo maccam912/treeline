@@ -22,24 +22,30 @@ use glam::{DVec3, Mat4, Vec2, Vec3};
 use treeline_coordinates::stable_hash;
 use treeline_coordinates::{CellIndex, WorldIdentity, WorldPosition};
 use treeline_ecology::{
-    GroundVegetation, GroundVegetationBounds, ProceduralTrees, RockBounds, Soil, SurfaceRocks,
-    TreeBounds,
+    GroundVegetation, GroundVegetationBounds, ProceduralTree, ProceduralTrees, RockBounds, Soil,
+    SurfaceRocks, TreeBounds,
 };
 use treeline_geography::Climate;
 use treeline_mesher::Mesh;
 use treeline_renderer::{AtmosphereSettings, TerrainMesh, TerrainRenderer, TreeMeshDetail};
 use treeline_simulation::{ActiveRegionId, ActiveWaterSimulation};
+use treeline_terrain::DEFAULT_SURVEYED_TILE_EDGE_METERS;
 #[cfg(test)]
 use treeline_terrain::WildernessTerrain;
+#[cfg(not(test))]
+use treeline_terrain::{DEFAULT_SURVEYED_START_X, DEFAULT_SURVEYED_START_Z};
 use treeline_terrain::{DensityField, SurfaceField};
 use treeline_voxel::ChunkIndex;
+#[cfg(test)]
+use treeline_world::CURRENT_GENERATOR_VERSION;
+#[cfg(not(test))]
+use treeline_world::DEFAULT_WORLD_IDENTITY;
 #[cfg(not(target_arch = "wasm32"))]
 use treeline_world::TerrainMeshQueue;
 use treeline_world::{
-    ActiveWaterRegionSpec, CURRENT_GENERATOR_VERSION, ChunkMeshSpec, ChunkStreamer,
-    ChunkStreamingConfig, FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig,
-    FarTileIndex, GeneratedWorldTerrain, GenerationPriority, Lake, NearTerrainCutout, Season,
-    TerrainMeshSpec,
+    ActiveWaterRegionSpec, ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig, FarTerrainMeshSpec,
+    FarTerrainStreamer, FarTerrainStreamingConfig, FarTileIndex, GeneratedWorldTerrain,
+    GenerationPriority, Lake, NearTerrainCutout, Season, TerrainMeshSpec,
 };
 use web_time::Instant;
 use winit::application::ApplicationHandler;
@@ -53,22 +59,32 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 use winit::window::{Window, WindowId};
 
+#[cfg(not(test))]
+const WORLD: WorldIdentity = DEFAULT_WORLD_IDENTITY;
+#[cfg(test)]
 const WORLD: WorldIdentity = WorldIdentity::new(0x5eed, CURRENT_GENERATOR_VERSION, 0);
-const WINDOW_TITLE: &str = "Treeline — Infinite Landscape";
+const WINDOW_TITLE: &str = "Treeline — Surveyed Wilderness";
 const EYE_HEIGHT: f64 = 1.72;
-const WALK_SPEED: f64 = 8.0;
-const SPRINT_SPEED: f64 = 16.0;
+const WALK_SPEED: f64 = 1.4;
+const SPRINT_SPEED: f64 = 4.5;
 const AERIAL_HEIGHT_METERS: f64 = 1_000.0;
 const AERIAL_SPEED_MULTIPLIER: f64 = 10.0;
-// Version-20 low country retains the reviewed version-19 regional setting.
+// 46.16084629042455, -88.3374704874157 in the tile's right-handed local frame.
+#[cfg(not(test))]
+const START_X: f64 = DEFAULT_SURVEYED_START_X;
+#[cfg(not(test))]
+const START_Z: f64 = DEFAULT_SURVEYED_START_Z;
+#[cfg(test)]
 const START_X: f64 = 26_176_064.0;
+#[cfg(test)]
 const START_Z: f64 = 39_040_066.0;
-const START_YAW: f64 = 1.924_842_228_418_599_5;
+const START_YAW: f64 = -1.924_842_228_418_599_5;
 const START_PITCH: f64 = -0.08;
 const RANDOM_WARP_MIN_DISTANCE_METERS: f64 = 1_000_000.0;
 const RANDOM_WARP_MAX_DISTANCE_METERS: f64 = 5_000_000.0;
 const RANDOM_WARP_COORDINATE_LIMIT_METERS: f64 = 5_000_000.0;
 const RANDOM_WARP_SITE_ATTEMPTS: usize = 64;
+const SURVEYED_WARP_BORDER_CLEARANCE_METERS: f64 = 64.0;
 const WATER_WARP_REGION_ATTEMPTS: usize = 16;
 const WATER_WARP_DIRECTIONS: u32 = 16;
 const WATER_WARP_MAX_SHORE_DISTANCE_METERS: f64 = 128_000.0;
@@ -1496,6 +1512,16 @@ struct WaterWarpSite {
 }
 
 fn random_warp_site(terrain: &GeneratedWorldTerrain, current: WorldPosition) -> Option<[f64; 2]> {
+    if terrain.is_surveyed_tile() {
+        for _ in 0..RANDOM_WARP_SITE_ATTEMPTS {
+            let candidate =
+                surveyed_warp_destination(random_unit_interval(), random_unit_interval());
+            if surface_feature_has_dry_ground(terrain, candidate[0], candidate[1]) {
+                return Some(candidate);
+            }
+        }
+        return None;
+    }
     for _ in 0..RANDOM_WARP_SITE_ATTEMPTS {
         let candidate = random_warp_destination(random_unit_interval(), random_unit_interval());
         if random_warp_distance_is_eligible(current, candidate)
@@ -1507,10 +1533,31 @@ fn random_warp_site(terrain: &GeneratedWorldTerrain, current: WorldPosition) -> 
     None
 }
 
+fn surveyed_warp_destination(x_fraction: f64, z_fraction: f64) -> [f64; 2] {
+    let usable_edge =
+        DEFAULT_SURVEYED_TILE_EDGE_METERS - (SURVEYED_WARP_BORDER_CLEARANCE_METERS * 2.0);
+    [x_fraction, z_fraction].map(|fraction| {
+        SURVEYED_WARP_BORDER_CLEARANCE_METERS + (fraction.clamp(0.0, 1.0) * usable_edge)
+    })
+}
+
 fn water_warp_site(
     terrain: &GeneratedWorldTerrain,
     current: WorldPosition,
 ) -> Option<WaterWarpSite> {
+    if terrain.is_surveyed_tile() {
+        const UPPER_HOLMES_LAKE_INTERIOR: [f64; 2] = [7_364.0, 6_894.0];
+        let water = terrain
+            .lake_surface_at(UPPER_HOLMES_LAKE_INTERIOR[0], UPPER_HOLMES_LAKE_INTERIOR[1])?;
+        let body = WaterBody::Lake(water.lake);
+        let (destination, shore_water) =
+            dry_water_shore(terrain, body, UPPER_HOLMES_LAKE_INTERIOR, 0.25)?;
+        return Some(WaterWarpSite {
+            destination,
+            water: shore_water,
+            body,
+        });
+    }
     for _ in 0..WATER_WARP_REGION_ATTEMPTS {
         let anchor = random_warp_destination(random_unit_interval(), random_unit_interval());
         if !random_warp_distance_is_eligible(current, anchor) {
@@ -1828,11 +1875,7 @@ fn usize_as_f64(value: usize) -> f64 {
 }
 
 fn far_terrain_streaming_config() -> FarTerrainStreamingConfig {
-    if cfg!(target_arch = "wasm32") {
-        FarTerrainStreamingConfig::new(4, 5).expect("the browser streaming radii are valid")
-    } else {
-        FarTerrainStreamingConfig::default()
-    }
+    FarTerrainStreamingConfig::new(1, 1).expect("the surveyed-world radius is valid")
 }
 
 fn far_cutout_bounds(
@@ -2132,9 +2175,9 @@ fn distant_tree_mesh_for_tile(
         .tile
         .bounds()
         .ok_or_else(|| std::io::Error::other("distant tree tile bounds are invalid"))?;
-    let mut trees = ProceduralTrees::new(terrain.world())
-        .trees_in(bounds)
+    let mut trees = trees_for_bounds(terrain, bounds)
         .ok_or_else(|| std::io::Error::other("distant tree generation is unavailable"))?;
+    calibrate_surveyed_tree_sizes(terrain, &mut trees);
     trees.retain(|tree| surface_feature_has_dry_ground(terrain, tree.x, tree.z));
     if trees.is_empty() {
         return Ok(None);
@@ -2145,6 +2188,62 @@ fn distant_tree_mesh_for_tile(
         spec.detail,
         |x, z| terrain.surface_height(x, z),
     )?))
+}
+
+fn calibrate_surveyed_tree_sizes(terrain: &GeneratedWorldTerrain, trees: &mut [ProceduralTree]) {
+    if !terrain.is_surveyed_tile() {
+        return;
+    }
+    for tree in trees {
+        let Some(canopy) = terrain.surveyed_canopy_at(tree.x, tree.z) else {
+            continue;
+        };
+        let stature = (tree.height_meters / tree.genotype.mature_height_meters).clamp(0.18, 1.0);
+        let height_rank = stable_unit_fraction(stable_hash(&[tree.id, 0x4c49_4441_525f_4854]));
+        let target_height = canopy.top_height_meters * stature * (0.78 + (height_rank * 0.22));
+        let scale = target_height / tree.height_meters;
+        tree.height_meters = target_height;
+        tree.trunk_base_radius_meters *= scale;
+        tree.crown_radius_meters *= scale;
+        tree.genotype.mature_height_meters *= scale;
+    }
+}
+
+fn trees_for_bounds(
+    terrain: &GeneratedWorldTerrain,
+    bounds: TreeBounds,
+) -> Option<Vec<ProceduralTree>> {
+    let trees = ProceduralTrees::new(terrain.world());
+    if !terrain.is_surveyed_tile() {
+        return trees.trees_in(bounds);
+    }
+    trees.trees_in_with_stand_adjustment(bounds, |x, z, mut stand| {
+        let Some(canopy) = terrain.surveyed_canopy_at(x, z) else {
+            stand.canopy_cover_fraction = 0.0;
+            stand.tree_density_per_hectare = 0.0;
+            stand.aboveground_biomass_kg_per_square_meter = 0.0;
+            stand.mean_canopy_height_meters = 0.0;
+            return stand;
+        };
+        stand.canopy_cover_fraction = canopy.cover_fraction;
+        stand.tree_density_per_hectare =
+            lidar_tree_density_per_hectare(canopy.cover_fraction, canopy.top_height_meters);
+        stand.mean_canopy_height_meters = canopy.top_height_meters;
+        stand.aboveground_biomass_kg_per_square_meter =
+            canopy.cover_fraction * canopy.top_height_meters * 0.56;
+        stand
+    })
+}
+
+fn lidar_tree_density_per_hectare(cover_fraction: f64, canopy_height_meters: f64) -> f64 {
+    let normalized_height = (canopy_height_meters / 35.0).clamp(0.0, 1.0);
+    (cover_fraction * (400.0 + (1_000.0 * (1.0 - normalized_height)))).clamp(0.0, 1_300.0)
+}
+
+fn stable_unit_fraction(hash: u64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let numerator = (hash >> 11) as f64;
+    numerator / 9_007_199_254_740_992.0
 }
 
 fn rock_mesh_for_chunk(
@@ -2696,6 +2795,27 @@ mod tests {
     }
 
     #[test]
+    fn surveyed_warp_destination_stays_inside_the_measured_tile() {
+        for (actual, expected) in [
+            (
+                surveyed_warp_destination(-1.0, -1.0),
+                [SURVEYED_WARP_BORDER_CLEARANCE_METERS; 2],
+            ),
+            (
+                surveyed_warp_destination(2.0, 2.0),
+                [DEFAULT_SURVEYED_TILE_EDGE_METERS - SURVEYED_WARP_BORDER_CLEARANCE_METERS; 2],
+            ),
+        ] {
+            assert!(
+                actual
+                    .into_iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (actual - expected).abs() < f64::EPSILON)
+            );
+        }
+    }
+
+    #[test]
     fn distant_tree_replacement_keeps_the_resident_mesh_until_successor_is_ready() {
         let tile = DistantTreeTileIndex { x: 0, z: 0 };
         let old_spec = DistantTreeMeshSpec {
@@ -2962,6 +3082,42 @@ mod tests {
             "spawn should retain a visibly populated ground layer; found {} plants",
             plants.len()
         );
+    }
+
+    #[test]
+    fn surveyed_canopy_creates_openings_and_height_bounded_dense_stands() {
+        let surveyed_world = WorldIdentity::new(
+            0x5eed,
+            CURRENT_GENERATOR_VERSION,
+            treeline_terrain::DEFAULT_SURVEYED_SETTINGS_HASH,
+        );
+        let terrain = GeneratedWorldTerrain::new(surveyed_world);
+        let open_bounds = TreeBounds::new(8_928.0, 1_248.0, 9_024.0, 1_344.0).unwrap();
+        let dense_bounds = TreeBounds::new(2_688.0, 5_952.0, 2_784.0, 6_048.0).unwrap();
+        let open = trees_for_bounds(&terrain, open_bounds).unwrap();
+        let mut dense = trees_for_bounds(&terrain, dense_bounds).unwrap();
+
+        assert!(open.is_empty(), "lidar-open cells should remain open");
+        assert!(
+            dense.len() >= 50,
+            "closed canopy should produce a dense stand"
+        );
+        calibrate_surveyed_tree_sizes(&terrain, &mut dense);
+        assert!(dense.iter().all(|tree| {
+            let canopy = terrain.surveyed_canopy_at(tree.x, tree.z).unwrap();
+            tree.height_meters >= 0.0 && tree.height_meters <= canopy.top_height_meters
+        }));
+    }
+
+    #[test]
+    fn lidar_density_mapping_is_higher_for_closed_and_shorter_canopies() {
+        let open = lidar_tree_density_per_hectare(0.15, 18.0);
+        let closed = lidar_tree_density_per_hectare(0.90, 18.0);
+        let short_closed = lidar_tree_density_per_hectare(0.90, 8.0);
+
+        assert!(closed > open);
+        assert!(short_closed > closed);
+        assert!(closed > 750.0);
     }
 
     #[test]

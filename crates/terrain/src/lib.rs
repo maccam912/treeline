@@ -1,5 +1,12 @@
 //! Functional signed-density fields for smooth terrain.
 
+mod surveyed;
+
+pub use surveyed::{
+    DEFAULT_SURVEYED_SETTINGS_HASH, DEFAULT_SURVEYED_START_X, DEFAULT_SURVEYED_START_Z,
+    DEFAULT_SURVEYED_TILE_EDGE_METERS, SurveyedCanopySample,
+};
+
 use treeline_coordinates::WorldPosition;
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_geography::{
@@ -636,6 +643,32 @@ impl WildernessTerrain {
         Self { world }
     }
 
+    /// Whether this field is backed by the fixed Michigan surveyed tile.
+    pub const fn is_surveyed_tile(self) -> bool {
+        self.world.settings_hash == DEFAULT_SURVEYED_SETTINGS_HASH
+    }
+
+    /// Samples fixed aerial color when this terrain selects the Michigan tile.
+    pub fn surveyed_color_at(self, x: f64, z: f64) -> Option<[f32; 4]> {
+        self.is_surveyed_tile()
+            .then(|| surveyed::michigan_surveyed_color_at(x, z))
+            .flatten()
+    }
+
+    /// Returns a mapped lake identifier and surface elevation for the surveyed bundle.
+    pub fn surveyed_lake_at(self, x: f64, z: f64) -> Option<(u8, f64)> {
+        self.is_surveyed_tile()
+            .then(|| surveyed::michigan_surveyed_lake_at(x, z))
+            .flatten()
+    }
+
+    /// Samples lidar-derived canopy structure when this terrain selects the Michigan tile.
+    pub fn surveyed_canopy_at(self, x: f64, z: f64) -> Option<SurveyedCanopySample> {
+        self.is_surveyed_tile()
+            .then(|| surveyed::michigan_surveyed_canopy_at(x, z))
+            .flatten()
+    }
+
     /// Samples condition-driven local morphology from the shared province plan.
     ///
     /// Broad province elevation already contains continental relief, tectonic
@@ -843,6 +876,9 @@ impl WildernessTerrain {
     }
 
     pub fn height_at(self, x: f64, z: f64) -> Option<f64> {
+        if self.is_surveyed_tile() {
+            return surveyed::michigan_surveyed_height_at(x, z);
+        }
         self.inspect(x, z).map(|(_, height)| height)
     }
 
@@ -854,6 +890,9 @@ impl WildernessTerrain {
     /// surface while the near representation can expose volume below it.
     pub fn density_at_surface(self, position: WorldPosition, surface_height: f64) -> f64 {
         let vertical_density = position.y - surface_height;
+        if self.is_surveyed_tile() {
+            return vertical_density;
+        }
         if self.world.generator_version < PROVINCE_GENERATOR_VERSION {
             return vertical_density;
         }
@@ -881,7 +920,8 @@ impl WildernessTerrain {
 
     /// Returns the deepest scarp cavity intersecting a horizontal rectangle.
     pub fn undercut_depth_in(self, min_x: f64, min_z: f64, max_x: f64, max_z: f64) -> Option<f64> {
-        if self.world.generator_version < PROVINCE_GENERATOR_VERSION
+        if self.is_surveyed_tile()
+            || self.world.generator_version < PROVINCE_GENERATOR_VERSION
             || ![min_x, min_z, max_x, max_z].into_iter().all(f64::is_finite)
             || min_x > max_x
             || min_z > max_z

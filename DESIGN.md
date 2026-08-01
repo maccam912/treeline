@@ -6,7 +6,16 @@ Build a multiplayer wilderness exploration game whose primary experience is:
 
 > **Go somewhere nobody in this world has ever gone before, discover something beautiful or strange, survive the journey, and come back with a story.**
 
-The world is effectively endless and deterministically generated from a seed, but it should not feel like an endless shuffle of interchangeable procedural pieces.
+The player-facing world should begin with surveyed real-world terrain rather
+than synthetic landforms. Its observations, derived layers, and runtime
+representations are versioned so the same world identity produces the same
+surface on every supported machine. A single embedded tile is sufficient now;
+precalculated regional bundles and real-time tile streaming are future delivery
+choices, not prerequisites for validating the experience.
+
+Procedural generation remains valuable for caves, simulation, missing-data
+policies, research tools, and places that cannot be observed directly. It is
+not the default source of surface terrain, lake footprints, or tree cover.
 
 The game should evoke:
 
@@ -312,47 +321,80 @@ not smaller terrain voxels.
 
 ---
 
-# 6. Terrain Should Mostly Not Be Stored
+# 6. Surveyed Terrain Is a Versioned Data Product
 
-The pristine world is a function.
+The pristine player world combines a versioned surveyed bundle with derived
+runtime representations.
 
 ```text
-World(seed, coordinate, generation_version) → terrain
+World(
+    surveyed_bundle_identity,
+    coordinate,
+    generation_version
+) → terrain / lakes / canopy
 ```
 
-Only changes require storage.
+The bundle records bare-earth elevation, mapped lake footprints and levels,
+measured canopy cover and height, supporting surface color, coordinate
+reference system, processing methods, provenance, and hashes. Horizontal and
+vertical meters remain at 1:1 scale. World X points east and world Z points
+south. Per-tile normalization and relief exaggeration are forbidden.
 
 Conceptually:
 
 ```text
 final terrain
     =
-procedural base terrain
+surveyed base terrain
+    +
+deterministic derived representation
     +
 persistent player/world modifications
 ```
 
-Therefore an unexplored mountain 800 km away consumes almost no storage.
+The first product bundle is checked into the client and decoded in full at
+startup. That intentionally proves the data and rendering contract without
+premature storage or networking machinery. Later, the same immutable layer
+tiles may be distributed as precalculated bundles, streamed and cached on
+demand, or both. Delivery must not change their coordinate alignment, decoded
+values, missing-data behavior, or saved-world identity.
 
-When the player approaches it:
+When the player approaches measured terrain:
 
 ```text
-evaluate world function
+load or locate versioned layer samples
         ↓
-generate samples
+derive density, water, and tree instances
         ↓
 mesh
         ↓
 render
 ```
 
-If nobody alters it, it can disappear from memory later.
+Only player/world deviations require mutable persistence. Immutable source data
+may disappear from memory and be decoded or fetched again.
 
-This is critical to making an effectively infinite high-detail world practical.
+`SURVEYED_WORLD.md` is the authoritative ingestion, layer, alignment,
+versioning, and future-delivery contract.
 
 ---
 
-# 7. World Generation Philosophy
+# 7. World Construction Philosophy
+
+## Measurements before synthesis
+
+Where authoritative observations exist, use them for the facts they can
+support:
+
+```text
+bare-earth DEM → terrain surface
+waterbody polygons + DEM → lake footprint and level
+terrain-normalized lidar returns → canopy cover and height
+```
+
+Do not infer exact bathymetry, species, individual tree identity, rivers, or
+subsurface geology from inputs that do not contain those facts. Derived
+representations must state which parts are measured and which are procedural.
 
 ## Stop treating noise as world generation
 
@@ -2422,19 +2464,18 @@ the world while those phases are in progress.
 
 ## Phase 5 — World Quality
 
-**Phase status: In progress; the version 18 generation-diversity reset,
-version 19 macro calibration, and version 20 meso-scale channel-conformance
-pass have landed, and the
-landscape-diversity acceptance pass is next. Deterministic audits and
-geography-aware presentation are usable foundations, but the current generator
-has not yet satisfied the complete landscape-diversity pillar**
+**Phase status: In progress; a versioned 10 km Michigan surveyed bundle is now
+the player-facing default. The terrain, mapped-lake, aerial-color, and
+lidar-canopy paths are integrated at 1:1 scale. Surveyed-world visual and
+alignment acceptance is next. Procedural versions 18–20 remain reproducible for
+research, tests, explicit future gap filling, and unobserved systems, but their
+landscape-diversity pass no longer gates the default surface world.**
 
 Goal:
 
-> Traveling far should reveal places with fundamentally different landforms,
-> ecology, silhouettes, and traversal. The generated causes should read as a
-> beautiful, coherent place without debug overlays or an explanation of the
-> underlying model.
+> Measured terrain, lakes, and forest structure should read as one coherent,
+> beautiful place at human scale, without debug overlays or visible layer
+> disagreement. Expanding the traveled world must preserve that fidelity.
 
 - [x] **Generation-diversity reset.** Deterministic, top-down
       geographical province artifacts that plan landmass and coast topology,
@@ -2489,6 +2530,16 @@ Goal:
       closest descriptor pairs, suspicious repetition, plausibility outliers,
       represented and underrepresented outcomes, stable CSV/fingerprint
       artifacts, and an optional strict mode that fails on coverage gaps.
+- [x] **Surveyed player-world default.** The client selects one versioned 10 km
+      Michigan bundle by default and keeps travel within its measured footprint.
+      A USGS 3DEP bare-earth DEM drives voxel and LOD terrain at 1:1 horizontal
+      and vertical scale; NHD polygons plus DEM-derived levels drive static lake
+      sheets; aligned lidar drives six-meter canopy occupancy and height; and
+      NAIP drives supporting surface color. The default identity, artifact
+      decoders, local coordinate frame, provenance, reproducible preparation
+      recipe, incompatibility rule, and future precalculated-versus-streamed
+      delivery boundary are codified in `SURVEYED_WORLD.md`. No world-scale
+      storage or streaming system is included yet.
 - [ ] **PARTIAL** — Real-terrain calibration. A headless Rust batch sampler now
       exposes bounded offline parameters for province and local landform
       morphology while preserving versioned production defaults and golden
@@ -2508,8 +2559,20 @@ Goal:
       cliff-class walls through calibrated terrain; version 20 fits shared
       channel nodes to the non-fluvial local surface over each drainage graph
       while preserving exact downhill ordering, bringing meso relief and slope
-      distributions substantially closer to the reference. A native 30 m local
-      corpus, the larger spatially
+      distributions substantially closer to the reference. The default fixed
+      Michigan 3DEP world now exercises one versioned 10 km surveyed artifact
+      through the real voxel, LOD, material, vegetation, and player paths at
+      1:1 horizontal and vertical scale. An aligned USGS NAIP raster now drives
+      terrain color, while NHD waterbody polygons produce static lake sheets at
+      DEM-derived elevations. Its local axes preserve geographic handedness,
+      traversal uses human-scale meter-per-second speeds, and a matching USGS
+      point-cloud pass supplies six-meter canopy occupancy and terrain-normalized
+      top height. Surveyed occupancy now drives spatially varying procedural-tree
+      counts, while measured height calibrates individual dimensions without
+      discarding species, architecture, age, or damage variation. It deliberately
+      disables procedural terrain shaping, hydrology, and caves and does not yet
+      stream surveyed data.
+      A native 30 m local corpus, the larger spatially
       separated macro dataset, longer-range drainage/range coherence, and blind
       perspective review remain before this item can be complete.
 - [x] Geography-aware terrain materials. Rendered terrain now blends explicit
@@ -2547,25 +2610,24 @@ Goal:
       glacial, and karst landscapes belong to the landform reset above; this
       item is for exceptional expressions of those processes. These remain
       algorithms, not placed prefabs.
-- [ ] **NEXT — Landscape-diversity acceptance pass.**
-    - Ten screenshots from ten far-apart regions must look immediately distinct
-      in silhouette, openness, vegetation structure, surface character, and
-      traversal—not merely in tint or tree mixture.
-    - Curated perspective captures must include recognizable forest, prairie or
-      grassland, steppe or shrubland, desert or salt-basin, dune, exposed alpine,
-      cliff or bluff, mountainous, river, lake, coast, wetland, reef, and cave
-      scenes.
-    - Audits must show large contiguous open landscapes as well as closed forest,
-      and strong regional tree-group identities rather than only similar mixed
-      stands.
-    - Slope and curvature audits must demonstrate quiet plains, rolling terrain,
-      sustained steep slopes, and abrupt cliff-class faces as coherent landforms,
-      without implausible spikes or broken drainage.
-    - The deterministic viewpoint suite must not expose obvious generation,
-      hydrology, cave-opening, or LOD failures.
+- [ ] **NEXT — Surveyed-world acceptance pass.**
+    - Curated ground and aerial captures must show recognizable ridges, valleys,
+      open canopy, closed canopy, and lake shorelines from the default tile.
+    - Near and far terrain must agree in elevation, color, orientation, and
+      silhouette without normalization, mirroring, or visible LOD seams.
+    - Lake masks, flat water levels, fine terrain, and shoreline vegetation must
+      agree without floating sheets or trees emerging from mapped water.
+    - Canopy openings and dense stands must follow lidar occupancy, while tree
+      heights remain bounded by measured canopy height and individual trees keep
+      enough procedural variation to avoid looking cloned.
+    - Travel, random warp, and mesh residency must remain inside the measured
+      footprint; the clamped DEM border must never masquerade as additional
+      surveyed world.
+    - The acceptance report must distinguish measured facts, derived values,
+      and currently unsupported data such as bathymetry, rivers, and caves.
 
-Do not call the world finished merely because its generators return structured
-data. This phase is complete only when their causes are visible in the rendered
+Do not call the world finished merely because the bundle decodes. This phase is
+complete only when the aligned observations are convincing in the rendered
 landscape.
 
 The generation-diversity reset intentionally changed pristine terrain in
@@ -2574,6 +2636,11 @@ generator version 19, and version 20 aligns river and gully centerlines with
 that calibrated local surface. Existing generator versions retain their
 previous terrain contract. Phase 6 below records version 17 fast-water terrain
 morphology.
+
+The surveyed bundle is selected independently by its settings identity. An
+incompatible change to any bundled layer, coordinate frame, sampler, or layer
+meaning requires a new settings identity; existing saved worlds must not
+silently receive replacement data.
 
 ---
 
@@ -2768,25 +2835,19 @@ During the journey they:
 * discover that the cave contains the source of another river
 * emerge the following day onto an unfamiliar plateau
 
-None of those locations were manually placed.
+None of those locations were manually placed or assembled from terrain prefabs.
 
-None were assembled from prefab terrain chunks.
+The visible mountain, valley, lake footprint, and forest structure existed
+because the surveyed sources observed them. Terrain density, lake surfaces,
+tree individuals, LOD meshes, simulation, and unobserved subterranean structure
+were derived from those measurements under explicit versioned rules. Rivers,
+caves, bathymetry, and other layers appeared only where Treeline had an
+authoritative source or an honest, reviewed procedural contract for them.
 
-The mountain existed because of regional uplift.
+The storm interacted with the measured mountains.
 
-The forest existed because of climate and soil.
-
-The river existed because of its watershed.
-
-The waterfall existed because of river gradient and geology.
-
-The lake existed because of a drainage basin.
-
-The cave existed because of geology and groundwater.
-
-The storm interacted with the mountains.
-
-And because every stage is derived deterministically from the world seed:
+And because every source artifact and derivation stage is tied to the world
+identity:
 
 **that entire journey belongs to this world and no other.**
 

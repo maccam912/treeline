@@ -1,9 +1,9 @@
 # Treeline
 
-Treeline is an early-stage multiplayer wilderness exploration game built around
-deterministic, effectively endless geography. The wilderness is the content:
-mountains, watersheds, forests, caves, weather, camps, and the stories players
-bring home.
+Treeline is an early-stage multiplayer wilderness exploration game whose
+player-facing world begins with deterministic, surveyed real-world geography.
+The wilderness is the content: mountains, watersheds, forests, caves, weather,
+camps, and the stories players bring home.
 
 The complete product and technical direction lives in
 [`DESIGN.md`](DESIGN.md). Keep that document in the repository and consult it
@@ -14,6 +14,11 @@ before changing architecture or priorities.
 This repository now includes a small playable terrain toy alongside the
 test-backed foundations described in the design. The prototype provides:
 
+- a default 10 km surveyed Michigan world at 1:1 horizontal and vertical scale,
+  reconstructed from USGS bare-earth elevation, mapped lakes, aerial color,
+  and lidar-derived canopy structure;
+- a versioned, reproducible surveyed-data contract for terrain, lakes, and tree
+  cover, with the current bundle embedded at build time;
 - stable world identity and coordinate hashing;
 - deterministic 512 km geographical-province artifacts with explicit shared
   boundary conditions, parent-scale controls, and fixed generation halos;
@@ -108,8 +113,10 @@ Generator version 20 aligns river and gully centerlines with the calibrated
 non-fluvial surface instead of the older macro-only elevation. Shared nodes are
 fit over each drainage graph before exact downhill ordering is enforced. This
 removes widespread false canyon walls at 1–8 km scales while preserving channel
-connectivity. It is the default for new prototype worlds; version 19 retains
-its original channel contract.
+connectivity. It remains the current procedural-generator contract; version 19
+retains its original channel contract. The player-facing client selects the
+versioned surveyed bundle by default. Procedural generation remains available
+to Generator Lab, world-quality tools, tests, and future explicit gap filling.
 
 ## Getting started
 
@@ -167,13 +174,31 @@ Run the playable terrain toy with:
 cargo run -p client
 ```
 
+The client opens the default surveyed world and spawns at `46.16084629042455,
+-88.3374704874157`. The checked-in artifact covers one 10 km USGS 3DEP tile,
+uses two-meter horizontal samples and decimeter elevations, and preserves both
+horizontal and vertical meters at 1:1 scale. It is decoded in full at startup;
+an eight-meter USGS NAIP layer supplies terrain color, and mapped NHD lake
+polygons supply static water sheets at DEM-derived elevations. Press `B` to
+warp to nearby Upper Holmes Lake. A six-meter canopy artifact derived from the
+matching USGS point cloud supplies spatially varying canopy occupancy and
+terrain-normalized top height. Those measurements control local procedural-tree
+counts and scale while the ecology system retains species, architecture, age,
+and damage variation. Terrain-data streaming, river integration, and
+bathymetry remain outside the current data contract. The tile's local X axis
+points east and its Z axis points south so geographic
+orientation agrees with the right-handed camera. One world unit is one meter;
+the eye is 1.72 m high, walking is 1.4 m/s, and sprinting is 4.5 m/s.
+See [`SURVEYED_WORLD.md`](SURVEYED_WORLD.md) for the authoritative preparation,
+alignment, provenance, versioning, and future delivery contract.
+
 Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
 to sprint. Press Escape to release the cursor; click the window to capture it
 again. Press `F` to toggle aerial mode, which follows the ground from 1 km up
-and moves ten times faster. Press `R` to warp to random dry ground 1,000–5,000
-km away, `B` to warp near water, or `C` to find and warp to the nearest
-generated cave entrance; walking over the opening descends to the cave floor.
-Browsers expose aerial mode and both non-cave warps as buttons.
+and moves ten times faster. Press `R` to warp to random dry ground within the
+surveyed tile or `B` to warp near Upper Holmes Lake. Surveyed caves are not yet
+part of the data contract, so `C` reports that no cave is available. Browsers
+expose aerial mode and both non-cave warps as buttons.
 
 Build the browser version with [Trunk](https://trunk-rs.dev/):
 
@@ -188,6 +213,8 @@ Pushes to `main` build this browser version and deploy it through GitHub Pages.
 
 - `crates/` contains narrowly scoped game libraries.
 - `apps/` contains executable composition roots.
+- `SURVEYED_WORLD.md` defines how real terrain, lakes, and tree cover become a
+  versioned Treeline world.
 - `.github/workflows/ci.yml` runs formatting, lint, test, and documentation
   checks.
 - `.github/workflows/pages.yml` builds and deploys the browser client.

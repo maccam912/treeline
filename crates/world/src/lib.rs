@@ -36,7 +36,8 @@ use treeline_hydrology::{
 };
 use treeline_mesher::{Mesh, MeshingError, SurfaceGridSpec, surface_grid, transvoxel_chunk};
 use treeline_terrain::{
-    DensityField, ErosionSurfaceSample, Material, SurfaceField, TerrainSample, WildernessTerrain,
+    DEFAULT_SURVEYED_SETTINGS_HASH, DensityField, ErosionSurfaceSample, Material, SurfaceField,
+    SurveyedCanopySample, TerrainSample, WildernessTerrain,
 };
 use treeline_voxel::{ChunkFace, ChunkIndex, LodLevel, TransitionFaces};
 use web_time::{Duration, Instant};
@@ -56,6 +57,15 @@ pub const CALIBRATED_TERRAIN_GENERATOR_VERSION: u32 =
     treeline_geography::CALIBRATED_PROVINCE_GENERATOR_VERSION;
 /// Latest generator contract used for newly created prototype worlds.
 pub const CURRENT_GENERATOR_VERSION: u32 = LOCAL_CHANNEL_ALIGNMENT_GENERATOR_VERSION;
+/// Default world loaded by the player-facing client.
+///
+/// The seed still supplies stable identities for procedural tree individuals;
+/// the settings hash selects the versioned surveyed terrain bundle.
+pub const DEFAULT_WORLD_IDENTITY: WorldIdentity = WorldIdentity::new(
+    0x5eed,
+    CURRENT_GENERATOR_VERSION,
+    DEFAULT_SURVEYED_SETTINGS_HASH,
+);
 
 const SNOW_SLOPE_SAMPLE_RADIUS_METERS: f64 = 16.0;
 const DOMAIN_SURFACE_WATER_CELL: u64 = 0x5355_5246_5741_5445;
@@ -188,6 +198,16 @@ impl GeneratedWorldTerrain {
         self.base.world
     }
 
+    /// Whether this world uses the fixed Michigan surveyed-terrain artifact.
+    pub const fn is_surveyed_tile(&self) -> bool {
+        self.base.is_surveyed_tile()
+    }
+
+    /// Samples lidar-derived canopy structure for the fixed surveyed bundle.
+    pub fn surveyed_canopy_at(&self, x: f64, z: f64) -> Option<SurveyedCanopySample> {
+        self.base.surveyed_canopy_at(x, z)
+    }
+
     /// Samples seasonal snow cover for the composed terrain surface.
     ///
     /// Seasonal climate supplies the available snowpack. A fixed-radius slope
@@ -245,7 +265,9 @@ impl GeneratedWorldTerrain {
     /// Returns the strongest nearby river contribution, if terrain carving is
     /// enabled by this world's generation version.
     pub fn river_influence_at(&self, x: f64, z: f64) -> Option<RiverTerrainInfluence> {
-        if self.world().generator_version < RIVER_TERRAIN_GENERATOR_VERSION {
+        if self.base.is_surveyed_tile()
+            || self.world().generator_version < RIVER_TERRAIN_GENERATOR_VERSION
+        {
             return None;
         }
         let containing = DrainageCellIndex::containing(x, z)?;
@@ -313,7 +335,9 @@ impl GeneratedWorldTerrain {
 
     /// Returns the strongest nearby minor-drainage contribution.
     pub fn gully_influence_at(&self, x: f64, z: f64) -> Option<GullyTerrainInfluence> {
-        if self.world().generator_version < EROSION_GENERATOR_VERSION {
+        if self.base.is_surveyed_tile()
+            || self.world().generator_version < EROSION_GENERATOR_VERSION
+        {
             return None;
         }
         let containing = DrainageCellIndex::containing(x, z)?;
@@ -387,6 +411,9 @@ impl GeneratedWorldTerrain {
 
     /// Returns equilibrium lake water above the generated terrain, if present.
     pub fn lake_surface_at(&self, x: f64, z: f64) -> Option<LakeSurfaceSample> {
+        if self.base.is_surveyed_tile() {
+            return self.surveyed_lake_surface_at(x, z);
+        }
         if self.world().generator_version < LAKE_GENERATOR_VERSION {
             return None;
         }
@@ -409,6 +436,9 @@ impl GeneratedWorldTerrain {
         z: f64,
         season: Season,
     ) -> Option<LakeSurfaceSample> {
+        if self.base.is_surveyed_tile() {
+            return self.surveyed_lake_surface_at(x, z);
+        }
         if self.world().generator_version < LAKE_GENERATOR_VERSION {
             return None;
         }
@@ -424,13 +454,40 @@ impl GeneratedWorldTerrain {
         })
     }
 
+    fn surveyed_lake_surface_at(&self, x: f64, z: f64) -> Option<LakeSurfaceSample> {
+        let (lake_id, surface_elevation_meters) = self.base.surveyed_lake_at(x, z)?;
+        let terrain_elevation_meters = self.shaped_height(x, z)?.height;
+        let cell = DrainageCellIndex::containing(x, z)?;
+        let water_depth_meters = (surface_elevation_meters - terrain_elevation_meters).max(0.05);
+        Some(LakeSurfaceSample {
+            lake: Lake {
+                id: u64::from(lake_id),
+                bottom: cell,
+                bottom_elevation_meters: surface_elevation_meters - 2.0,
+                surface_elevation_meters,
+                outlet: cell,
+                cell_count: 1,
+                spill_elevation_meters: surface_elevation_meters + 0.5,
+                surface_outlet: Some(cell),
+                fill_fraction: 1.0,
+                water_balance_fraction: 1.0,
+                closed_basin_fraction: 0.0,
+                seasonal_fraction: 0.0,
+                salinity_fraction: 0.0,
+                playa_fraction: 0.0,
+            },
+            terrain_elevation_meters,
+            water_depth_meters,
+        })
+    }
+
     /// Lists lakes in the watershed artifact containing a horizontal position.
     ///
     /// This uses the same immutable regional cache as surface sampling, making
     /// it suitable for inspection and travel tools that need to select a body
     /// before querying its fine shoreline.
     pub fn regional_lakes_at(&self, x: f64, z: f64) -> Option<Vec<Lake>> {
-        if self.world().generator_version < LAKE_GENERATOR_VERSION {
+        if self.base.is_surveyed_tile() || self.world().generator_version < LAKE_GENERATOR_VERSION {
             return None;
         }
         let region = WatershedRegionIndex::containing(x, z)?;
@@ -440,7 +497,7 @@ impl GeneratedWorldTerrain {
 
     /// Returns equilibrium ocean water above terrain below global sea level.
     pub fn ocean_surface_at(&self, x: f64, z: f64) -> Option<OceanSurfaceSample> {
-        if self.world().generator_version < REEF_GENERATOR_VERSION {
+        if self.base.is_surveyed_tile() || self.world().generator_version < REEF_GENERATOR_VERSION {
             return None;
         }
         let terrain_elevation_meters = self.shaped_height(x, z)?.height;
@@ -471,6 +528,9 @@ impl GeneratedWorldTerrain {
     ) -> Result<ActiveWaterRegion, ActiveWaterError> {
         const SECONDS_PER_YEAR: f64 = 31_556_952.0;
 
+        if self.base.is_surveyed_tile() {
+            return ActiveWaterRegion::new(Vec::new(), Vec::new());
+        }
         if self.world().generator_version < LIVING_WATER_GENERATOR_VERSION {
             return ActiveWaterRegion::new(Vec::new(), Vec::new());
         }
@@ -845,7 +905,7 @@ impl GeneratedWorldTerrain {
     /// composing the result never clamps terrain density inside a system's
     /// bounding box.
     pub fn cave_influence_at(&self, position: WorldPosition) -> Option<CaveInfluence> {
-        if self.world().generator_version < CAVE_GENERATOR_VERSION {
+        if self.base.is_surveyed_tile() || self.world().generator_version < CAVE_GENERATOR_VERSION {
             return None;
         }
         let region = CaveRegionIndex::containing(position.x, position.z)?;
@@ -908,6 +968,9 @@ impl GeneratedWorldTerrain {
         position: WorldPosition,
         region_radius: u64,
     ) -> Option<CaveEntrance> {
+        if self.base.is_surveyed_tile() {
+            return None;
+        }
         let center = CaveRegionIndex::containing(position.x, position.z)?;
         let radius = i64::try_from(region_radius).ok()?;
         let mut nearest = None;
@@ -959,7 +1022,9 @@ impl GeneratedWorldTerrain {
             }
         };
         let mut mesh = lake_surface_grid(self, grid)?;
-        if let TerrainMeshSpec::Near(near) = spec {
+        if !self.base.is_surveyed_tile()
+            && let TerrainMeshSpec::Near(near) = spec
+        {
             self.append_underground_rivers(&mut mesh, near.chunk)?;
         }
         Ok(mesh)
@@ -1038,6 +1103,24 @@ impl GeneratedWorldTerrain {
         {
             return Some(shape);
         }
+        if self.base.is_surveyed_tile() {
+            let shape = TerrainShape {
+                height: self.base.height_at(x, z)?,
+                erosion: None,
+                gully: None,
+                river: None,
+                reef: None,
+            };
+            let mut cache = self
+                .terrain_shapes
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if cache.len() >= MAX_TERRAIN_SHAPE_CACHE_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(key, shape);
+            return Some(shape);
+        }
         let erosion = (self.world().generator_version >= EROSION_GENERATOR_VERSION)
             .then(|| self.base.erosion_at(x, z))
             .flatten();
@@ -1113,6 +1196,9 @@ impl GeneratedWorldTerrain {
     pub fn surface_color_at(&self, x: f64, z: f64) -> Option<[f32; 4]> {
         if !x.is_finite() || !z.is_finite() {
             return None;
+        }
+        if self.base.is_surveyed_tile() {
+            return self.base.surveyed_color_at(x, z);
         }
         geography_surface_color(&SurfaceColorInputs {
             profile: RegionalProfile::sample(self.world(), x, z),
@@ -1454,6 +1540,9 @@ impl SurfaceField for GeneratedWorldTerrain {
     }
 
     fn volume_bounds(&self, min_x: f64, min_z: f64, max_x: f64, max_z: f64) -> Option<(f64, f64)> {
+        if self.base.is_surveyed_tile() {
+            return None;
+        }
         let systems = self.cave_systems_intersecting(min_x, min_z, max_x, max_z);
         let cave_minimum = systems
             .iter()
@@ -2852,6 +2941,15 @@ mod tests {
     use treeline_terrain::RollingHills;
 
     #[test]
+    fn player_default_selects_the_versioned_surveyed_bundle() {
+        assert_eq!(
+            DEFAULT_WORLD_IDENTITY.settings_hash,
+            treeline_terrain::DEFAULT_SURVEYED_SETTINGS_HASH
+        );
+        assert!(GeneratedWorldTerrain::new(DEFAULT_WORLD_IDENTITY).is_surveyed_tile());
+    }
+
+    #[test]
     fn version_twenty_aligns_channels_over_the_calibrated_terrain_default() {
         assert_eq!(LANDSCAPE_DIVERSITY_GENERATOR_VERSION, 18);
         assert_eq!(CALIBRATED_TERRAIN_GENERATOR_VERSION, 19);
@@ -4223,6 +4321,46 @@ mod tests {
             };
             influence.distance_meters <= influence.channel_half_width_meters + 2.0
         }));
+    }
+
+    #[test]
+    fn surveyed_tile_uses_aerial_color_and_mapped_lake_water() {
+        const UPPER_HOLMES_LAKE: [f64; 2] = [7_364.0, 6_894.0];
+        let world = WorldIdentity::new(
+            0x5eed,
+            CURRENT_GENERATOR_VERSION,
+            treeline_terrain::DEFAULT_SURVEYED_SETTINGS_HASH,
+        );
+        let terrain = GeneratedWorldTerrain::new(world);
+        let color = terrain
+            .surface_color_at(UPPER_HOLMES_LAKE[0], UPPER_HOLMES_LAKE[1])
+            .expect("surveyed color");
+        assert!(
+            color
+                .into_iter()
+                .all(|channel| (0.0..=1.0).contains(&channel))
+        );
+        let water = terrain
+            .lake_surface_at(UPPER_HOLMES_LAKE[0], UPPER_HOLMES_LAKE[1])
+            .expect("mapped lake");
+        assert_eq!(water.lake.id, 19);
+        assert!((water.lake.surface_elevation_meters - 415.5).abs() < f64::EPSILON);
+
+        let chunk = ChunkIndex::containing(WorldPosition::new(
+            UPPER_HOLMES_LAKE[0],
+            0.0,
+            UPPER_HOLMES_LAKE[1],
+        ))
+        .expect("lake chunk");
+        let mesh = terrain
+            .lake_surface_mesh(TerrainMeshSpec::Near(ChunkMeshSpec {
+                chunk,
+                lod: ChunkIndex::NEAR_LOD,
+                transition_faces: TransitionFaces::none(),
+            }))
+            .expect("mapped lake mesh");
+        assert!(mesh.is_well_formed());
+        assert!(!mesh.indices.is_empty());
     }
 
     fn specs_by_chunk(specs: Vec<ChunkMeshSpec>) -> BTreeMap<ChunkIndex, ChunkMeshSpec> {
