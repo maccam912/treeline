@@ -13,14 +13,14 @@ const CANOPY_MAGIC: &[u8; 8] = b"TLCAN01\0";
 const HEADER_BYTES: usize = 40;
 const WATER_HEADER_BYTES: usize = 42;
 const QUANTIZATION_METERS: f64 = 0.1;
-/// Raises mapped lake sheets into the surrounding shore slope.
-const SURVEYED_WATER_LEVEL_OFFSET_METERS: f64 = 1.0;
+/// Extends mapped lake footprints into the surrounding shore by one water cell.
+const SURVEYED_WATER_FOOTPRINT_EXPANSION_METERS: f64 = 4.0;
 
 /// Versioned settings identity selecting the default surveyed-world bundle.
 ///
 /// Any incompatible change to the embedded DEM, water, color, or canopy
 /// contract must receive a new value so saved worlds cannot silently change.
-pub const DEFAULT_SURVEYED_SETTINGS_HASH: u64 = 0x5355_5256_4559_0002;
+pub const DEFAULT_SURVEYED_SETTINGS_HASH: u64 = 0x5355_5256_4559_0003;
 /// Edge length of the default surveyed tile in local world meters.
 pub const DEFAULT_SURVEYED_TILE_EDGE_METERS: f64 = 10_000.0;
 /// Requested WGS84 position expressed in local world meters east of the tile edge.
@@ -145,26 +145,46 @@ pub fn michigan_surveyed_lake_at(x: f64, z: f64) -> Option<(u8, f64)> {
     let source_z = source_northing_from_world_z(water.header, z);
     let grid_z =
         ((water.header.north_pixel_center_z - source_z) / water.header.spacing_meters) + 0.5;
-    if grid_x < 0.0
-        || grid_z < 0.0
-        || grid_x >= usize_as_f64(water.header.width)
-        || grid_z >= usize_as_f64(water.header.height)
+    let expansion_cells = SURVEYED_WATER_FOOTPRINT_EXPANSION_METERS / water.header.spacing_meters;
+    debug_assert_eq!(expansion_cells.to_bits(), 1.0_f64.to_bits());
+    if grid_x < -expansion_cells
+        || grid_z < -expansion_cells
+        || grid_x >= usize_as_f64(water.header.width) + expansion_cells
+        || grid_z >= usize_as_f64(water.header.height) + expansion_cells
     {
         return None;
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let sample_x = libm::floor(grid_x) as usize;
+    let sample_x = libm::floor(grid_x) as isize;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let sample_z = libm::floor(grid_z) as usize;
-    let lake_id = water.lake_ids[sample_z * water.header.width + sample_x];
+    let sample_z = libm::floor(grid_z) as isize;
+    let lake_id_at = |sample_x: isize, sample_z: isize| {
+        let sample_x = usize::try_from(sample_x).ok()?;
+        let sample_z = usize::try_from(sample_z).ok()?;
+        (sample_x < water.header.width && sample_z < water.header.height)
+            .then(|| water.lake_ids[sample_z * water.header.width + sample_x])
+    };
+    let direct_lake_id = lake_id_at(sample_x, sample_z).unwrap_or(0);
+    let lake_id = if direct_lake_id != 0 {
+        direct_lake_id
+    } else {
+        // A one-cell square dilation extends every mapped shore by four meters.
+        // Lowest ID wins the rare overlap so the result is stable across visits.
+        (-1..=1)
+            .flat_map(|offset_z| {
+                (-1..=1).filter_map(move |offset_x| {
+                    lake_id_at(sample_x + offset_x, sample_z + offset_z)
+                })
+            })
+            .filter(|lake_id| *lake_id != 0)
+            .min()
+            .unwrap_or(0)
+    };
     if lake_id == 0 {
         return None;
     }
     let surface = water.surfaces_decimeters[usize::from(lake_id - 1)];
-    Some((
-        lake_id,
-        (f64::from(surface) * QUANTIZATION_METERS) + SURVEYED_WATER_LEVEL_OFFSET_METERS,
-    ))
+    Some((lake_id, f64::from(surface) * QUANTIZATION_METERS))
 }
 
 /// Samples local lidar-derived canopy cover and height in world meters.
@@ -487,9 +507,9 @@ mod tests {
     fn embedded_tile_decodes_with_expected_contract() {
         assert!(
             include_str!("../assets/michigan_tile.json")
-                .contains("\"settings_identity\": \"0x5355525645590002\"")
+                .contains("\"settings_identity\": \"0x5355525645590003\"")
         );
-        assert_eq!(DEFAULT_SURVEYED_SETTINGS_HASH, 0x5355_5256_4559_0002);
+        assert_eq!(DEFAULT_SURVEYED_SETTINGS_HASH, 0x5355_5256_4559_0003);
         let tile = decode_embedded_tile();
         assert_eq!((tile.width, tile.height), (5_000, 5_000));
         assert_eq!(tile.spacing_meters.to_bits(), 2.0_f64.to_bits());
@@ -536,9 +556,31 @@ mod tests {
 
         let upper_holmes_lake = michigan_surveyed_lake_at(7_364.0, 6_894.0).unwrap();
         assert_eq!(upper_holmes_lake.0, 19);
-        assert!((upper_holmes_lake.1 - 416.5).abs() < f64::EPSILON);
+        assert!((upper_holmes_lake.1 - 415.5).abs() < f64::EPSILON);
         assert!(
             michigan_surveyed_lake_at(DEFAULT_SURVEYED_START_X, DEFAULT_SURVEYED_START_Z).is_none()
+        );
+    }
+
+    #[test]
+    fn surveyed_water_footprint_expands_one_cell_beyond_the_mapped_shore() {
+        let water = decode_water();
+        let (mapped_x, mapped_z, lake_id) = (0..water.header.height)
+            .find_map(|sample_z| {
+                (0..water.header.width.saturating_sub(1)).find_map(|sample_x| {
+                    let lake_id = water.lake_ids[sample_z * water.header.width + sample_x];
+                    let east_id = water.lake_ids[sample_z * water.header.width + sample_x + 1];
+                    (lake_id != 0 && east_id == 0).then_some((sample_x, sample_z, lake_id))
+                })
+            })
+            .expect("surveyed water contains an east-facing shore");
+        let expanded_x = water.header.west_pixel_center_x
+            + (usize_as_f64(mapped_x + 1) * water.header.spacing_meters);
+        let expanded_z = (usize_as_f64(mapped_z) + 0.5) * water.header.spacing_meters;
+
+        assert_eq!(
+            michigan_surveyed_lake_at(expanded_x, expanded_z).map(|sample| sample.0),
+            Some(lake_id)
         );
     }
 

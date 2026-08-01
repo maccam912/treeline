@@ -4344,7 +4344,7 @@ mod tests {
             .lake_surface_at(UPPER_HOLMES_LAKE[0], UPPER_HOLMES_LAKE[1])
             .expect("mapped lake");
         assert_eq!(water.lake.id, 19);
-        assert!((water.lake.surface_elevation_meters - 416.5).abs() < f64::EPSILON);
+        assert!((water.lake.surface_elevation_meters - 415.5).abs() < f64::EPSILON);
 
         let chunk = ChunkIndex::containing(WorldPosition::new(
             UPPER_HOLMES_LAKE[0],

@@ -76,11 +76,13 @@ cells.
 Assign each lake a representative source level from the median bare-earth
 elevation inside its polygon, quantized to decimeters. Store the feature
 inventory and method in metadata. Runtime water is a horizontal sheet over that
-mapped footprint. The current bundle applies a versioned one-meter runtime
-offset above the source-derived level so the sheet meets the surrounding shore
-slope; metadata records that offset separately from the source value. This is
-not bathymetry: the implementation guarantees visible water and a stable
-shoreline mask but does not claim measured lake-bottom depth.
+mapped footprint. The current bundle keeps the source-derived level and applies
+a versioned four-meter horizontal expansion (one water-raster cell) around the
+mapped footprint so the sheet intersects the surrounding shore. Metadata
+records both the zero-meter level offset and horizontal expansion separately
+from the source values. This is not bathymetry: the implementation guarantees
+visible water and a stable shoreline mask but does not claim measured
+lake-bottom depth.
 
 Rivers and dynamic lake simulation are not inferred for a surveyed bundle
 until authoritative linework, flow direction, and elevation conformance have a
