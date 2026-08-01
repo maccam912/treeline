@@ -26,7 +26,9 @@ use treeline_ecology::{
 };
 use treeline_geography::Climate;
 use treeline_mesher::Mesh;
-use treeline_renderer::{AtmosphereSettings, TerrainMesh, TerrainRenderer, TreeMeshDetail};
+use treeline_renderer::{
+    AtmosphereSettings, LightingSettings, TerrainMesh, TerrainRenderer, TimeOfDay, TreeMeshDetail,
+};
 use treeline_simulation::{ActiveRegionId, ActiveWaterSimulation};
 use treeline_terrain::DEFAULT_SURVEYED_TILE_EDGE_METERS;
 #[cfg(test)]
@@ -98,6 +100,8 @@ const DISTANT_TREE_DISTANCE_MULTIPLIER: u64 = 20;
 const DISTANT_TREE_HIGH_QUALITY_DISTANCE_MULTIPLIER: u64 = 5;
 const DISTANT_TREE_SIMPLIFIED_DISTANCE_MULTIPLIER: u64 = 10;
 const DISTANT_TREE_TILE_CHUNKS_PER_EDGE: u64 = 4;
+// Four 128 m tree tiles cover the renderer's 480 m maximum shadow-caster reach.
+const SHADOW_TREE_TILE_RADIUS: u64 = 4;
 const ATMOSPHERE_CELL_EDGE_METERS: f64 = 8_000.0;
 #[cfg(not(target_arch = "wasm32"))]
 const TERRAIN_PREFETCH_CENTERS_AHEAD: u64 = 2;
@@ -228,6 +232,10 @@ impl ApplicationHandler for TreelineApp {
                         if event.state == ElementState::Pressed && !event.repeat {
                             game.toggle_aerial_mode();
                         }
+                    } else if code == KeyCode::KeyT {
+                        if event.state == ElementState::Pressed && !event.repeat {
+                            game.cycle_time_of_day();
+                        }
                     } else {
                         game.input
                             .set_key(code, event.state == ElementState::Pressed);
@@ -322,6 +330,7 @@ struct Game {
     water_simulation: ActiveWaterSimulation,
     active_water_region: ActiveRegionId,
     water_step_accumulator_seconds: f64,
+    time_of_day: TimeOfDay,
     #[cfg(target_arch = "wasm32")]
     browser_actions: BrowserActions,
 }
@@ -401,12 +410,10 @@ impl Game {
         let renderer = create_terrain_renderer(&device, &surface_config);
         let chunk_streamer = ChunkStreamer::new(chunk_streaming_config());
         let far_terrain_streamer = FarTerrainStreamer::new(far_terrain_streaming_config());
-        let mut terrain_chunks = BTreeMap::new();
-        let mut far_terrain_tiles = BTreeMap::new();
+        let (mut terrain_chunks, mut far_terrain_tiles) = (BTreeMap::new(), BTreeMap::new());
         let distant_tree_tiles = BTreeMap::new();
         let pending_distant_tree_tiles = VecDeque::new();
-        let mut requested_chunks = BTreeMap::new();
-        let mut requested_far_tiles = BTreeMap::new();
+        let (mut requested_chunks, mut requested_far_tiles) = (BTreeMap::new(), BTreeMap::new());
         #[cfg(not(target_arch = "wasm32"))]
         let mut terrain_jobs = TerrainMeshQueue::for_generated_world(terrain.clone());
         #[cfg(target_arch = "wasm32")]
@@ -431,10 +438,12 @@ impl Game {
             &mut requested_far_tiles,
             &mut terrain_jobs,
         )?;
-        renderer.update_camera(
+        update_render_camera(
+            &renderer,
             &queue,
-            camera.view_projection(surface_config.width, surface_config.height),
-            camera.position.to_array(),
+            &camera,
+            &surface_config,
+            TimeOfDay::default(),
         );
         let atmosphere_cell =
             initialize_atmosphere(&renderer, &queue, &terrain, camera.world_position());
@@ -483,6 +492,7 @@ impl Game {
             water_simulation,
             active_water_region,
             water_step_accumulator_seconds: 0.0,
+            time_of_day: TimeOfDay::default(),
             #[cfg(target_arch = "wasm32")]
             browser_actions,
         };
@@ -562,6 +572,11 @@ impl Game {
             "aerial mode {}",
             if enabled { "enabled" } else { "disabled" }
         );
+    }
+
+    fn cycle_time_of_day(&mut self) {
+        self.time_of_day = self.time_of_day.next();
+        eprintln!("daylight: {}", self.time_of_day.label());
     }
 
     fn random_warp(&mut self) -> Result<(), Box<dyn Error>> {
@@ -760,11 +775,12 @@ impl Game {
             eprintln!("distant tree streaming failed: {error}");
         }
         self.initial_generation.publish(&self.window);
-        self.renderer.update_camera(
+        update_render_camera(
+            &self.renderer,
             &self.queue,
-            self.camera
-                .view_projection(self.surface_config.width, self.surface_config.height),
-            self.camera.position.to_array(),
+            &self.camera,
+            &self.surface_config,
+            self.time_of_day,
         );
         if let Ok((cutout_min, cutout_max)) =
             far_cutout_bounds(self.chunk_streamer, self.camera.world_position())
@@ -823,6 +839,35 @@ impl Game {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Treeline frame encoder"),
             });
+        let shadow_tree_center = DistantTreeTileIndex::containing(self.camera.world_position());
+        let shadow_meshes = self
+            .far_terrain_tiles
+            .values()
+            .map(|resident| &resident.mesh)
+            .chain(self.terrain_chunks.values().map(|resident| &resident.mesh))
+            .chain(
+                self.distant_tree_tiles
+                    .iter()
+                    .filter_map(|(tile, resident)| {
+                        shadow_tree_center
+                            .is_some_and(|center| {
+                                tile.chebyshev_distance(center) <= SHADOW_TREE_TILE_RADIUS
+                            })
+                            .then_some(resident.mesh.as_ref())
+                            .flatten()
+                    }),
+            )
+            .chain(
+                self.terrain_chunks
+                    .values()
+                    .filter_map(|resident| resident.rock_mesh.as_ref()),
+            )
+            .chain(
+                self.terrain_chunks
+                    .values()
+                    .filter_map(|resident| resident.ground_vegetation_mesh.as_ref()),
+            )
+            .collect::<Vec<_>>();
         self.renderer.render(
             &mut encoder,
             &view,
@@ -857,6 +902,7 @@ impl Game {
                         .values()
                         .filter_map(|resident| resident.ground_vegetation_mesh.as_ref()),
                 ),
+            &shadow_meshes,
         );
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -1845,6 +1891,22 @@ fn create_terrain_renderer(
         surface_config.width,
         surface_config.height,
     )
+}
+
+fn update_render_camera(
+    renderer: &TerrainRenderer,
+    queue: &wgpu::Queue,
+    camera: &Camera,
+    surface_config: &wgpu::SurfaceConfiguration,
+    time_of_day: TimeOfDay,
+) {
+    renderer.update_camera(
+        queue,
+        camera.view_projection(surface_config.width, surface_config.height),
+        camera.position.to_array(),
+        camera.direction().as_vec3().to_array(),
+        LightingSettings::for_time_of_day(time_of_day),
+    );
 }
 
 fn initialize_active_water(

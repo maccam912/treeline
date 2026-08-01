@@ -1,5 +1,6 @@
 struct Camera {
     view_projection: mat4x4<f32>,
+    inverse_view_projection: mat4x4<f32>,
     render_origin_high: vec4<f32>,
     render_origin_low: vec4<f32>,
 };
@@ -24,6 +25,25 @@ struct Atmosphere {
 
 @group(0) @binding(2)
 var<uniform> atmosphere: Atmosphere;
+
+struct Lighting {
+    sun_direction_intensity: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_zenith: vec4<f32>,
+    sky_horizon: vec4<f32>,
+    ground_ambient: vec4<f32>,
+    cascade_splits: vec4<f32>,
+    shadow_view_projection: array<mat4x4<f32>, 3>,
+};
+
+@group(0) @binding(3)
+var<uniform> lighting: Lighting;
+
+@group(0) @binding(4)
+var shadow_map: texture_depth_2d_array;
+
+@group(0) @binding(5)
+var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position_high: vec3<f32>,
@@ -83,6 +103,84 @@ fn value_noise(position: vec2<f32>) -> f32 {
         blend.x,
     );
     return mix(bottom, top, blend.y);
+}
+
+fn sky_radiance(direction: vec3<f32>) -> vec3<f32> {
+    let elevation = clamp(direction.y, 0.0, 1.0);
+    let horizon_blend = pow(elevation, 0.38);
+    let climate_horizon = mix(
+        lighting.sky_horizon.rgb,
+        atmosphere.fog_color_density.rgb,
+        0.38,
+    );
+    var sky = mix(climate_horizon, lighting.sky_zenith.rgb, horizon_blend);
+    let sun_alignment = max(dot(direction, lighting.sun_direction_intensity.xyz), 0.0);
+    let solar_haze = pow(sun_alignment, 24.0) * (1.0 - smoothstep(0.0, 0.55, elevation));
+    sky += lighting.sun_color.rgb * solar_haze * 0.22;
+    return sky;
+}
+
+fn cascade_shadow(
+    cascade: u32,
+    render_position: vec3<f32>,
+    normal_dot_sun: f32,
+) -> f32 {
+    let shadow_clip = lighting.shadow_view_projection[cascade]
+        * vec4<f32>(render_position, 1.0);
+    let projected = shadow_clip.xyz / shadow_clip.w;
+    let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    if (
+        projected.z <= 0.0
+        || projected.z >= 1.0
+        || any(uv < vec2<f32>(0.0))
+        || any(uv > vec2<f32>(1.0))
+    ) {
+        return 1.0;
+    }
+    let texel = 1.0 / 1024.0;
+    let bias = 0.00018 + ((1.0 - normal_dot_sun) * 0.00062);
+    let reference_depth = projected.z - bias;
+    var visibility = 0.0;
+    for (var z = -1; z <= 1; z += 1) {
+        for (var x = -1; x <= 1; x += 1) {
+            let offset = vec2<f32>(f32(x), f32(z)) * texel;
+            visibility += textureSampleCompareLevel(
+                shadow_map,
+                shadow_sampler,
+                uv + offset,
+                i32(cascade),
+                reference_depth,
+            );
+        }
+    }
+    return visibility / 9.0;
+}
+
+fn sun_visibility(
+    render_position: vec3<f32>,
+    view_distance: f32,
+    normal_dot_sun: f32,
+) -> f32 {
+    var cascade = 2u;
+    var previous_split = lighting.cascade_splits.y;
+    if (view_distance < lighting.cascade_splits.x) {
+        cascade = 0u;
+        previous_split = 0.0;
+    } else if (view_distance < lighting.cascade_splits.y) {
+        cascade = 1u;
+        previous_split = lighting.cascade_splits.x;
+    } else if (view_distance >= lighting.cascade_splits.z) {
+        return 1.0;
+    }
+    let current = cascade_shadow(cascade, render_position, normal_dot_sun);
+    if (cascade >= 2u) {
+        return current;
+    }
+    let split = lighting.cascade_splits[cascade];
+    let blend_start = mix(previous_split, split, 0.88);
+    let blend = smoothstep(blend_start, split, view_distance);
+    let next = cascade_shadow(cascade + 1u, render_position, normal_dot_sun);
+    return mix(current, next, blend);
 }
 
 @fragment
@@ -147,34 +245,42 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         normal = normalize(vec3<f32>(long_wave, 1.0, short_wave));
         let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
         let fresnel = 0.04 + (0.56 * pow(1.0 - facing, 5.0));
-        let reflected_sky = vec3<f32>(0.30, 0.53, 0.72);
+        let reflection_direction = reflect(-view_direction, normal);
+        let reflected_sky = sky_radiance(reflection_direction);
         visualized = mix(input.color.rgb * 0.72, reflected_sky, fresnel);
     }
 
-    // A warm directional sun establishes form while cool skylight and a small
-    // ground bounce keep shaded faces legible.
-    let sun_direction = normalize(vec3<f32>(0.45, 0.80, 0.35));
+    // The sky, direct light, reflections, and shadow maps share one sun model.
+    let sun_direction = lighting.sun_direction_intensity.xyz;
     let sunlight = max(dot(normal, sun_direction), 0.0);
+    let view_distance = length(input.render_position);
+    let shadow = sun_visibility(input.render_position, view_distance, sunlight);
     let sky_exposure = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
     let ground_exposure = clamp(-normal.y, 0.0, 1.0);
     let skylight = mix(
-        vec3<f32>(0.12, 0.15, 0.20),
-        vec3<f32>(0.30, 0.37, 0.46),
+        lighting.ground_ambient.rgb * 0.42,
+        lighting.sky_zenith.rgb * 0.48,
         sky_exposure,
     );
-    let direct_light = vec3<f32>(1.00, 0.88, 0.70) * sunlight * 0.86;
-    let ground_bounce = vec3<f32>(0.13, 0.10, 0.07) * ground_exposure;
+    let direct_light = lighting.sun_color.rgb
+        * sunlight
+        * shadow
+        * lighting.sun_direction_intensity.w;
+    let ground_bounce = lighting.ground_ambient.rgb * ground_exposure;
     var lit = visualized * (skylight + direct_light + ground_bounce);
     if (is_water) {
         let half_direction = normalize(sun_direction + view_direction);
         let sun_glint = pow(max(dot(normal, half_direction), 0.0), 180.0);
-        lit += vec3<f32>(1.0, 0.88, 0.66) * sun_glint * 1.8;
+        lit += lighting.sun_color.rgb
+            * sun_glint
+            * shadow
+            * lighting.sun_direction_intensity.w
+            * 1.8;
     }
 
     // Exponential aerial perspective keeps the full 100 km horizon legible
     // without a hard fog wall. Low terrain carries a little more suspended
     // moisture than ridges, producing visible valley haze.
-    let view_distance = length(input.render_position);
     let fog_density = max(atmosphere.fog_color_density.w, 0.0);
     let moisture = clamp(atmosphere.wind_moisture.z, 0.0, 1.0);
     let distance_haze = 1.0 - exp(-(view_distance / 22000.0) * fog_density);
@@ -182,7 +288,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         * smoothstep(900.0, 9000.0, view_distance)
         * mix(0.06, 0.28, moisture);
     let haze = clamp(distance_haze + lowland_haze, 0.0, 0.92);
-    let horizon_color = atmosphere.fog_color_density.rgb;
+    let horizon_color = mix(
+        lighting.sky_horizon.rgb,
+        atmosphere.fog_color_density.rgb,
+        0.55,
+    );
     lit = mix(lit, horizon_color, haze);
     return vec4<f32>(lit, 1.0);
 }

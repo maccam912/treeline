@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Quat, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec3};
 use treeline_ecology::{
     BarkStyle, CrownShape, GroundCoverGroup, GroundPlant, ProceduralTree, RockForm, SurfaceRock,
     TreeCondition, TreeFunctionalGroup,
@@ -13,7 +13,93 @@ use treeline_mesher::Mesh;
 use wgpu::util::DeviceExt;
 
 const TERRAIN_SHADER: &str = include_str!("terrain.wgsl");
+const SHADOW_SHADER: &str = include_str!("shadow.wgsl");
+const SKY_SHADER: &str = include_str!("sky.wgsl");
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const SHADOW_CASCADE_COUNT: usize = 3;
+const SHADOW_MAP_SIZE: u32 = 1_024;
+const SHADOW_CASCADE_SPLITS_METERS: [f32; SHADOW_CASCADE_COUNT] = [48.0, 140.0, 360.0];
+const SHADOW_CASCADE_RADII_METERS: [f64; SHADOW_CASCADE_COUNT] = [56.0, 164.0, 424.0];
+const SHADOW_DEPTH_METERS: f64 = 3_000.0;
+
+/// Maximum horizontal caster distance needed by the cascaded shadow maps.
+pub const SHADOW_CASTER_DISTANCE_METERS: f64 = 480.0;
+
+/// Curated daylight states that exercise the complete sky and sun model.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TimeOfDay {
+    Dawn,
+    #[default]
+    Noon,
+    Dusk,
+}
+
+impl TimeOfDay {
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Dawn => Self::Noon,
+            Self::Noon => Self::Dusk,
+            Self::Dusk => Self::Dawn,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dawn => "dawn",
+            Self::Noon => "noon",
+            Self::Dusk => "dusk",
+        }
+    }
+}
+
+/// Coherent sun, sky, and ambient-light inputs shared by every render path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightingSettings {
+    pub sun_direction: [f32; 3],
+    pub sun_intensity: f32,
+    pub sun_color: [f32; 3],
+    pub sky_zenith: [f32; 3],
+    pub sky_horizon: [f32; 3],
+    pub ground_ambient: [f32; 3],
+}
+
+impl LightingSettings {
+    pub const fn for_time_of_day(time: TimeOfDay) -> Self {
+        match time {
+            TimeOfDay::Dawn => Self {
+                sun_direction: [0.941, 0.224, 0.254],
+                sun_intensity: 0.58,
+                sun_color: [1.00, 0.47, 0.22],
+                sky_zenith: [0.09, 0.18, 0.38],
+                sky_horizon: [0.79, 0.38, 0.24],
+                ground_ambient: [0.12, 0.08, 0.08],
+            },
+            TimeOfDay::Noon => Self {
+                sun_direction: [0.457, 0.812, 0.355],
+                sun_intensity: 0.88,
+                sun_color: [1.00, 0.88, 0.70],
+                sky_zenith: [0.16, 0.38, 0.73],
+                sky_horizon: [0.42, 0.63, 0.85],
+                ground_ambient: [0.13, 0.10, 0.07],
+            },
+            TimeOfDay::Dusk => Self {
+                sun_direction: [-0.920, 0.207, -0.332],
+                sun_intensity: 0.52,
+                sun_color: [1.00, 0.39, 0.18],
+                sky_zenith: [0.08, 0.12, 0.29],
+                sky_horizon: [0.73, 0.30, 0.25],
+                ground_ambient: [0.11, 0.07, 0.08],
+            },
+        }
+    }
+}
+
+impl Default for LightingSettings {
+    fn default() -> Self {
+        Self::for_time_of_day(TimeOfDay::default())
+    }
+}
 
 /// Renderer-facing atmosphere controls sampled from the world's local climate.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -261,6 +347,7 @@ fn lerp_f64(start: f64, end: f64, amount: f64) -> f64 {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct CameraUniform {
     view_projection: [[f32; 4]; 4],
+    inverse_view_projection: [[f32; 4]; 4],
     render_origin_high: [f32; 4],
     render_origin_low: [f32; 4],
 }
@@ -281,6 +368,26 @@ struct AtmosphereUniform {
     wind_moisture: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct LightingUniform {
+    sun_direction_intensity: [f32; 4],
+    sun_color: [f32; 4],
+    sky_zenith: [f32; 4],
+    sky_horizon: [f32; 4],
+    ground_ambient: [f32; 4],
+    cascade_splits: [f32; 4],
+    shadow_view_projection: [[[f32; 4]; 4]; SHADOW_CASCADE_COUNT],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct ShadowCameraUniform {
+    view_projection: [[f32; 4]; 4],
+    render_origin_high: [f32; 4],
+    render_origin_low: [f32; 4],
+}
+
 fn atmosphere_uniform(settings: AtmosphereSettings) -> AtmosphereUniform {
     AtmosphereUniform {
         fog_color_density: [
@@ -296,6 +403,108 @@ fn atmosphere_uniform(settings: AtmosphereSettings) -> AtmosphereUniform {
             0.0,
         ],
     }
+}
+
+fn normalized_sun_direction(settings: LightingSettings) -> Vec3 {
+    Vec3::from_array(settings.sun_direction).normalize_or(Vec3::Y)
+}
+
+fn lighting_uniform(
+    settings: LightingSettings,
+    render_origin: [f64; 3],
+    view_direction: [f32; 3],
+) -> LightingUniform {
+    let sun_direction = normalized_sun_direction(settings);
+    LightingUniform {
+        sun_direction_intensity: [
+            sun_direction.x,
+            sun_direction.y,
+            sun_direction.z,
+            settings.sun_intensity.max(0.0),
+        ],
+        sun_color: [
+            settings.sun_color[0].max(0.0),
+            settings.sun_color[1].max(0.0),
+            settings.sun_color[2].max(0.0),
+            0.0,
+        ],
+        sky_zenith: [
+            settings.sky_zenith[0].max(0.0),
+            settings.sky_zenith[1].max(0.0),
+            settings.sky_zenith[2].max(0.0),
+            0.0,
+        ],
+        sky_horizon: [
+            settings.sky_horizon[0].max(0.0),
+            settings.sky_horizon[1].max(0.0),
+            settings.sky_horizon[2].max(0.0),
+            0.0,
+        ],
+        ground_ambient: [
+            settings.ground_ambient[0].max(0.0),
+            settings.ground_ambient[1].max(0.0),
+            settings.ground_ambient[2].max(0.0),
+            0.0,
+        ],
+        cascade_splits: [
+            SHADOW_CASCADE_SPLITS_METERS[0],
+            SHADOW_CASCADE_SPLITS_METERS[1],
+            SHADOW_CASCADE_SPLITS_METERS[2],
+            0.0,
+        ],
+        shadow_view_projection: shadow_view_projections(
+            render_origin,
+            view_direction,
+            sun_direction,
+        ),
+    }
+}
+
+fn shadow_view_projections(
+    render_origin: [f64; 3],
+    view_direction: [f32; 3],
+    sun_direction: Vec3,
+) -> [[[f32; 4]; 4]; SHADOW_CASCADE_COUNT] {
+    let origin = DVec3::from_array(render_origin);
+    let view_direction = DVec3::new(
+        f64::from(view_direction[0]),
+        0.0,
+        f64::from(view_direction[2]),
+    )
+    .normalize_or(DVec3::Z);
+    let sun_direction = sun_direction.as_dvec3();
+    let light_forward = -sun_direction;
+    let provisional_up = if light_forward.y.abs() > 0.98 {
+        DVec3::Z
+    } else {
+        DVec3::Y
+    };
+    let light_right = light_forward.cross(provisional_up).normalize();
+    let light_up = light_right.cross(light_forward).normalize();
+
+    std::array::from_fn(|cascade| {
+        let radius = SHADOW_CASCADE_RADII_METERS[cascade];
+        let desired_center = origin + (view_direction * radius * 0.35);
+        let texel_size = (radius * 2.0) / f64::from(SHADOW_MAP_SIZE);
+        let snapped_right = libm::round(desired_center.dot(light_right) / texel_size) * texel_size;
+        let snapped_up = libm::round(desired_center.dot(light_up) / texel_size) * texel_size;
+        let snapped_center = (light_right * snapped_right)
+            + (light_up * snapped_up)
+            + (light_forward * desired_center.dot(light_forward));
+        let relative_center = snapped_center - origin;
+        let eye = relative_center + (sun_direction * (SHADOW_DEPTH_METERS * 0.5));
+        let view = Mat4::look_at_rh(eye.as_vec3(), relative_center.as_vec3(), light_up.as_vec3());
+        let radius = f64_as_f32(radius);
+        let projection = Mat4::orthographic_rh(
+            -radius,
+            radius,
+            -radius,
+            radius,
+            0.0,
+            f64_as_f32(SHADOW_DEPTH_METERS),
+        );
+        (projection * view).to_cols_array_2d()
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -317,11 +526,17 @@ impl Error for RendererError {}
 #[derive(Debug)]
 pub struct TerrainRenderer {
     pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     far_bind_group: wgpu::BindGroup,
     near_bind_group: wgpu::BindGroup,
     far_cutout_buffer: wgpu::Buffer,
     atmosphere_buffer: wgpu::Buffer,
+    lighting_buffer: wgpu::Buffer,
+    shadow_map: ShadowMap,
+    shadow_camera_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT],
+    shadow_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT],
     depth: DepthTarget,
 }
 
@@ -332,12 +547,114 @@ struct TerrainBindings {
     near_bind_group: wgpu::BindGroup,
     far_cutout_buffer: wgpu::Buffer,
     atmosphere_buffer: wgpu::Buffer,
+    lighting_buffer: wgpu::Buffer,
+}
+
+#[derive(Debug)]
+struct ShadowMap {
+    _texture: wgpu::Texture,
+    sampling_view: wgpu::TextureView,
+    layer_views: [wgpu::TextureView; SHADOW_CASCADE_COUNT],
+    sampler: wgpu::Sampler,
+}
+
+impl ShadowMap {
+    fn new(device: &wgpu::Device) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cascaded sun shadow maps"),
+            size: wgpu::Extent3d {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+                depth_or_array_layers: u32::try_from(SHADOW_CASCADE_COUNT)
+                    .expect("shadow cascade count fits u32"),
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sampling_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("sun shadow map array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let layer_views = std::array::from_fn(|cascade| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("sun shadow cascade"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: u32::try_from(cascade).expect("cascade index fits u32"),
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sun shadow comparison sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        Self {
+            _texture: texture,
+            sampling_view,
+            layer_views,
+            sampler,
+        }
+    }
+}
+
+struct ShadowBindings {
+    layout: wgpu::BindGroupLayout,
+    camera_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT],
+    bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT],
+}
+
+impl ShadowBindings {
+    fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow camera bind group layout"),
+            entries: &[uniform_layout_entry(0, wgpu::ShaderStages::VERTEX)],
+        });
+        let empty = ShadowCameraUniform {
+            view_projection: [[0.0; 4]; 4],
+            render_origin_high: [0.0; 4],
+            render_origin_low: [0.0; 4],
+        };
+        let camera_buffers = std::array::from_fn(|_| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shadow camera uniform"),
+                contents: bytemuck::bytes_of(&empty),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+        });
+        let bind_groups = std::array::from_fn(|cascade| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shadow camera bind group"),
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffers[cascade].as_entire_binding(),
+                }],
+            })
+        });
+        Self {
+            layout,
+            camera_buffers,
+            bind_groups,
+        }
+    }
 }
 
 impl TerrainBindings {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, shadow_map: &ShadowMap) -> Self {
         let camera_uniform = CameraUniform {
             view_projection: [[0.0; 4]; 4],
+            inverse_view_projection: [[0.0; 4]; 4],
             render_origin_high: [0.0; 4],
             render_origin_low: [0.0; 4],
         };
@@ -370,6 +687,9 @@ impl TerrainBindings {
                 uniform_layout_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
                 uniform_layout_entry(1, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
                 uniform_layout_entry(2, wgpu::ShaderStages::FRAGMENT),
+                uniform_layout_entry(3, wgpu::ShaderStages::FRAGMENT),
+                depth_texture_layout_entry(4),
+                comparison_sampler_layout_entry(5),
             ],
         });
         let atmosphere = AtmosphereSettings::default();
@@ -378,20 +698,29 @@ impl TerrainBindings {
             contents: bytemuck::bytes_of(&atmosphere_uniform(atmosphere)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let lighting = lighting_uniform(LightingSettings::default(), [0.0; 3], [0.0, 0.0, -1.0]);
+        let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lighting uniform"),
+            contents: bytemuck::bytes_of(&lighting),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let resources = |cutout_buffer| TerrainBindGroupResources {
+            camera_buffer: &camera_buffer,
+            cutout_buffer,
+            atmosphere_buffer: &atmosphere_buffer,
+            lighting_buffer: &lighting_buffer,
+            shadow_map,
+        };
         let far_bind_group = terrain_bind_group(
             device,
             &layout,
-            &camera_buffer,
-            &far_cutout_buffer,
-            &atmosphere_buffer,
+            resources(&far_cutout_buffer),
             "far terrain bind group",
         );
         let near_bind_group = terrain_bind_group(
             device,
             &layout,
-            &camera_buffer,
-            &no_cutout_buffer,
-            &atmosphere_buffer,
+            resources(&no_cutout_buffer),
             "near terrain bind group",
         );
 
@@ -402,6 +731,7 @@ impl TerrainBindings {
             near_bind_group,
             far_cutout_buffer,
             atmosphere_buffer,
+            lighting_buffer,
         }
     }
 }
@@ -435,12 +765,41 @@ const fn uniform_layout_entry(
     }
 }
 
+const fn depth_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Depth,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+const fn comparison_sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+        count: None,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TerrainBindGroupResources<'a> {
+    camera_buffer: &'a wgpu::Buffer,
+    cutout_buffer: &'a wgpu::Buffer,
+    atmosphere_buffer: &'a wgpu::Buffer,
+    lighting_buffer: &'a wgpu::Buffer,
+    shadow_map: &'a ShadowMap,
+}
+
 fn terrain_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    camera_buffer: &wgpu::Buffer,
-    cutout_buffer: &wgpu::Buffer,
-    atmosphere_buffer: &wgpu::Buffer,
+    resources: TerrainBindGroupResources<'_>,
     label: &str,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -449,15 +808,27 @@ fn terrain_bind_group(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: camera_buffer.as_entire_binding(),
+                resource: resources.camera_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: cutout_buffer.as_entire_binding(),
+                resource: resources.cutout_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: atmosphere_buffer.as_entire_binding(),
+                resource: resources.atmosphere_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: resources.lighting_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.sampling_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(&resources.shadow_map.sampler),
             },
         ],
     })
@@ -471,6 +842,140 @@ pub struct TerrainMesh {
     index_count: u32,
 }
 
+fn create_terrain_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("terrain shader"),
+        source: wgpu::ShaderSource::Wgsl(TERRAIN_SHADER.into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("terrain pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[TerrainVertex::layout()],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            // Reverse-Z preserves precision from ground cover through the horizon.
+            depth_compare: wgpu::CompareFunction::Greater,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn create_sky_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("sky shader"),
+        source: wgpu::ShaderSource::Wgsl(SKY_SHADER.into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("physical sky pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_sky"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_sky"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn create_shadow_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shadow shader"),
+        source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("shadow pipeline layout"),
+        bind_group_layouts: &[layout],
+        push_constant_ranges: &[],
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cascaded sun shadow pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[TerrainVertex::layout()],
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 1.8,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 impl TerrainRenderer {
     /// Creates the shared lit terrain pipeline and camera/depth resources.
     pub fn new(
@@ -479,62 +984,32 @@ impl TerrainRenderer {
         width: u32,
         height: u32,
     ) -> Self {
-        let bindings = TerrainBindings::new(device);
+        let shadow_map = ShadowMap::new(device);
+        let bindings = TerrainBindings::new(device, &shadow_map);
+        let shadow_bindings = ShadowBindings::new(device);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("terrain shader"),
-            source: wgpu::ShaderSource::Wgsl(TERRAIN_SHADER.into()),
-        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain pipeline layout"),
             bind_group_layouts: &[&bindings.layout],
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("terrain pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[TerrainVertex::layout()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                // Reverse-Z preserves precision from nearby ground cover through
-                // the horizon instead of spending most depth values near 0.1 m.
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let pipeline = create_terrain_pipeline(device, &pipeline_layout, surface_format);
+        let sky_pipeline = create_sky_pipeline(device, &pipeline_layout, surface_format);
+        let shadow_pipeline = create_shadow_pipeline(device, &shadow_bindings.layout);
 
         Self {
             pipeline,
+            sky_pipeline,
+            shadow_pipeline,
             camera_buffer: bindings.camera_buffer,
             far_bind_group: bindings.far_bind_group,
             near_bind_group: bindings.near_bind_group,
             far_cutout_buffer: bindings.far_cutout_buffer,
             atmosphere_buffer: bindings.atmosphere_buffer,
+            lighting_buffer: bindings.lighting_buffer,
+            shadow_map,
+            shadow_camera_buffers: shadow_bindings.camera_buffers,
+            shadow_bind_groups: shadow_bindings.bind_groups,
             depth: DepthTarget::new(device, width, height),
         }
     }
@@ -769,13 +1244,19 @@ impl TerrainRenderer {
         queue: &wgpu::Queue,
         view_projection: [[f32; 4]; 4],
         render_origin: [f64; 3],
+        view_direction: [f32; 3],
+        lighting: LightingSettings,
     ) {
         let (render_origin_high, render_origin_low) = split_position(render_origin);
+        let inverse_view_projection = Mat4::from_cols_array_2d(&view_projection)
+            .inverse()
+            .to_cols_array_2d();
         queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::bytes_of(&CameraUniform {
                 view_projection,
+                inverse_view_projection,
                 render_origin_high: [
                     render_origin_high[0],
                     render_origin_high[1],
@@ -790,6 +1271,29 @@ impl TerrainRenderer {
                 ],
             }),
         );
+        let lighting = lighting_uniform(lighting, render_origin, view_direction);
+        queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&lighting));
+        for (cascade, buffer) in self.shadow_camera_buffers.iter().enumerate() {
+            queue.write_buffer(
+                buffer,
+                0,
+                bytemuck::bytes_of(&ShadowCameraUniform {
+                    view_projection: lighting.shadow_view_projection[cascade],
+                    render_origin_high: [
+                        render_origin_high[0],
+                        render_origin_high[1],
+                        render_origin_high[2],
+                        0.0,
+                    ],
+                    render_origin_low: [
+                        render_origin_low[0],
+                        render_origin_low[1],
+                        render_origin_low[2],
+                        0.0,
+                    ],
+                }),
+            );
+        }
     }
 
     /// Updates climate-derived fog and wind controls without rebuilding any
@@ -826,7 +1330,33 @@ impl TerrainRenderer {
         view: &wgpu::TextureView,
         far_meshes: impl IntoIterator<Item = &'far TerrainMesh>,
         near_meshes: impl IntoIterator<Item = &'near TerrainMesh>,
+        shadow_meshes: &[&TerrainMesh],
     ) {
+        for cascade in 0..SHADOW_CASCADE_COUNT {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sun shadow cascade pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_map.layer_views[cascade],
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_bind_group(0, &self.shadow_bind_groups[cascade], &[]);
+            for mesh in shadow_meshes {
+                shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                shadow_pass
+                    .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+        }
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("terrain render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -834,9 +1364,9 @@ impl TerrainRenderer {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.34,
-                        g: 0.56,
-                        b: 0.76,
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
                         a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
@@ -853,6 +1383,9 @@ impl TerrainRenderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        pass.set_pipeline(&self.sky_pipeline);
+        pass.set_bind_group(0, &self.near_bind_group, &[]);
+        pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.far_bind_group, &[]);
         for mesh in far_meshes {
@@ -1860,6 +2393,75 @@ impl DepthTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daylight_presets_cycle_and_share_normalized_sun_directions() {
+        assert_eq!(TimeOfDay::Dawn.next(), TimeOfDay::Noon);
+        assert_eq!(TimeOfDay::Noon.next(), TimeOfDay::Dusk);
+        assert_eq!(TimeOfDay::Dusk.next(), TimeOfDay::Dawn);
+
+        for time in [TimeOfDay::Dawn, TimeOfDay::Noon, TimeOfDay::Dusk] {
+            let settings = LightingSettings::for_time_of_day(time);
+            let uniform = lighting_uniform(settings, [0.0; 3], [0.0, 0.0, -1.0]);
+            let direction = Vec3::from_array([
+                uniform.sun_direction_intensity[0],
+                uniform.sun_direction_intensity[1],
+                uniform.sun_direction_intensity[2],
+            ]);
+            assert!((direction.length() - 1.0).abs() < 1.0e-6);
+            assert!(direction.y > 0.0);
+            assert!(uniform.sun_direction_intensity[3] > 0.0);
+        }
+    }
+
+    #[test]
+    fn shadow_cascades_are_ordered_finite_and_texel_stabilized() {
+        assert!(
+            SHADOW_CASCADE_SPLITS_METERS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert!(
+            SHADOW_CASCADE_RADII_METERS
+                .iter()
+                .zip(SHADOW_CASCADE_SPLITS_METERS)
+                .all(|(&radius, split)| radius > f64::from(split))
+        );
+
+        let sun = normalized_sun_direction(LightingSettings::default());
+        let first_origin = [1_000_000.0, 410.0, -1_000_000.0];
+        let moved_origin = [1_000_000.01, 410.0, -999_999.99];
+        let direction = [0.35, -0.12, -0.93];
+        let world_point = DVec3::new(1_000_012.0, 402.0, -1_000_018.0);
+        let first = shadow_view_projections(first_origin, direction, sun);
+        let moved = shadow_view_projections(moved_origin, direction, sun);
+
+        for cascade in 0..SHADOW_CASCADE_COUNT {
+            assert!(
+                first[cascade]
+                    .iter()
+                    .flatten()
+                    .all(|value| value.is_finite())
+            );
+            let projected = |matrix: [[f32; 4]; 4], origin: [f64; 3]| {
+                let relative = (world_point - DVec3::from_array(origin)).as_vec3();
+                let clip = Mat4::from_cols_array_2d(&matrix) * relative.extend(1.0);
+                clip.truncate() / clip.w
+            };
+            let first_position = projected(first[cascade], first_origin);
+            let moved_position = projected(moved[cascade], moved_origin);
+            let maximum_texel_step = 2.0 / f64_as_f32(f64::from(SHADOW_MAP_SIZE)) + 1.0e-6;
+            assert!((first_position.x - moved_position.x).abs() <= maximum_texel_step);
+            assert!((first_position.y - moved_position.y).abs() <= maximum_texel_step);
+        }
+    }
+
+    #[test]
+    fn gpu_uniform_layouts_match_wgsl_alignment() {
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 160);
+        assert_eq!(std::mem::size_of::<ShadowCameraUniform>(), 96);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 288);
+    }
 
     #[test]
     fn high_low_positions_preserve_submeter_camera_offsets_after_distant_warps() {

@@ -68,7 +68,9 @@ Not:
 
 ## Nature should feel structured, not noisy
 
-World generation should operate through processes and relationships:
+The player-facing landscape gets its large-scale structure from observations,
+not from a terrain synthesizer. Derived and unobserved systems should still
+operate through processes and relationships:
 
 mountains create rain shadows
 rain creates drainage
@@ -91,45 +93,25 @@ A river should feel as though there is a reason it exists.
 
 ## Large features come before small details
 
-Minecraft tends to generate terrain roughly like:
+The source and derivation hierarchy for the player world is:
 
 ```text
-noise
-  ↓
-terrain shape
-  ↓
-biome
-  ↓
-trees
-  ↓
-structures
+surveyed regional coverage
+        ↓
+aligned elevation / hydrography / canopy / imagery
+        ↓
+versioned terrain, water, and vegetation representations
+        ↓
+honest derived environmental fields
+        ↓
+procedural detail only where the observations do not identify individuals
+        ↓
+runtime simulation and persistent deviations
 ```
 
-This project should instead build a geographical hierarchy:
-
-```text
-continental region
-       ↓
-mountain systems / basins
-       ↓
-watersheds
-       ↓
-major rivers
-       ↓
-valleys / plateaus / plains
-       ↓
-local geology
-       ↓
-erosion
-       ↓
-forest / wetland / desert
-       ↓
-small terrain
-       ↓
-plants / rocks / debris
-```
-
-Large features must remain coherent across tens or hundreds of kilometers.
+Mountains, valleys, plateaus, coasts, and lake footprints must remain the
+features present in the source data. Treeline must not replace them with a
+synthetic approximation merely to create more variety.
 
 ---
 
@@ -152,19 +134,20 @@ Required landscape families include:
 * wetlands, lakes, rivers, coasts, reefs, caves, and rare natural wonders
 
 These are not cosmetic biome palettes placed over interchangeable terrain.
-They must arise from different combinations of landmass structure, geology,
-uplift, faulting, erosion, drainage, sediment, climate, soil, exposure, and
-disturbance. Those causes must affect both terrain shape and ecology.
+They are coverage requirements for the surveyed-world catalog: long-distance
+expansion should deliberately add real regions that exhibit them. Where source
+layers exist, geology, drainage, climate, soil, exposure, and disturbance may
+explain and enrich the observed terrain, but they must not rewrite it.
 
 The world needs quiet plains as well as dramatic relief. It needs gradual
 slopes, steep traversable slopes, and genuinely abrupt terrain. Steepness must
 occur as coherent ridges, scarps, bluffs, cliffs, canyon walls, and mountain
 faces rather than isolated noise spikes.
 
-Ten distant regions that differ only in tree mixture, material color, or hill
-amplitude have failed this pillar. Interesting geographical diversity is not a
-later content pass. It is one of the primary products of world generation and a
-precondition for expedition gameplay.
+Ten surveyed regions that differ only in tree mixture or material color have
+failed this pillar. Interesting geographical diversity is a data-coverage and
+selection goal, not a request to exaggerate or normalize individual tiles. It
+remains a precondition for expedition gameplay.
 
 ---
 
@@ -421,9 +404,11 @@ Instead create actual features.
 
 ---
 
-# 8. Hierarchical Generation
+# 8. Spatial Hierarchy and Procedural Scope
 
-Every location should exist inside several nested geographical scales.
+Every surveyed location exists inside several nested geographical scales, but
+those scales come from the source coordinate system and coverage catalog rather
+than hashed procedural ownership cells.
 
 Example:
 
@@ -449,7 +434,9 @@ surface detail
 <10 m
 ```
 
-Coordinates feed deterministic hashes at each level.
+Coordinates and immutable artifact identities select samples at each level.
+Deterministic hashes remain appropriate for individual placement, caves,
+simulation, tests, and an explicit future missing-data policy.
 
 Something like:
 
@@ -462,59 +449,59 @@ hash(
 )
 ```
 
-This allows a region to have persistent characteristics without storing them.
+This gives derived content stable identity without pretending that a seed is
+the authority for measured surface geography.
 
-## Generate large regions top-down before local terrain
+## Preserve large regions before deriving local detail
 
-Adopt the useful part of world-map-first generation without giving up an
-effectively endless world.
+The player-facing world is bounded by admitted surveyed coverage. It must never
+silently continue beyond that coverage using a clamped edge or synthetic
+terrain. Expansion means admitting another aligned, versioned surveyed bundle
+through a reviewed boundary and delivery policy.
 
-Generate deterministic geographical provinces on the order of hundreds of
-kilometers before generating their local voxel detail. A province should contain
-an explainable coarse plan for:
+For a surveyed region, preserve this source-to-runtime hierarchy:
 
 ```text
-landmass and coast topology
+measured landmass, coast, and elevation
         ↓
-uplift, faults, strata, volcanism, and glacial history
+authoritative hydrography and other available mapped features
         ↓
-mountain systems, plateaus, escarpments, plains, and basins
+aligned canopy, imagery, geology, climate, and land-cover observations
         ↓
-drainage, lakes, sediment movement, and erosion
+versioned derived fields whose evidence is explicit
         ↓
-wind, temperature, precipitation, and rain shadows
+local signed density, water surfaces, materials, and vegetation instances
         ↓
-soil, salinity, surface moisture, exposure, and disturbance
-        ↓
-forest, woodland, grassland, shrubland, desert, alpine, and wetland cover
-        ↓
-local height and signed-density features
+simulation and persistent world modifications
 ```
 
-This is a bounded deterministic artifact, not an eagerly generated global map.
-A complete island may be owned by one province or coordinated by a coarser
-parent artifact; a continent may span many provinces. Parent-scale fields,
-explicit boundary conditions, and generation halos must make coasts, ranges,
-climate, and drainage agree across province boundaries. Generation and results
-must remain independent of visitation order and job completion order.
+Procedural geographical provinces remain a reproducible research path and may
+later support places with no acceptable observations, but they do not fill or
+reshape the default surveyed footprint. If gap filling is ever admitted, its
+boundaries, provenance, visual treatment, identity, and persistence semantics
+must be explicit; it cannot masquerade as measured terrain.
 
-The province plan must describe overlapping causes and continuous environmental
-fields, not assign a single primary biome ID to every cell. Names such as
+Derived ecological fields should describe overlapping conditions, not assign a
+single primary biome ID to every cell. Names such as
 “prairie,” “salt flat,” or “alpine desert” may be useful for audits, maps, and
 player language, but they describe an outcome. They are not the input that
 causes the terrain.
 
-Broad terrain can remain height-based where appropriate. Cliffs, undercuts,
-overhangs, arches, bluff faces, and similarly volumetric landforms must use
-signed-density operations when a heightfield cannot express them. Near and far
-representations must derive from the same province plan and remain spatially
-aligned.
+The measured surface is height-based where the source is a DEM. Near and far
+representations must derive from that same surface and remain spatially
+aligned. Caves, player edits, and independently evidenced overhangs or arches
+may add signed-density volume; a generic procedural morphology pass must not
+invent surface landforms inside surveyed coverage.
 
 ---
 
 # 9. Regional Identity
 
-Every large region receives a procedural “genotype.”
+Every large player-facing region receives a surveyed identity: source bounds,
+coordinate reference system, acquisition and processing provenance, layer
+inventory, and content hashes. The following procedural “genotype” remains
+useful for research worlds and genuinely unobserved derived systems, not as a
+replacement for the measured surface:
 
 For example:
 
@@ -538,7 +525,8 @@ river_meandering = 0.31
 sediment_load = 0.57
 ```
 
-These parameters should be spatially correlated rather than changing at arbitrary region boundaries.
+Where such parameters are derived, they should be spatially correlated and
+carry confidence/provenance rather than changing at arbitrary tile boundaries.
 
 Nearby landscapes therefore belong to recognizable geographical families.
 
@@ -550,11 +538,12 @@ This creates the experience:
 
 ---
 
-# 10. Geology Before Terrain Detail
+# 10. Geology Before Derived Terrain Detail
 
 A major source of variety should be geology.
 
-Generate regional fields for:
+In surveyed worlds, ingest regional fields from authoritative sources when
+available, or label them as inferred/unsupported. Useful fields include:
 
 ```text
 rock type
@@ -569,7 +558,9 @@ volcanism
 sediment
 ```
 
-Then let these influence terrain.
+Let them influence materials, caves, hydrology, and ecological suitability only
+to the extent supported by their resolution and meaning. Do not deform the
+measured DEM to make it look more consistent with inferred geology.
 
 Two mountain ranges should not merely use different noise seeds.
 
@@ -597,17 +588,18 @@ That distinction should propagate downward into caves, soil, water, cliffs, vege
 
 ---
 
-# 11. Generate Rivers as Structure
+# 11. Treat Rivers as Authoritative Structure
 
 This is one of the most important decisions in the project.
 
-Do not generate terrain first and sprinkle rivers onto it afterward.
-
-Make drainage structure part of terrain generation itself.
+Do not infer visible rivers from elevation alone and present them as fact.
+Admit rivers when authoritative linework, flow direction, discharge semantics,
+and elevation conformance have a reviewed bundle contract. Then derive their
+rendering and simulation from that aligned structure.
 
 There is published procedural-terrain work using exactly this approach: first build a hierarchical drainage network, derive watersheds from it, and then construct terrain around the river system.
 
-Our generator should conceptually produce:
+The procedural research path may still conceptually produce:
 
 ```text
 major drainage basin
@@ -621,15 +613,16 @@ minor tributaries
 streams
 ```
 
-Terrain is then constrained around the drainage graph.
-
-This allows continent-scale rivers without calculating every voxel between their source and destination.
+That graph must not carve or replace surveyed terrain in the player-facing
+world. A future reviewed river-ingestion stage may apply bounded, documented
+conformance corrections where the resolution of the DEM and hydrography
+requires them.
 
 ---
 
 # 12. Hydrology
 
-At regional scale, compute:
+At regional scale, derive or ingest:
 
 ```text
 rainfall
@@ -716,15 +709,20 @@ flash-flood channels
 alluvial fan
 ```
 
-The river generator therefore creates terrain, rather than merely occupying terrain.
+In procedural research worlds, the river generator therefore creates terrain
+rather than merely occupying it. In surveyed worlds, admitted river structure
+must conform to the observed terrain under a bounded, documented rule; it may
+not freely redesign the valley.
 
 ---
 
 # 14. Lakes
 
-A lake should be an actual filled basin.
+A lake should be a mapped waterbody with an explicit, level surface. The
+current contract uses authoritative polygons and a DEM-derived representative
+level; it does not claim bathymetry or infer every DEM depression as a lake.
 
-Generate:
+Future source layers may establish:
 
 ```text
 basin geometry
@@ -736,7 +734,7 @@ water surface
 outflow river
 ```
 
-Some basins should have no surface outlet.
+Procedural research worlds may still derive closed basins and their outlets.
 
 Those can become:
 
@@ -749,13 +747,17 @@ seasonal wetlands
 
 depending on climate and evaporation.
 
-This naturally produces the kinds of features requested rather than having a “salt flat biome.”
+In the surveyed player world, playas, salt flats, and seasonal wetlands should
+come from real coverage or a separately reviewed derivation contract rather
+than a cosmetic biome assignment.
 
 ---
 
 # 15. Waterfalls
 
-Do not place waterfalls.
+In the surveyed player world, do not add a waterfall until admitted river data
+and the measured terrain support one. Once that contract exists, do not place
+waterfalls as decorations.
 
 Detect them.
 
@@ -771,7 +773,7 @@ appropriate rock resistance
 
 → waterfall or cascade.
 
-Then generate:
+In a procedural research world, generate:
 
 ```text
 lip
@@ -782,15 +784,22 @@ undercut
 downstream gorge
 ```
 
-Large waterfall systems should therefore be unique consequences of terrain.
+In a surveyed world, the measured terrain and admitted river data must already
+support the lip, drop, and downstream form. Large waterfall systems should be
+consequences of geography, not rendering decorations.
 
 ---
 
 # 16. Erosion
 
-Terrain should undergo an approximate erosion stage.
+The surveyed surface already records the accumulated result of erosion at the
+source resolution. Do not run a synthetic erosion pass that moves its ridges,
+valleys, or drainage. Erosion models remain useful for research worlds,
+material classification, micro-detail that preserves the source surface, and
+future simulation of player-visible change.
 
-It does not need a geological simulation accurate to millions of years.
+For the allowed procedural and derived uses, this does not need to be a
+geological simulation accurate to millions of years.
 
 The purpose is creating recognizable:
 
@@ -885,7 +894,9 @@ disturbance
 elevation
 ```
 
-Plant species each define preferred ranges.
+Plant species each define preferred ranges. In the current surveyed contract,
+those ranges choose and vary individuals only inside the measured canopy
+occupancy and height constraints.
 
 The forest becomes an emergent distribution.
 
@@ -910,7 +921,9 @@ Players will spend enormous amounts of time looking at trees.
 
 Do not have six tree models.
 
-Trees should derive from procedural species grammars.
+Measured canopy cover and height should control where trees occur and bound
+their stature. Because the current observations do not identify individual
+trees or species, the individuals may derive from procedural species grammars.
 
 A tree genotype includes:
 
@@ -950,7 +963,10 @@ Forest structure matters more than raw species count.
 
 # 20. Forest Succession
 
-Generate forest age/history fields.
+Forest age/history fields are a procedural interpretation unless a supporting
+disturbance or land-cover source is admitted. They may create local detail and
+simulation history inside measured canopy constraints, but must not erase a
+measured opening or populate a cell with no observed canopy.
 
 Possible history:
 
@@ -976,7 +992,10 @@ without needing a quest marker explaining it.
 
 # 21. Coral Reefs
 
-Reefs should use environmental constraints:
+Reef location and large-scale relief require suitable bathymetry or an explicit
+authoritative reef source before they enter the surveyed player world. Within
+that observed footprint, procedural detail should use environmental
+constraints:
 
 ```text
 water depth
@@ -1057,7 +1076,10 @@ This produces cave *systems*, not random holes.
 
 # 23. Rare Natural Wonders
 
-The world needs extremely low-frequency phenomena.
+The world needs extremely uncommon destinations. In the surveyed catalog,
+these are selected because the real terrain and supporting sources contain
+them; they are not injected into an otherwise ordinary tile to satisfy a
+frequency target.
 
 Examples:
 
@@ -1083,9 +1105,9 @@ Examples:
 * coral atoll
 * blue-hole-like formation
 
-Crucially:
+For unobserved subterranean features and explicit procedural research worlds:
 
-**These are algorithms, not prefabs.**
+**Use algorithms, not prefabs.**
 
 A “natural arch generator” creates an arch based on geological conditions.
 
@@ -1097,7 +1119,9 @@ Therefore two arches can belong to the same geological family without being copi
 
 # 24. Anti-Repetition Architecture
 
-The generator should explicitly fight recognizability.
+Real regional coverage is the primary defense against recognizability. Do not
+distort measured tiles in pursuit of novelty. Procedural subsystems should
+still explicitly fight recognizable repetition.
 
 Minecraft frequently exposes its generator because players learn:
 
@@ -1161,7 +1185,9 @@ The result should emerge from the location.
 
 # 26. Spatial Rarity
 
-Rare things should occur through correlated probability fields rather than independent dice rolls per chunk.
+Observed rare features retain their real clustering. For procedural caves and
+other unsupported systems, rare things should occur through correlated
+probability fields rather than independent dice rolls per chunk.
 
 Example:
 
@@ -1206,7 +1232,8 @@ But only label features after discovery.
 
 Before someone explores an area, it should not exist in a searchable database of POIs.
 
-Interesting feature detection can happen when generated.
+Interesting feature detection can happen when surveyed data is admitted or when
+an explicitly procedural feature is derived.
 
 Then the server assigns a discovery identity:
 
@@ -1311,7 +1338,7 @@ That is how enormous landscapes become practical.
 
 ---
 
-# 31. Generate Distant Terrain First
+# 31. Load Distant Terrain First
 
 Traditional chunk systems often do:
 
@@ -1323,14 +1350,14 @@ then farther chunks
 
 This creates terrible vistas while loading.
 
-Instead generation jobs should have separate priorities.
+Instead decode, fetch, and derivation jobs should have separate priorities.
 
 The player might receive:
 
 ```text
-coarse 50km terrain
+coarse surveyed coverage
         ↓
-coarse 10km terrain
+regional elevation and appearance
         ↓
 near terrain
         ↓
@@ -1389,7 +1416,7 @@ wetlands
 groundwater tendencies
 ```
 
-This is mostly deterministic generation.
+This is mostly immutable surveyed or explicitly derived state.
 
 ## System B — local dynamic water simulation
 
@@ -1406,7 +1433,7 @@ This responds to local terrain changes.
 
 The distinction is essential.
 
-Do not simulate every river in the infinite world every tick.
+Do not simulate every waterbody in the admitted surveyed world every tick.
 
 ---
 
@@ -1779,26 +1806,28 @@ uses the same simulation.
 
 ---
 
-# 46. Deterministic Generation Is a Networking Superpower
+# 46. Deterministic Reconstruction Is a Networking Superpower
 
-The server should not normally transmit terrain.
+The server should not normally transmit terrain meshes or pristine voxel
+samples. Clients must possess or fetch the exact surveyed artifacts named by
+the world identity and verify their hashes.
 
 Send:
 
 ```text
-world seed
+surveyed bundle manifest and hashes
 generator version
 region state
 modifications
 ```
 
-Then clients independently generate:
+Then clients independently reconstruct:
 
 ```text
-mountains
-rivers
-caves
-forest
+terrain and lake representations from shared observations
+procedural tree individuals bounded by measured canopy
+supported derived systems
+caves and other explicitly procedural layers
 ```
 
 Only deviations must synchronize.
@@ -1818,7 +1847,7 @@ This dramatically reduces world-transfer requirements.
 
 ---
 
-# 47. Generation Versioning
+# 47. World and Derivation Versioning
 
 This becomes extremely important.
 
@@ -1835,10 +1864,13 @@ WorldIdentity {
     seed,
     generator_version,
     generation_settings,
+    surveyed_bundle_identity,
+    surveyed_artifact_hashes,
 }
 ```
 
-A generator update may radically change mountains.
+A surveyed-artifact or sampler update may change the reconstructed surface; a
+generator update may change derived or procedural layers.
 
 Already explored regions must not silently transform.
 
@@ -1946,34 +1978,32 @@ apps/
 
 This should be treated as a major product.
 
-Build a standalone world-generation viewer very early.
+Maintain a standalone surveyed-world and generation viewer.
 
 It should show:
 
 ```text
-height
-geology
-rainfall
-temperature
-watersheds
-river flow
-biomass
-erosion
-terrain
+source elevation and provenance
+water and canopy masks
+surface imagery and alignment
+derived density / LOD / materials
+supported geology, climate, hydrology, and ecology
+procedural research layers when explicitly selected
 ```
 
 Allow:
 
 ```text
-random seed
+bundle selection
+source/derived layer toggles
 teleport
-zoom 1m → 1,000km
-regenerate
+zoom across admitted coverage
+rebuild derived representations
 save screenshot
 inspect parameters
 ```
 
-The generator needs to be explorable independently from the game.
+The data-to-world pipeline needs to be explorable independently from the game.
 
 This will probably be one of the highest-leverage tools in the entire project.
 
@@ -2018,7 +2048,10 @@ tributary #92
 erosion_pass #2
 ```
 
-An LLM can debug procedural generation dramatically more effectively when the engine can explain **why terrain exists**.
+The inspector must distinguish source observations, processing steps, derived
+values, unsupported facts, and procedural additions. An LLM can debug the
+pipeline much more effectively when the engine can explain **why terrain
+exists** without inventing provenance.
 
 ---
 
@@ -2035,7 +2068,8 @@ hydrology.query(xz)
 
 over huge mutable procedural pipelines.
 
-Where expensive preprocessing is required, generate deterministic regional artifacts:
+Where expensive preprocessing is required, create immutable, content-addressed
+regional artifacts from explicit source inputs:
 
 ```text
 WatershedRegion
@@ -2060,28 +2094,29 @@ much easier.
 
 # 52. Seamlessness
 
-Every feature generator must either:
+Every admitted layer and feature derivation must either:
 
-1. be analytically evaluable anywhere, or
-2. define deterministic boundary conditions between regions.
+1. share the surveyed bundle's coordinate frame and exact bounds, or
+2. define deterministic, validated boundary conditions between artifacts.
 
-Never let region generation depend on:
+Never let reconstruction depend on:
 
 ```text
 which region happened to generate first
 ```
 
-The world must be independent of exploration order.
+The world must be independent of exploration, decode, fetch, and job-completion
+order.
 
 This should be tested aggressively.
 
 ---
 
-# 53. Procedural Testing
+# 53. World Reconstruction Testing
 
-The generator needs stronger testing than ordinary games.
+The source-to-world pipeline needs stronger testing than ordinary games.
 
-For every seed:
+For every bundle identity and derivation version:
 
 ```text
 same input → same output
@@ -2092,8 +2127,9 @@ Always.
 Maintain golden hashes:
 
 ```text
-hash terrain at region A
-hash river graph B
+hash decoded source layers
+hash terrain representation at region A
+hash admitted water graph B
 hash cave system C
 ```
 
@@ -2136,11 +2172,11 @@ Generate random terrain fields specifically to attack the mesher.
 
 ---
 
-# 56. Novelty Testing
+# 56. Coverage and Novelty Testing
 
-Build exploration bots.
+Build exploration bots and surveyed-coverage audits.
 
-Have them sample millions of square kilometers and record:
+Have them sample all admitted coverage and representative candidate bundles:
 
 ```text
 elevation profile
@@ -2161,7 +2197,8 @@ For example:
 nearly identical terrain descriptors?”
 ```
 
-The generator should have quantitative anti-repetition tests.
+The surveyed catalog should have quantitative coverage/diversity reports.
+Procedural systems should retain anti-repetition tests.
 
 ---
 
@@ -2179,7 +2216,8 @@ cave
 mountain summit
 ```
 
-Render hundreds or thousands of seeds.
+Render fixed viewpoints across admitted bundles and, separately, procedural
+research seeds.
 
 Then inspect contact sheets.
 
@@ -2192,7 +2230,8 @@ Later an image model can classify obvious failures:
 * ugly LOD transitions
 * boring landscapes
 
-World generation should become an automated experimentation discipline.
+Surveyed-world reconstruction and procedural research should become automated
+experimentation disciplines with clearly separated reports.
 
 ---
 
@@ -2200,12 +2239,13 @@ World generation should become an automated experimentation discipline.
 
 Spend computation on places players can perceive.
 
-The entire world does not need detailed generation.
+The entire admitted coverage does not need detailed decoding or derivation at
+once.
 
-A region 1,000 km away can exist as:
+A distant admitted region can exist as:
 
 ```text
-a handful of deterministic macro parameters
+an immutable coarse elevation/appearance tile and manifest entry
 ```
 
 until someone approaches it.
@@ -2226,7 +2266,8 @@ forest coverage
 
 Its caves do not exist computationally yet.
 
-But they are predetermined because the generation functions are deterministic.
+But their locations are already present in the surveyed source; only their
+runtime representation is deferred.
 
 ---
 
@@ -2234,7 +2275,9 @@ But they are predetermined because the generation functions are deterministic.
 
 This allows an important philosophical property:
 
-A cave nobody has visited has not been explicitly generated.
+A procedurally derived cave nobody has visited has not been explicitly
+generated. A surface nobody has visited is already identified by immutable
+surveyed artifacts, even if those bytes have not been decoded locally.
 
 But if two machines generate it later:
 
@@ -2270,6 +2313,13 @@ end to end or when its status materially changes.
 - [ ] **PARTIAL** — a foundation exists, but the design goal is not yet met
 - [ ] **NEXT** — the next planned implementation milestone
 
+Phases 0–4 record how the current engine and procedural research path were
+built. Phase 5 is the product-direction pivot: the default surface is surveyed,
+finite to admitted coverage, and expanded by adding versioned real-world data.
+Unchecked procedural-surface work in the earlier phases is not a blocker for
+the player world unless it is explicitly promoted into a reviewed gap-filling
+contract.
+
 ## Phase 0 — Terrain Toy
 
 **Phase status: Complete**
@@ -2290,7 +2340,7 @@ Nothing else.
 
 ---
 
-## Phase 1 — Infinite Landscape
+## Phase 1 — Streaming Landscape Foundation
 
 **Phase status: Complete**
 
@@ -2315,9 +2365,10 @@ This is the first major success criterion.
 
 ## Phase 2 — Geography
 
-**Phase status: PARTIAL — version 18 adds bounded geographical provinces and a
-first condition-driven landform vocabulary; visual acceptance and the remaining
-steep/volumetric families are still in progress**
+**Phase status: Retained procedural research path. Version 18 adds bounded
+geographical provinces and a first condition-driven landform vocabulary;
+remaining visual and steep/volumetric work does not gate the surveyed player
+world.**
 
 - [x] Macro terrain
 - [x] Elongated mountain systems
@@ -2346,15 +2397,17 @@ No gameplay.
 
 Spend serious time here.
 
-The world generator is the game.
+The work remains useful for caves, tests, research, and a possible future
+gap-filling policy. It is not the source of default surface terrain.
 
 ---
 
 ## Phase 3 — Ecosystems
 
-**Phase status: PARTIAL — version 18 adds broad overlapping ecosystem regimes,
-large contiguous open-country controls, and stronger regional forest identity;
-the rendered landscape-diversity acceptance pass remains**
+**Phase status: Retained mixed research path. Version 18 adds broad overlapping
+ecosystem regimes and procedural vegetation; the surveyed default now replaces
+synthetic surface/ecosystem distribution with measured terrain and canopy where
+available.**
 
 - [x] Climate. Spatially correlated prevailing winds, latitude-like structure,
       continentality, elevation cooling, orographic precipitation, rain
@@ -2417,7 +2470,7 @@ the rendered landscape-diversity acceptance pass remains**
       of deep ocean, and strengthen deciduous, coniferous, mixed,
       successional, and dry-woodland forest identities.
 
-Target:
+Procedural research target:
 
 > Ten screenshots from ten far-apart regions should look like ten different places, not ten seeds of the same generator.
 
@@ -2425,7 +2478,9 @@ Target:
 
 ## Phase 4 — Caves
 
-**Phase status: Complete**
+**Phase status: Complete on the procedural research path; intentionally
+disabled in the surveyed default until cave placement has an honest contract
+with measured surface geology and hydrology.**
 
 - [x] Geological cave families. Karst, lava-tube, fault, sea, talus, glacial,
       and erosional systems are selected from regional rock, karst,
@@ -2458,7 +2513,7 @@ Earlier versions retain their cave-free pristine density contract.
 
 From this point forward, world quality comes before player activities. Do not
 resume climbing, survival, inventory, or other expedition mechanics until the
-world-generation, presentation, and living-water phases below meet their
+surveyed-world, presentation, and living-water phases below meet their
 acceptance targets. Basic walking and warps remain sufficient for inspecting
 the world while those phases are in progress.
 
@@ -2477,13 +2532,18 @@ Goal:
 > beautiful place at human scale, without debug overlays or visible layer
 > disagreement. Expanding the traveled world must preserve that fidelity.
 
+The procedural geography items below record retained research capability and
+generator-version history. Their `PARTIAL` labels do not make synthetic
+surface completion a prerequisite for the surveyed player world. Current
+product work begins at **Surveyed player-world default**.
+
 - [x] **Generation-diversity reset.** Deterministic, top-down
       geographical province artifacts that plan landmass and coast topology,
       geological structure, large landforms, drainage, erosion, climate, soil,
       and broad ecosystem regimes before local terrain is sampled. Provinces
       must coordinate through parent-scale fields, explicit boundary
-      conditions, and generation halos preserve effectively endless,
-      visitation-order-independent generation. Generator version 18
+      conditions, and generation halos to preserve the procedural research
+      world's visitation-order-independent generation. Generator version 18
       intentionally resets pristine terrain while version 17 and older remain
       on their frozen paths.
 - [ ] **PARTIAL** — Landform morphology families. Version 18 replaces the
@@ -2540,7 +2600,8 @@ Goal:
       recipe, incompatibility rule, and future precalculated-versus-streamed
       delivery boundary are codified in `SURVEYED_WORLD.md`. No world-scale
       storage or streaming system is included yet.
-- [ ] **PARTIAL** — Real-terrain calibration. A headless Rust batch sampler now
+- [x] **Procedural-terrain calibration research handoff.** A headless Rust
+      batch sampler now
       exposes bounded offline parameters for province and local landform
       morphology while preserving versioned production defaults and golden
       outputs. A Python/GDAL pipeline prepares fixed-meter ETOPO and NASADEM
@@ -2571,21 +2632,36 @@ Goal:
       counts, while measured height calibrates individual dimensions without
       discarding species, architecture, age, or damage variation. It deliberately
       disables procedural terrain shaping, hydrology, and caves and does not yet
-      stream surveyed data.
-      A native 30 m local corpus, the larger spatially
-      separated macro dataset, longer-range drainage/range coherence, and blind
-      perspective review remain before this item can be complete.
+      stream surveyed data. The former native 30 m corpus, larger macro
+      dataset, and longer-range procedural calibration goals are retained as
+      optional research; they are no longer a player-world completion gate.
 - [x] Geography-aware terrain materials. Rendered terrain now blends explicit
       regional rock hardness and carbonate character, soil sand/clay and
       organic content, surface moisture, sediment deposition, rock and scree
       exposure, forest and ground cover, wetlands, reefs, cave family, and
       seasonal snow. Inputs are sampled in world space and travel with the
       shared near/far mesh path so material geography stays aligned across LODs.
-- [ ] **PARTIAL** — World lighting and atmosphere. Warm directional sun,
-      cool sky fill, ground bounce, exponential aerial perspective, and
-      locally climate-controlled lowland distance haze now preserve landform
-      legibility into the horizon. A real sky model and cast
-      terrain/vegetation shadows remain.
+- [ ] **PARTIAL** — World lighting and atmosphere. A coherent dawn/noon/dusk
+      sky and sun model now drives the sky, terrain illumination, water
+      reflections and glints, cool sky fill, and ground bounce. Three
+      camera-centered cascaded sun-shadow maps use texel-snapped light-space
+      centers, filtered comparisons, slope-aware receiver bias, and blended
+      cascade transitions. Fine and coarse terrain, bounded full/simplified
+      vegetation, rocks, and ground cover cast into the same maps, while
+      exponential aerial perspective and locally climate-controlled lowland
+      distance haze preserve landform legibility into the horizon. Native and
+      Wasm use the same path, and the client can cycle dawn, noon, and dusk for
+      inspection. Surveyed-world perspective baselines must still validate
+      forest, valley, shoreline, cascade-transition, and long-distance
+      readability without swimming, detached shadows, or exposed LOD changes.
+    - [x] Coherent sky/sun lighting and stable camera-centered cascaded terrain
+          and vegetation shadows.
+    - [ ] When visible clouds land, add cloud shadowing that agrees with their
+          position, density, wind, and sun direction.
+    - [ ] After visible clouds and local fog provide participating media, add
+          bounded volumetric sunlight shafts ("God rays") where sun, occluders,
+          and moisture actually align. This is atmosphere polish, not a
+          full-screen effect that appears in clear air.
 - [ ] **PARTIAL** — vegetation across distance. Full, simplified, and
       silhouette tree meshes exist, and world-space forest composition and
       canopy cover now tint the very-far terrain representation. Cluster
@@ -2603,13 +2679,12 @@ Goal:
       persistent high-elevation surface snow. Clouds, visible precipitation,
       pressure systems, terrain-lift cloud formation, and ridge-wind cues
       remain. This phase does not include survival consequences.
-- [ ] Rare natural-wonder generation. Add condition-driven families for major
-      arches and sinkholes, extreme canyon and karst landscapes, volcanic and
-      glacial extremes, giant dune and salt-basin systems, craters, and
-      similarly rare geographic destinations. Common dune, salt, canyon,
-      glacial, and karst landscapes belong to the landform reset above; this
-      item is for exceptional expressions of those processes. These remain
-      algorithms, not placed prefabs.
+- [ ] Surveyed natural-wonder coverage. Expand the versioned bundle catalog to
+      real regions containing major arches and sinkholes, extreme canyon and
+      karst landscapes, volcanic and glacial extremes, giant dune and salt
+      basins, craters, and similarly rare destinations. Caves and other
+      unobserved volume may still be procedural under an explicit contract;
+      the visible surface wonder must not be injected into unrelated terrain.
 - [ ] **NEXT — Surveyed-world acceptance pass.**
     - Curated ground and aerial captures must show recognizable ridges, valleys,
       open canopy, closed canopy, and lake shorelines from the default tile.
@@ -2630,6 +2705,14 @@ Do not call the world finished merely because the bundle decodes. This phase is
 complete only when the aligned observations are convincing in the rendered
 landscape.
 
+The core sky/sun and cascaded-shadow pass landed ahead of the planned
+surveyed-world acceptance milestone by explicit product direction. Acceptance
+remains `NEXT` and must now validate those shadows against the real tile before
+visible weather and cloud shadowing begin. Volumetric light shafts follow only
+once fog/cloud media can make them physically legible. All precede the return
+to expedition-gameplay milestones, although God rays are polish and may be cut
+without blocking the core lighting pass.
+
 The generation-diversity reset intentionally changed pristine terrain in
 generator version 18, the calibrated multiscale surface changes it again in
 generator version 19, and version 20 aligns river and gully centerlines with
@@ -2646,7 +2729,10 @@ silently receive replacement data.
 
 ## Phase 6 — Living Water
 
-**Phase status: Complete**
+**Phase status: Complete on the procedural research path; not active in the
+surveyed default, whose current admitted hydrology is limited to static mapped
+lakes. Re-enabling rivers and dynamic connected water requires the reviewed
+surveyed river contract described above.**
 
 Implement active-region water simulation before expedition gameplay. Start
 with:

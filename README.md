@@ -27,7 +27,9 @@ test-backed foundations described in the design. The prototype provides:
   weathered mountains, glacial valleys, dune fields, and closed salt basins;
 - explainable terrain samples that identify base elevation and dominant uplift;
 - Marching Cubes terrain extraction;
-- a native `winit` + `wgpu` client with simple lighting;
+- a native `winit` + `wgpu` client with a coherent dawn/noon/dusk sky and sun
+  model, stabilized cascaded terrain and vegetation shadows, climate-tinted
+  aerial perspective, and dedicated reflective water lighting;
 - mouse-look, walking, sprinting, and terrain-following movement;
 - deterministic 32 m terrain chunks streamed around the moving player;
 - distance-selected 2 m, 4 m, and 8 m terrain LODs with Transvoxel seams;
@@ -195,10 +197,11 @@ alignment, provenance, versioning, and future delivery contract.
 Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
 to sprint. Press Escape to release the cursor; click the window to capture it
 again. Press `F` to toggle aerial mode, which follows the ground from 1 km up
-and moves ten times faster. Press `R` to warp to random dry ground within the
-surveyed tile or `B` to warp near Upper Holmes Lake. Surveyed caves are not yet
-part of the data contract, so `C` reports that no cave is available. Browsers
-expose aerial mode and both non-cave warps as buttons.
+and moves ten times faster. Press `T` to cycle the coherent dawn, noon, and dusk
+lighting states. Press `R` to warp to random dry ground within the surveyed tile
+or `B` to warp near Upper Holmes Lake. Surveyed caves are not yet part of the
+data contract, so `C` reports that no cave is available. Browsers expose aerial
+mode and both non-cave warps as buttons.
 
 Build the browser version with [Trunk](https://trunk-rs.dev/):
 

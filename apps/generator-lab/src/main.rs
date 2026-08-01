@@ -18,7 +18,7 @@ use treeline_hydrology::{
     FastWaterKind, Lake, LakeNetwork, RiverNetwork, RiverSegment, WaterTerrainChange,
 };
 use treeline_mesher::{Mesh, SurfaceGridSpec, surface_grid};
-use treeline_renderer::{TerrainMesh, TerrainRenderer};
+use treeline_renderer::{LightingSettings, TerrainMesh, TerrainRenderer};
 use treeline_terrain::{SurfaceField, WildernessTerrain};
 use treeline_world::{
     ActiveWaterRegionSpec, CURRENT_GENERATOR_VERSION, CaveFamily, CaveMapSample,
@@ -520,6 +520,8 @@ impl GeneratorLab {
             &self.queue,
             (projection * view).to_cols_array_2d(),
             [self.center[0], 0.0, self.center[1]],
+            Vec3::NEG_Y.to_array(),
+            LightingSettings::default(),
         );
     }
 
@@ -713,6 +715,7 @@ impl GeneratorLab {
             &view,
             std::iter::empty(),
             std::iter::once(&self.mesh),
+            &[&self.mesh],
         );
         {
             let mut pass = encoder
