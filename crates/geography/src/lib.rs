@@ -10,8 +10,8 @@ use treeline_coordinates::{CellIndex, WorldIdentity, stable_hash};
 
 pub use province::{
     DuneGeometry, PROVINCE_EDGE_METERS, PROVINCE_GENERATOR_VERSION, PROVINCE_HALO_METERS,
-    ProvinceBoundaryCondition, ProvinceBoundaryConditions, ProvinceIndex, ProvincePlan,
-    ProvinceSample, ScarpGeometry,
+    ProvinceBoundaryCondition, ProvinceBoundaryConditions, ProvinceIndex, ProvinceParameters,
+    ProvincePlan, ProvinceSample, ScarpGeometry,
 };
 
 const DOMAIN_UPLIFT: u64 = 0x5550_4c49_4654;
@@ -202,6 +202,27 @@ impl MacroElevation {
     pub fn sample(self, x: f64, z: f64) -> Option<MacroTerrainSample> {
         if self.world.generator_version >= PROVINCE_GENERATOR_VERSION {
             let province = ProvincePlan::sample_at(self.world, x, z)?;
+            return Some(MacroTerrainSample {
+                elevation_meters: province.elevation_meters,
+                base_elevation_meters: province.base_elevation_meters,
+                mountain_uplift_meters: province.macro_relief_meters.max(0.0),
+                dominant_ridge: None,
+                province: Some(province.province),
+                province_relief_meters: province.macro_relief_meters,
+            });
+        }
+        self.sample_with_parameters(x, z, ProvinceParameters::VERSION_18)
+    }
+
+    /// Samples broad elevation with explicit offline calibration parameters.
+    pub fn sample_with_parameters(
+        self,
+        x: f64,
+        z: f64,
+        parameters: ProvinceParameters,
+    ) -> Option<MacroTerrainSample> {
+        if self.world.generator_version >= PROVINCE_GENERATOR_VERSION {
+            let province = ProvincePlan::sample_at_with_parameters(self.world, x, z, parameters)?;
             return Some(MacroTerrainSample {
                 elevation_meters: province.elevation_meters,
                 base_elevation_meters: province.base_elevation_meters,

@@ -2487,6 +2487,19 @@ Goal:
       closest descriptor pairs, suspicious repetition, plausibility outliers,
       represented and underrepresented outcomes, stable CSV/fingerprint
       artifacts, and an optional strict mode that fails on coverage gaps.
+- [ ] **PARTIAL** — Real-terrain calibration. A headless Rust batch sampler now
+      exposes bounded offline parameters for province and local landform
+      morphology while preserving version-18 production defaults and golden
+      outputs. A Python/GDAL pipeline prepares fixed-meter ETOPO and NASADEM
+      patches, measures multi-scale elevation, relief, slope, curvature,
+      spectra, drainage, coasts, and morphology prevalence, runs sensitivity
+      and bounded CMA-style searches, and emits labeled or blind heightmap
+      galleries without per-tile normalization. The first 512 km ETOPO/Treeline
+      comparison confirms that version 18 concentrates relief into sparse
+      features over terrain that is much quieter than the real reference. The
+      full spatially separated dataset, optimization campaign, untouched
+      holdout review, perspective captures, and accepted version-19 constants
+      remain before this item can be complete.
 - [x] Geography-aware terrain materials. Rendered terrain now blends explicit
       regional rock hardness and carbonate character, soil sand/clay and
       organic content, surface moisture, sediment deposition, rock and scree

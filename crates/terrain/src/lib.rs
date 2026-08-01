@@ -4,7 +4,7 @@ use treeline_coordinates::WorldPosition;
 use treeline_coordinates::{CellIndex, WorldIdentity};
 use treeline_geography::{
     Climate, MacroElevation, MacroTerrainSample, OROGRAPHIC_CLIMATE_GENERATOR_VERSION,
-    PROVINCE_GENERATOR_VERSION, ProvincePlan, ProvinceSample, RegionalProfile,
+    PROVINCE_GENERATOR_VERSION, ProvinceParameters, ProvincePlan, ProvinceSample, RegionalProfile,
 };
 
 const DOMAIN_ROLLING_HILLS: u64 = 0x524f_4c4c_494e_4753;
@@ -151,6 +151,380 @@ pub struct WildernessTerrain {
     pub world: WorldIdentity,
 }
 
+/// Offline-calibratable coefficients for the version-18 landform surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LandformParameters {
+    pub province: ProvinceParameters,
+    pub regional_wavelength_meters: f64,
+    pub landscape_wavelength_meters: f64,
+    pub rugged_wavelength_meters: f64,
+    pub glacial_wavelength_meters: f64,
+    pub ground_wavelength_meters: f64,
+    pub dune_wavelength_meters: f64,
+    pub plain_regional_relief_meters: f64,
+    pub plain_landscape_relief_meters: f64,
+    pub rolling_regional_relief_meters: f64,
+    pub rolling_landscape_relief_meters: f64,
+    pub terrace_base_step_meters: f64,
+    pub terrace_step_range_meters: f64,
+    pub rugged_base_relief_meters: f64,
+    pub rugged_uplift_relief_meters: f64,
+    pub weathered_regional_relief_meters: f64,
+    pub weathered_landscape_relief_meters: f64,
+    pub glacial_base_depth_meters: f64,
+    pub glacial_depth_range_meters: f64,
+    pub glacial_landscape_relief_meters: f64,
+    pub ground_detail_relief_meters: f64,
+}
+
+impl LandformParameters {
+    pub const VERSION_18: Self = Self {
+        province: ProvinceParameters::VERSION_18,
+        regional_wavelength_meters: 9_600.0,
+        landscape_wavelength_meters: 2_400.0,
+        rugged_wavelength_meters: 1_100.0,
+        glacial_wavelength_meters: 6_400.0,
+        ground_wavelength_meters: 84.0,
+        dune_wavelength_meters: 96.0,
+        plain_regional_relief_meters: 7.0,
+        plain_landscape_relief_meters: 1.8,
+        rolling_regional_relief_meters: 142.0,
+        rolling_landscape_relief_meters: 34.0,
+        terrace_base_step_meters: 56.0,
+        terrace_step_range_meters: 128.0,
+        rugged_base_relief_meters: 90.0,
+        rugged_uplift_relief_meters: 290.0,
+        weathered_regional_relief_meters: 116.0,
+        weathered_landscape_relief_meters: 52.0,
+        glacial_base_depth_meters: 34.0,
+        glacial_depth_range_meters: 210.0,
+        glacial_landscape_relief_meters: 38.0,
+        ground_detail_relief_meters: 2.6,
+    };
+
+    pub fn is_valid(self) -> bool {
+        self.province.is_valid()
+            && [
+                self.regional_wavelength_meters,
+                self.landscape_wavelength_meters,
+                self.rugged_wavelength_meters,
+                self.glacial_wavelength_meters,
+                self.ground_wavelength_meters,
+                self.dune_wavelength_meters,
+                self.plain_regional_relief_meters,
+                self.plain_landscape_relief_meters,
+                self.rolling_regional_relief_meters,
+                self.rolling_landscape_relief_meters,
+                self.terrace_base_step_meters,
+                self.terrace_step_range_meters,
+                self.rugged_base_relief_meters,
+                self.rugged_uplift_relief_meters,
+                self.weathered_regional_relief_meters,
+                self.weathered_landscape_relief_meters,
+                self.glacial_base_depth_meters,
+                self.glacial_depth_range_meters,
+                self.glacial_landscape_relief_meters,
+                self.ground_detail_relief_meters,
+            ]
+            .into_iter()
+            .all(|value| value.is_finite() && value > 0.0)
+    }
+
+    /// Applies one flat, stable calibration key used by the batch CLI.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown keys, non-finite values, or a proposal that
+    /// violates the physical parameter bounds enforced by [`Self::is_valid`].
+    #[allow(clippy::too_many_lines)]
+    pub fn set_named(&mut self, name: &str, value: f64) -> Result<(), &'static str> {
+        if !value.is_finite() {
+            return Err("parameter values must be finite");
+        }
+        let mut candidate = *self;
+        match name {
+            "province.base_elevation_meters" => candidate.province.base_elevation_meters = value,
+            "province.continental_relief_meters" => {
+                candidate.province.continental_relief_meters = value;
+            }
+            "province.boundary_uplift_meters" => {
+                candidate.province.boundary_uplift_meters = value;
+            }
+            "province.closed_basin_base_depth_meters" => {
+                candidate.province.closed_basin_base_depth_meters = value;
+            }
+            "province.closed_basin_depth_range_meters" => {
+                candidate.province.closed_basin_depth_range_meters = value;
+            }
+            "province.tectonic_half_length_base_meters" => {
+                candidate.province.tectonic_half_length_base_meters = value;
+            }
+            "province.tectonic_half_length_range_meters" => {
+                candidate.province.tectonic_half_length_range_meters = value;
+            }
+            "province.tectonic_width_base_meters" => {
+                candidate.province.tectonic_width_base_meters = value;
+            }
+            "province.tectonic_width_range_meters" => {
+                candidate.province.tectonic_width_range_meters = value;
+            }
+            "province.tectonic_peak_base_meters" => {
+                candidate.province.tectonic_peak_base_meters = value;
+            }
+            "province.tectonic_peak_range_meters" => {
+                candidate.province.tectonic_peak_range_meters = value;
+            }
+            "province.glacial_valley_base_depth_meters" => {
+                candidate.province.glacial_valley_base_depth_meters = value;
+            }
+            "province.glacial_valley_depth_range_meters" => {
+                candidate.province.glacial_valley_depth_range_meters = value;
+            }
+            "province.volcanic_relief_meters" => {
+                candidate.province.volcanic_relief_meters = value;
+            }
+            "province.plateau_base_relief_meters" => {
+                candidate.province.plateau_base_relief_meters = value;
+            }
+            "province.plateau_relief_range_meters" => {
+                candidate.province.plateau_relief_range_meters = value;
+            }
+            "province.scarp_step_base_meters" => {
+                candidate.province.scarp_step_base_meters = value;
+            }
+            "province.scarp_step_range_meters" => {
+                candidate.province.scarp_step_range_meters = value;
+            }
+            "province.dune_base_amplitude_meters" => {
+                candidate.province.dune_base_amplitude_meters = value;
+            }
+            "province.dune_sediment_amplitude_meters" => {
+                candidate.province.dune_sediment_amplitude_meters = value;
+            }
+            "province.dune_aridity_amplitude_meters" => {
+                candidate.province.dune_aridity_amplitude_meters = value;
+            }
+            "regional_wavelength_meters" => candidate.regional_wavelength_meters = value,
+            "landscape_wavelength_meters" => candidate.landscape_wavelength_meters = value,
+            "rugged_wavelength_meters" => candidate.rugged_wavelength_meters = value,
+            "glacial_wavelength_meters" => candidate.glacial_wavelength_meters = value,
+            "ground_wavelength_meters" => candidate.ground_wavelength_meters = value,
+            "dune_wavelength_meters" => candidate.dune_wavelength_meters = value,
+            "plain_regional_relief_meters" => candidate.plain_regional_relief_meters = value,
+            "plain_landscape_relief_meters" => candidate.plain_landscape_relief_meters = value,
+            "rolling_regional_relief_meters" => candidate.rolling_regional_relief_meters = value,
+            "rolling_landscape_relief_meters" => {
+                candidate.rolling_landscape_relief_meters = value;
+            }
+            "terrace_base_step_meters" => candidate.terrace_base_step_meters = value,
+            "terrace_step_range_meters" => candidate.terrace_step_range_meters = value,
+            "rugged_base_relief_meters" => candidate.rugged_base_relief_meters = value,
+            "rugged_uplift_relief_meters" => candidate.rugged_uplift_relief_meters = value,
+            "weathered_regional_relief_meters" => {
+                candidate.weathered_regional_relief_meters = value;
+            }
+            "weathered_landscape_relief_meters" => {
+                candidate.weathered_landscape_relief_meters = value;
+            }
+            "glacial_base_depth_meters" => candidate.glacial_base_depth_meters = value,
+            "glacial_depth_range_meters" => candidate.glacial_depth_range_meters = value,
+            "glacial_landscape_relief_meters" => {
+                candidate.glacial_landscape_relief_meters = value;
+            }
+            "ground_detail_relief_meters" => candidate.ground_detail_relief_meters = value,
+            _ => return Err("unknown landform parameter"),
+        }
+        if !candidate.is_valid() {
+            return Err("parameter makes the landform configuration invalid");
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Returns all calibration keys and current values in stable order.
+    #[allow(clippy::too_many_lines)]
+    pub fn named_values(self) -> Vec<(&'static str, f64)> {
+        vec![
+            (
+                "province.base_elevation_meters",
+                self.province.base_elevation_meters,
+            ),
+            (
+                "province.continental_relief_meters",
+                self.province.continental_relief_meters,
+            ),
+            (
+                "province.boundary_uplift_meters",
+                self.province.boundary_uplift_meters,
+            ),
+            (
+                "province.closed_basin_base_depth_meters",
+                self.province.closed_basin_base_depth_meters,
+            ),
+            (
+                "province.closed_basin_depth_range_meters",
+                self.province.closed_basin_depth_range_meters,
+            ),
+            (
+                "province.tectonic_half_length_base_meters",
+                self.province.tectonic_half_length_base_meters,
+            ),
+            (
+                "province.tectonic_half_length_range_meters",
+                self.province.tectonic_half_length_range_meters,
+            ),
+            (
+                "province.tectonic_width_base_meters",
+                self.province.tectonic_width_base_meters,
+            ),
+            (
+                "province.tectonic_width_range_meters",
+                self.province.tectonic_width_range_meters,
+            ),
+            (
+                "province.tectonic_peak_base_meters",
+                self.province.tectonic_peak_base_meters,
+            ),
+            (
+                "province.tectonic_peak_range_meters",
+                self.province.tectonic_peak_range_meters,
+            ),
+            (
+                "province.glacial_valley_base_depth_meters",
+                self.province.glacial_valley_base_depth_meters,
+            ),
+            (
+                "province.glacial_valley_depth_range_meters",
+                self.province.glacial_valley_depth_range_meters,
+            ),
+            (
+                "province.volcanic_relief_meters",
+                self.province.volcanic_relief_meters,
+            ),
+            (
+                "province.plateau_base_relief_meters",
+                self.province.plateau_base_relief_meters,
+            ),
+            (
+                "province.plateau_relief_range_meters",
+                self.province.plateau_relief_range_meters,
+            ),
+            (
+                "province.scarp_step_base_meters",
+                self.province.scarp_step_base_meters,
+            ),
+            (
+                "province.scarp_step_range_meters",
+                self.province.scarp_step_range_meters,
+            ),
+            (
+                "province.dune_base_amplitude_meters",
+                self.province.dune_base_amplitude_meters,
+            ),
+            (
+                "province.dune_sediment_amplitude_meters",
+                self.province.dune_sediment_amplitude_meters,
+            ),
+            (
+                "province.dune_aridity_amplitude_meters",
+                self.province.dune_aridity_amplitude_meters,
+            ),
+            (
+                "regional_wavelength_meters",
+                self.regional_wavelength_meters,
+            ),
+            (
+                "landscape_wavelength_meters",
+                self.landscape_wavelength_meters,
+            ),
+            ("rugged_wavelength_meters", self.rugged_wavelength_meters),
+            ("glacial_wavelength_meters", self.glacial_wavelength_meters),
+            ("ground_wavelength_meters", self.ground_wavelength_meters),
+            ("dune_wavelength_meters", self.dune_wavelength_meters),
+            (
+                "plain_regional_relief_meters",
+                self.plain_regional_relief_meters,
+            ),
+            (
+                "plain_landscape_relief_meters",
+                self.plain_landscape_relief_meters,
+            ),
+            (
+                "rolling_regional_relief_meters",
+                self.rolling_regional_relief_meters,
+            ),
+            (
+                "rolling_landscape_relief_meters",
+                self.rolling_landscape_relief_meters,
+            ),
+            ("terrace_base_step_meters", self.terrace_base_step_meters),
+            ("terrace_step_range_meters", self.terrace_step_range_meters),
+            ("rugged_base_relief_meters", self.rugged_base_relief_meters),
+            (
+                "rugged_uplift_relief_meters",
+                self.rugged_uplift_relief_meters,
+            ),
+            (
+                "weathered_regional_relief_meters",
+                self.weathered_regional_relief_meters,
+            ),
+            (
+                "weathered_landscape_relief_meters",
+                self.weathered_landscape_relief_meters,
+            ),
+            ("glacial_base_depth_meters", self.glacial_base_depth_meters),
+            (
+                "glacial_depth_range_meters",
+                self.glacial_depth_range_meters,
+            ),
+            (
+                "glacial_landscape_relief_meters",
+                self.glacial_landscape_relief_meters,
+            ),
+            (
+                "ground_detail_relief_meters",
+                self.ground_detail_relief_meters,
+            ),
+        ]
+    }
+}
+
+impl Default for LandformParameters {
+    fn default() -> Self {
+        Self::VERSION_18
+    }
+}
+
+/// Height-only terrain sampler used by the offline calibration pipeline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CalibratedTerrain {
+    terrain: WildernessTerrain,
+    parameters: LandformParameters,
+}
+
+impl CalibratedTerrain {
+    pub fn new(world: WorldIdentity, parameters: LandformParameters) -> Option<Self> {
+        (world.generator_version >= PROVINCE_GENERATOR_VERSION && parameters.is_valid()).then_some(
+            Self {
+                terrain: WildernessTerrain::new(world),
+                parameters,
+            },
+        )
+    }
+
+    pub fn height_at(self, x: f64, z: f64) -> Option<f64> {
+        self.terrain
+            .landform_at_with_parameters(x, z, self.parameters)
+            .map(|sample| sample.surface_height_meters)
+    }
+}
+
+impl SurfaceField for CalibratedTerrain {
+    fn surface_height(&self, x: f64, z: f64) -> Option<f64> {
+        self.height_at(x, z)
+    }
+}
+
 /// Explainable local expression of a version-18 geographical province plan.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LandformSurfaceSample {
@@ -206,33 +580,88 @@ impl WildernessTerrain {
     /// vocabulary without changing the parent drainage surface or falling
     /// back to one globally uniform hill amplitude.
     pub fn landform_at(self, x: f64, z: f64) -> Option<LandformSurfaceSample> {
+        self.landform_at_with_parameters(x, z, LandformParameters::VERSION_18)
+    }
+
+    /// Samples the same landform formulas with explicit offline parameters.
+    #[allow(clippy::too_many_lines)]
+    pub fn landform_at_with_parameters(
+        self,
+        x: f64,
+        z: f64,
+        parameters: LandformParameters,
+    ) -> Option<LandformSurfaceSample> {
         if self.world.generator_version < PROVINCE_GENERATOR_VERSION {
             return None;
         }
-        let macro_sample = MacroElevation::new(self.world).sample(x, z)?;
-        let province = ProvincePlan::sample_at(self.world, x, z)?;
-        let regional = height_layer(self.world, x, z, 9_600.0, DOMAIN_PROVINCE_REGIONAL_RELIEF)?;
-        let landscape = height_layer(self.world, x, z, 2_400.0, DOMAIN_PROVINCE_LANDSCAPE_RELIEF)?;
-        let rugged = height_layer(self.world, x, z, 1_100.0, DOMAIN_PROVINCE_RUGGED_RELIEF)?;
-        let glacial = height_layer(self.world, x, z, 6_400.0, DOMAIN_PROVINCE_GLACIAL_RELIEF)?;
+        if !parameters.is_valid() {
+            return None;
+        }
+        let (macro_sample, province) = if parameters == LandformParameters::VERSION_18 {
+            (
+                MacroElevation::new(self.world).sample(x, z)?,
+                ProvincePlan::sample_at(self.world, x, z)?,
+            )
+        } else {
+            (
+                MacroElevation::new(self.world).sample_with_parameters(
+                    x,
+                    z,
+                    parameters.province,
+                )?,
+                ProvincePlan::sample_at_with_parameters(self.world, x, z, parameters.province)?,
+            )
+        };
+        let regional = height_layer(
+            self.world,
+            x,
+            z,
+            parameters.regional_wavelength_meters,
+            DOMAIN_PROVINCE_REGIONAL_RELIEF,
+        )?;
+        let landscape = height_layer(
+            self.world,
+            x,
+            z,
+            parameters.landscape_wavelength_meters,
+            DOMAIN_PROVINCE_LANDSCAPE_RELIEF,
+        )?;
+        let rugged = height_layer(
+            self.world,
+            x,
+            z,
+            parameters.rugged_wavelength_meters,
+            DOMAIN_PROVINCE_RUGGED_RELIEF,
+        )?;
+        let glacial = height_layer(
+            self.world,
+            x,
+            z,
+            parameters.glacial_wavelength_meters,
+            DOMAIN_PROVINCE_GLACIAL_RELIEF,
+        )?;
         let ground = height_layer(
             self.world,
             x,
             z,
-            84.0,
+            parameters.ground_wavelength_meters,
             DOMAIN_WILDERNESS_DETAIL.wrapping_add(19),
         )?;
 
         let quiet_ground = (1.0 - province.plains * 0.84)
             * (1.0 - province.closed_basin * 0.76)
             * (1.0 - province.dune * 0.58);
-        let plain_relief_meters =
-            ((regional - 0.5) * 7.0 + (landscape - 0.5) * 1.8) * province.plains;
-        let rolling_upland_relief_meters = ((regional - 0.5) * 142.0 + (landscape - 0.5) * 34.0)
+        let plain_relief_meters = ((regional - 0.5) * parameters.plain_regional_relief_meters
+            + (landscape - 0.5) * parameters.plain_landscape_relief_meters)
+            * province.plains;
+        let rolling_upland_relief_meters = ((regional - 0.5)
+            * parameters.rolling_regional_relief_meters
+            + (landscape - 0.5) * parameters.rolling_landscape_relief_meters)
             * province.rolling_uplands
             * (1.0 - province.mountain * 0.42);
 
-        let terrace_step_meters = 56.0 + (province.strata_tilt * 128.0);
+        let terrace_step_meters = parameters.terrace_base_step_meters
+            + (province.strata_tilt * parameters.terrace_step_range_meters);
         let terraced_height = terraced_height(
             macro_sample.elevation_meters,
             terrace_step_meters,
@@ -246,30 +675,42 @@ impl WildernessTerrain {
         let ridge = 1.0 - ((rugged * 2.0) - 1.0).abs();
         let sharp_ridge = ridge * ridge * (3.0 - (2.0 * ridge));
         let rugged_mountain_relief_meters = (sharp_ridge - 0.42)
-            * (90.0 + (province.uplift * 290.0))
+            * (parameters.rugged_base_relief_meters
+                + (province.uplift * parameters.rugged_uplift_relief_meters))
             * province.mountain
             * (1.0 - province.erosion * 0.72);
-        let weathered_mountain_relief_meters = ((regional - 0.5) * 116.0
-            + (landscape - 0.5) * 52.0)
+        let weathered_mountain_relief_meters = ((regional - 0.5)
+            * parameters.weathered_regional_relief_meters
+            + (landscape - 0.5) * parameters.weathered_landscape_relief_meters)
             * province.mountain
             * province.erosion;
 
         let valley_axis = ((glacial * 2.0) - 1.0).abs();
         let valley_floor = 1.0 - smoothstep_range(0.12, 0.58, valley_axis);
-        let glacial_relief_meters =
-            (-34.0 - (province.glaciation * 210.0)) * valley_floor * province.glacial
-                + ((landscape - 0.5) * 38.0 * province.glacial);
+        let glacial_relief_meters = (-parameters.glacial_base_depth_meters
+            - (province.glaciation * parameters.glacial_depth_range_meters))
+            * valley_floor
+            * province.glacial
+            + ((landscape - 0.5) * parameters.glacial_landscape_relief_meters * province.glacial);
 
         let dune_ripple_meters = if let Some(dune) = province.dune_geometry {
             dune.detail_height_offset_meters
         } else {
-            (height_layer(self.world, x, z, 96.0, DOMAIN_PROVINCE_DUNE_RIPPLES)? - 0.5)
+            (height_layer(
+                self.world,
+                x,
+                z,
+                parameters.dune_wavelength_meters,
+                DOMAIN_PROVINCE_DUNE_RIPPLES,
+            )? - 0.5)
                 * 2.0
                 * province.dune
         };
 
-        let ground_detail_meters =
-            (ground - 0.5) * 2.6 * quiet_ground * (0.38 + (province.exposure * 0.92));
+        let ground_detail_meters = (ground - 0.5)
+            * parameters.ground_detail_relief_meters
+            * quiet_ground
+            * (0.38 + (province.exposure * 0.92));
         let surface_height_meters = macro_sample.elevation_meters
             + plain_relief_meters
             + rolling_upland_relief_meters
@@ -830,6 +1271,46 @@ mod tests {
             6_616_975_272_258_147_281,
             "changing this value changes generator version 18 landform surfaces"
         );
+    }
+
+    #[test]
+    fn calibrated_default_is_bit_identical_to_version_eighteen_landform() {
+        let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
+        let production = WildernessTerrain::new(world);
+        let calibrated = CalibratedTerrain::new(world, LandformParameters::VERSION_18)
+            .expect("calibrated terrain");
+        for [x, z] in [[-812_375.0, 1_440_125.0], [48_000_000.0, -36_700_000.0]] {
+            assert_eq!(
+                production.height_at(x, z).expect("production").to_bits(),
+                calibrated.height_at(x, z).expect("calibrated").to_bits(),
+            );
+        }
+    }
+
+    #[test]
+    fn named_calibration_parameters_are_validated_and_affect_height() {
+        let world = WorldIdentity::new(0x5eed, PROVINCE_GENERATOR_VERSION, 0);
+        let mut parameters = LandformParameters::VERSION_18;
+        assert!(
+            parameters
+                .set_named("rugged_uplift_relief_meters", 800.0)
+                .is_ok()
+        );
+        assert!(
+            parameters
+                .set_named("rugged_uplift_relief_meters", -1.0)
+                .is_err()
+        );
+        assert!(parameters.set_named("not_a_parameter", 1.0).is_err());
+        let original = CalibratedTerrain::new(world, LandformParameters::VERSION_18)
+            .expect("original")
+            .height_at(48_000_000.0, -36_700_000.0)
+            .expect("original height");
+        let changed = CalibratedTerrain::new(world, parameters)
+            .expect("changed")
+            .height_at(48_000_000.0, -36_700_000.0)
+            .expect("changed height");
+        assert_ne!(original.to_bits(), changed.to_bits());
     }
 
     #[test]

@@ -49,6 +49,98 @@ const DOMAIN_DUNE_DIRECTION: u64 = 0x4455_4e45_4449_5245;
 // change generated values.
 const PROVINCE_SAMPLE_CACHE_ENTRIES: usize = 256;
 
+/// Offline-calibratable coefficients for version-18+ province morphology.
+///
+/// Production generation always uses [`Self::VERSION_18`]. Explicit values are
+/// accepted only by inspection and calibration entry points, so an optimizer
+/// cannot change an existing world contract or contaminate the normal cache.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProvinceParameters {
+    pub base_elevation_meters: f64,
+    pub continental_relief_meters: f64,
+    pub boundary_uplift_meters: f64,
+    pub closed_basin_base_depth_meters: f64,
+    pub closed_basin_depth_range_meters: f64,
+    pub tectonic_half_length_base_meters: f64,
+    pub tectonic_half_length_range_meters: f64,
+    pub tectonic_width_base_meters: f64,
+    pub tectonic_width_range_meters: f64,
+    pub tectonic_peak_base_meters: f64,
+    pub tectonic_peak_range_meters: f64,
+    pub glacial_valley_base_depth_meters: f64,
+    pub glacial_valley_depth_range_meters: f64,
+    pub volcanic_relief_meters: f64,
+    pub plateau_base_relief_meters: f64,
+    pub plateau_relief_range_meters: f64,
+    pub scarp_step_base_meters: f64,
+    pub scarp_step_range_meters: f64,
+    pub dune_base_amplitude_meters: f64,
+    pub dune_sediment_amplitude_meters: f64,
+    pub dune_aridity_amplitude_meters: f64,
+}
+
+impl ProvinceParameters {
+    pub const VERSION_18: Self = Self {
+        base_elevation_meters: -640.0,
+        continental_relief_meters: 1_280.0,
+        boundary_uplift_meters: 170.0,
+        closed_basin_base_depth_meters: 90.0,
+        closed_basin_depth_range_meters: 240.0,
+        tectonic_half_length_base_meters: 170_000.0,
+        tectonic_half_length_range_meters: 240_000.0,
+        tectonic_width_base_meters: 28_000.0,
+        tectonic_width_range_meters: 78_000.0,
+        tectonic_peak_base_meters: 900.0,
+        tectonic_peak_range_meters: 2_650.0,
+        glacial_valley_base_depth_meters: 120.0,
+        glacial_valley_depth_range_meters: 520.0,
+        volcanic_relief_meters: 1_050.0,
+        plateau_base_relief_meters: 180.0,
+        plateau_relief_range_meters: 460.0,
+        scarp_step_base_meters: 110.0,
+        scarp_step_range_meters: 780.0,
+        dune_base_amplitude_meters: 7.0,
+        dune_sediment_amplitude_meters: 41.0,
+        dune_aridity_amplitude_meters: 18.0,
+    };
+
+    /// Rejects non-finite and physically unusable optimizer proposals.
+    pub fn is_valid(self) -> bool {
+        let positive = [
+            self.continental_relief_meters,
+            self.boundary_uplift_meters,
+            self.closed_basin_base_depth_meters,
+            self.closed_basin_depth_range_meters,
+            self.tectonic_half_length_base_meters,
+            self.tectonic_half_length_range_meters,
+            self.tectonic_width_base_meters,
+            self.tectonic_width_range_meters,
+            self.tectonic_peak_base_meters,
+            self.tectonic_peak_range_meters,
+            self.glacial_valley_base_depth_meters,
+            self.glacial_valley_depth_range_meters,
+            self.volcanic_relief_meters,
+            self.plateau_base_relief_meters,
+            self.plateau_relief_range_meters,
+            self.scarp_step_base_meters,
+            self.scarp_step_range_meters,
+            self.dune_base_amplitude_meters,
+            self.dune_sediment_amplitude_meters,
+            self.dune_aridity_amplitude_meters,
+        ];
+        self.base_elevation_meters.is_finite()
+            && positive
+                .into_iter()
+                .all(|value| value.is_finite() && value > 0.0)
+    }
+}
+
+impl Default for ProvinceParameters {
+    fn default() -> Self {
+        Self::VERSION_18
+    }
+}
+
 thread_local! {
     static PROVINCE_SAMPLE_CACHE: RefCell<VecDeque<ProvinceCacheEntry>> =
         const { RefCell::new(VecDeque::new()) };
@@ -228,6 +320,19 @@ impl ProvincePlan {
 
     /// Samples inside the province or its fixed generation halo.
     pub fn sample(self, x: f64, z: f64) -> Option<ProvinceSample> {
+        self.sample_with_parameters(x, z, ProvinceParameters::VERSION_18)
+    }
+
+    /// Samples with explicit offline calibration parameters.
+    pub fn sample_with_parameters(
+        self,
+        x: f64,
+        z: f64,
+        parameters: ProvinceParameters,
+    ) -> Option<ProvinceSample> {
+        if !parameters.is_valid() {
+            return None;
+        }
         let origin = self.index.origin();
         let minimum_x = origin[0] - PROVINCE_HALO_METERS;
         let minimum_z = origin[1] - PROVINCE_HALO_METERS;
@@ -238,12 +343,12 @@ impl ProvincePlan {
         }
         let owner = ProvinceIndex::containing(x, z)?;
         if owner == self.index {
-            sample_owned(self, x, z)
+            sample_owned(self, x, z, parameters)
         } else {
             // Halo sampling resolves the neighboring owner explicitly. This
             // keeps the caller bounded while ensuring both sides consume the
             // same artifact content rather than extrapolating local corners.
-            sample_owned(ProvincePlan::generate(self.world, owner)?, x, z)
+            sample_owned(ProvincePlan::generate(self.world, owner)?, x, z, parameters)
         }
     }
 
@@ -267,7 +372,12 @@ impl ProvincePlan {
             return Some(sample);
         }
         let owner = ProvinceIndex::containing(x, z)?;
-        let sample = sample_owned(ProvincePlan::generate(world, owner)?, x, z)?;
+        let sample = sample_owned(
+            ProvincePlan::generate(world, owner)?,
+            x,
+            z,
+            ProvinceParameters::VERSION_18,
+        )?;
         PROVINCE_SAMPLE_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             if cache.len() >= PROVINCE_SAMPLE_CACHE_ENTRIES {
@@ -282,10 +392,29 @@ impl ProvincePlan {
         });
         Some(sample)
     }
+
+    /// Samples arbitrary offline parameters without using the production cache.
+    pub fn sample_at_with_parameters(
+        world: WorldIdentity,
+        x: f64,
+        z: f64,
+        parameters: ProvinceParameters,
+    ) -> Option<ProvinceSample> {
+        if world.generator_version < PROVINCE_GENERATOR_VERSION || !parameters.is_valid() {
+            return None;
+        }
+        let owner = ProvinceIndex::containing(x, z)?;
+        sample_owned(ProvincePlan::generate(world, owner)?, x, z, parameters)
+    }
 }
 
 #[allow(clippy::too_many_lines)]
-fn sample_owned(plan: ProvincePlan, x: f64, z: f64) -> Option<ProvinceSample> {
+fn sample_owned(
+    plan: ProvincePlan,
+    x: f64,
+    z: f64,
+    parameters: ProvinceParameters,
+) -> Option<ProvinceSample> {
     if !x.is_finite() || !z.is_finite() {
         return None;
     }
@@ -325,7 +454,7 @@ fn sample_owned(plan: ProvincePlan, x: f64, z: f64) -> Option<ProvinceSample> {
     let ecological_memory =
         value_field(world, DOMAIN_ECOLOGICAL_MEMORY, x, z, CONTINENT_EDGE_METERS)?;
 
-    let tectonic = strongest_tectonic_feature(world, province, x, z)?;
+    let tectonic = strongest_tectonic_feature(world, province, x, z, parameters)?;
     let faulting = tectonic.faulting;
     let uplift = (uplift_control * 0.46 + tectonic.strength * 0.54).clamp(0.0, 1.0);
     let moisture = (moisture_supply + ((continentalness - 0.5) * -0.16)
@@ -347,8 +476,10 @@ fn sample_owned(plan: ProvincePlan, x: f64, z: f64) -> Option<ProvinceSample> {
         * (1.0 - drainage * 0.58))
         .clamp(0.0, 1.0);
 
-    let provisional_base =
-        -640.0 + (continentalness * 1_280.0) + (uplift_control * 170.0) - (closed_basin * 130.0);
+    let provisional_base = parameters.base_elevation_meters
+        + (continentalness * parameters.continental_relief_meters)
+        + (uplift_control * parameters.boundary_uplift_meters)
+        - (closed_basin * 130.0);
     let land_fraction = smoothstep_range(-90.0, 90.0, provisional_base);
     let coast_fraction =
         (1.0 - smoothstep_range(20.0, 360.0, provisional_base.abs())).clamp(0.0, 1.0);
@@ -389,17 +520,24 @@ fn sample_owned(plan: ProvincePlan, x: f64, z: f64) -> Option<ProvinceSample> {
         plateau,
         rock_hardness,
         land_fraction,
+        parameters,
     )?;
     let scarp_geometry = scarp_influence.strongest_geometry;
     let scarp = scarp_influence.strength;
-    let dune_geometry = dune_geometry(world, x, z, dune, sediment, aridity)?;
+    let dune_geometry = dune_geometry(world, x, z, dune, sediment, aridity, parameters)?;
 
     let tectonic_relief = tectonic.relief_meters * mountain * (0.72 + ((1.0 - erosion) * 0.28));
     let weathering_relief = tectonic.weathered_relief_meters * mountain * erosion;
-    let volcanic_relief =
-        volcanism * smoothstep_range(0.50, 0.82, uplift) * tectonic.envelope * 1_050.0;
-    let plateau_relief = plateau * (180.0 + (strata_tilt * 460.0));
-    let basin_relief = -closed_basin * (90.0 + (basin_control * 240.0));
+    let volcanic_relief = volcanism
+        * smoothstep_range(0.50, 0.82, uplift)
+        * tectonic.envelope
+        * parameters.volcanic_relief_meters;
+    let plateau_relief = plateau
+        * (parameters.plateau_base_relief_meters
+            + (strata_tilt * parameters.plateau_relief_range_meters));
+    let basin_relief = -closed_basin
+        * (parameters.closed_basin_base_depth_meters
+            + (basin_control * parameters.closed_basin_depth_range_meters));
     let glacial_relief = tectonic.glacial_valley_meters * glacial;
     let scarp_relief = scarp_influence.elevation_offset_meters;
     let dune_relief = dune_geometry.map_or(0.0, |geometry| geometry.height_offset_meters);
@@ -559,6 +697,7 @@ fn strongest_tectonic_feature(
     containing: ProvinceIndex,
     x: f64,
     z: f64,
+    parameters: ProvinceParameters,
 ) -> Option<TectonicInfluence> {
     let mut combined = TectonicInfluence {
         strength: 0.0,
@@ -578,8 +717,10 @@ fn strongest_tectonic_feature(
             let key = owner.key(world, DOMAIN_TECTONIC_FEATURE);
             let center = owner.center();
             let direction = feature_direction(key, 0x4449_5245_4354);
-            let half_length = 170_000.0 + (hash_fraction(key, 1) * 240_000.0);
-            let width = 28_000.0 + (hash_fraction(key, 2) * 78_000.0);
+            let half_length = parameters.tectonic_half_length_base_meters
+                + (hash_fraction(key, 1) * parameters.tectonic_half_length_range_meters);
+            let width = parameters.tectonic_width_base_meters
+                + (hash_fraction(key, 2) * parameters.tectonic_width_range_meters);
             let jitter_x = (hash_fraction(key, 3) - 0.5) * PROVINCE_EDGE_METERS * 0.42;
             let jitter_z = (hash_fraction(key, 4) - 0.5) * PROVINCE_EDGE_METERS * 0.42;
             let start = [
@@ -600,13 +741,16 @@ fn strongest_tectonic_feature(
             let envelope = smoothstep01(cross) * end_taper;
             let feature_strength = (0.18 + (hash_fraction(key, 5) * 0.82)) * envelope;
             let youth = hash_fraction(key, 6);
-            let peak = 900.0 + (hash_fraction(key, 7) * 2_650.0);
+            let peak = parameters.tectonic_peak_base_meters
+                + (hash_fraction(key, 7) * parameters.tectonic_peak_range_meters);
             let sharp_cross = libm::pow(cross, 0.72 + (youth * 1.9));
             let weathered_cross = smoothstep01(cross) * (1.0 - youth) * 0.46;
             let valley_width = width * (0.13 + (hash_fraction(key, 8) * 0.20));
             let valley_cross = (1.0 - (distance / valley_width)).clamp(0.0, 1.0);
-            let glacial_valley_meters =
-                -(120.0 + (hash_fraction(key, 9) * 520.0)) * smoothstep01(valley_cross) * end_taper;
+            let glacial_valley_meters = -(parameters.glacial_valley_base_depth_meters
+                + (hash_fraction(key, 9) * parameters.glacial_valley_depth_range_meters))
+                * smoothstep01(valley_cross)
+                * end_taper;
             combined.strength = smooth_union(combined.strength, feature_strength);
             combined.envelope = smooth_union(combined.envelope, envelope);
             combined.faulting = smooth_union(
@@ -636,6 +780,7 @@ fn combined_scarp_features(
     plateau: f64,
     rock_hardness: f64,
     land_fraction: f64,
+    parameters: ProvinceParameters,
 ) -> Option<ScarpInfluence> {
     let mut strongest: Option<ScarpGeometry> = None;
     let mut combined_strength = 0.0;
@@ -674,7 +819,9 @@ fn combined_scarp_features(
             if face_strength <= f64::EPSILON {
                 continue;
             }
-            let step_height = (110.0 + (hash_fraction(key, 6) * 780.0)) * cause;
+            let step_height = (parameters.scarp_step_base_meters
+                + (hash_fraction(key, 6) * parameters.scarp_step_range_meters))
+                * cause;
             let transition = 1.0 - smoothstep_range(-half_width, half_width, signed_distance);
             let contribution = step_height * transition * end_taper * proximity;
             combined_strength = smooth_union(combined_strength, face_strength);
@@ -708,6 +855,7 @@ fn dune_geometry(
     dune: f64,
     sediment: f64,
     aridity: f64,
+    parameters: ProvinceParameters,
 ) -> Option<Option<DuneGeometry>> {
     if dune <= 0.03 {
         return Some(None);
@@ -716,7 +864,9 @@ fn dune_geometry(
     let downwind_direction = wave.downwind_direction;
     let ridge_direction = [-downwind_direction[1], downwind_direction[0]];
     let strength = (dune * (0.54 + (aridity * 0.46))).clamp(0.0, 1.0);
-    let amplitude_meters = 7.0 + (sediment * 41.0) + (aridity * 18.0);
+    let amplitude_meters = parameters.dune_base_amplitude_meters
+        + (sediment * parameters.dune_sediment_amplitude_meters)
+        + (aridity * parameters.dune_aridity_amplitude_meters);
     Some(Some(DuneGeometry {
         downwind_direction,
         ridge_direction,
@@ -931,6 +1081,40 @@ mod tests {
             left.boundary_conditions.northeast,
             right.boundary_conditions.northwest
         );
+    }
+
+    #[test]
+    fn explicit_default_parameters_preserve_cached_version_eighteen_samples() {
+        for [x, z] in [
+            [-712_000.0, 943_000.0],
+            [0.0, 0.0],
+            [3_500_000.0, -840_000.0],
+        ] {
+            let cached = ProvincePlan::sample_at(WORLD, x, z).expect("cached sample");
+            let explicit = ProvincePlan::sample_at_with_parameters(
+                WORLD,
+                x,
+                z,
+                ProvinceParameters::VERSION_18,
+            )
+            .expect("explicit sample");
+            assert_eq!(cached, explicit);
+        }
+    }
+
+    #[test]
+    fn calibration_parameters_change_morphology_without_changing_world_identity() {
+        let [x, z] = [47_968_000.0, -36_696_000.0];
+        let original = ProvincePlan::sample_at(WORLD, x, z).expect("original");
+        let mut parameters = ProvinceParameters::VERSION_18;
+        parameters.tectonic_peak_range_meters *= 1.5;
+        let changed =
+            ProvincePlan::sample_at_with_parameters(WORLD, x, z, parameters).expect("changed");
+        assert_ne!(
+            original.elevation_meters.to_bits(),
+            changed.elevation_meters.to_bits()
+        );
+        assert_eq!(original.province, changed.province);
     }
 
     #[test]

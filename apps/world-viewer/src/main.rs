@@ -12,7 +12,7 @@ use treeline_ecology::{
 };
 use treeline_geography::{Climate, ProvincePlan, RegionalProfile};
 use treeline_renderer::terrain_tier;
-use treeline_terrain::{SurfaceField, WildernessTerrain};
+use treeline_terrain::{CalibratedTerrain, LandformParameters, SurfaceField, WildernessTerrain};
 use treeline_voxel::LodLevel;
 use treeline_world::{CURRENT_GENERATOR_VERSION, GeneratedWorldTerrain, GenerationPriority};
 
@@ -47,6 +47,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     if arguments
         .first()
+        .is_some_and(|argument| argument == "heightmap-batch")
+    {
+        run_heightmap_batch(&arguments[1..])?;
+        return Ok(());
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "terrain-parameters")
+    {
+        print_terrain_parameters()?;
+        return Ok(());
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "audit")
     {
         let config = AuditConfig::parse(&arguments[1..])?;
@@ -74,6 +88,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn print_usage() {
     println!(
         "world-viewer audit [--output PATH] [--regions COUNT] [--seeds LIST] [--accept] [--require-coverage]\n\
+         world-viewer heightmap-batch --request PATH --output PATH\n\
+         world-viewer terrain-parameters\n\
          Seeds are comma-separated decimal or 0x-prefixed u64 values. Existing baselines are\n\
          compared but retained unless --accept is supplied. --require-coverage exits unsuccessfully\n\
          when any required visible outcome or qualified viewpoint remains missing."
@@ -150,6 +166,206 @@ fn parse_seeds(value: &str) -> Result<Vec<u64>, Box<dyn Error>> {
         return Err("at least one seed is required".into());
     }
     Ok(seeds)
+}
+
+fn print_terrain_parameters() -> Result<(), Box<dyn Error>> {
+    let values = LandformParameters::VERSION_18
+        .named_values()
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), serde_json::Value::from(value)))
+        .collect::<serde_json::Map<_, _>>();
+    println!("{}", serde_json::to_string_pretty(&values)?);
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_heightmap_batch(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    let mut request_path = None;
+    let mut output_path = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--request" => {
+                index += 1;
+                request_path = Some(PathBuf::from(
+                    arguments.get(index).ok_or("--request requires a path")?,
+                ));
+            }
+            "--output" => {
+                index += 1;
+                output_path = Some(PathBuf::from(
+                    arguments.get(index).ok_or("--output requires a path")?,
+                ));
+            }
+            unknown => return Err(format!("unknown heightmap-batch argument: {unknown}").into()),
+        }
+        index += 1;
+    }
+    let request_path = request_path.ok_or("heightmap-batch requires --request")?;
+    let output_path = output_path.ok_or("heightmap-batch requires --output")?;
+    let request: serde_json::Value = serde_json::from_str(&fs::read_to_string(request_path)?)?;
+    let object = request
+        .as_object()
+        .ok_or("heightmap request must be a JSON object")?;
+    let generator_version =
+        object
+            .get("generator_version")
+            .map_or(Ok(CURRENT_GENERATOR_VERSION), |value| {
+                value
+                    .as_u64()
+                    .ok_or("generator_version must be an unsigned integer")
+                    .and_then(|version| {
+                        u32::try_from(version).map_err(|_| "generator_version exceeds u32")
+                    })
+            })?;
+    if generator_version < treeline_geography::PROVINCE_GENERATOR_VERSION {
+        return Err("heightmap calibration requires generator version 18 or newer".into());
+    }
+
+    let mut parameters = LandformParameters::VERSION_18;
+    if let Some(overrides) = object.get("parameters") {
+        for (name, value) in overrides
+            .as_object()
+            .ok_or("parameters must be a JSON object")?
+        {
+            let value = value
+                .as_f64()
+                .ok_or("landform parameter values must be numbers")?;
+            parameters
+                .set_named(name, value)
+                .map_err(|reason| format!("invalid parameter {name}: {reason}"))?;
+        }
+    }
+    let parameter_words = parameters
+        .named_values()
+        .into_iter()
+        .map(|(_, value)| value.to_bits())
+        .collect::<Vec<_>>();
+    let parameter_fingerprint = stable_hash(&parameter_words);
+    let rasters = object
+        .get("rasters")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("heightmap request requires a rasters array")?;
+    if rasters.is_empty() {
+        return Err("heightmap request must contain at least one raster".into());
+    }
+    fs::create_dir_all(&output_path)?;
+
+    for raster in rasters {
+        let raster = raster
+            .as_object()
+            .ok_or("each raster request must be a JSON object")?;
+        let id = raster
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("raster id must be a string")?;
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(format!("unsafe raster id: {id}").into());
+        }
+        let seed_value = raster.get("seed").ok_or("raster seed is required")?;
+        let seed = parse_json_seed(seed_value)?;
+        let center_x = json_f64(raster, "center_x_meters")?;
+        let center_z = json_f64(raster, "center_z_meters")?;
+        let span = json_f64(raster, "span_meters")?;
+        if span <= 0.0 {
+            return Err("span_meters must be positive".into());
+        }
+        let edge_u64 = raster
+            .get("edge")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("raster edge must be an unsigned integer")?;
+        let edge = usize::try_from(edge_u64).map_err(|_| "raster edge exceeds usize")?;
+        if !(2..=4_096).contains(&edge) {
+            return Err("raster edge must be between 2 and 4096".into());
+        }
+        let spacing = span / usize_as_f64(edge);
+        let minimum_x = center_x - (span * 0.5);
+        let minimum_z = center_z - (span * 0.5);
+        // Keep common random numbers across optimizer proposals. The parameter
+        // fingerprint identifies the artifact but must not reseed its fields.
+        let world = WorldIdentity::new(seed, generator_version, 0);
+        let terrain = CalibratedTerrain::new(world, parameters)
+            .ok_or("calibrated terrain rejected the request")?;
+        let mut bytes = Vec::with_capacity(edge * edge * std::mem::size_of::<f32>());
+        let mut minimum_height = f64::INFINITY;
+        let mut maximum_height = f64::NEG_INFINITY;
+        for row in 0..edge {
+            let z = minimum_z + ((usize_as_f64(row) + 0.5) * spacing);
+            for column in 0..edge {
+                let x = minimum_x + ((usize_as_f64(column) + 0.5) * spacing);
+                let height = terrain
+                    .height_at(x, z)
+                    .ok_or("calibrated terrain sample unavailable")?;
+                if !height.is_finite() || height.abs() > f64::from(f32::MAX) {
+                    return Err("calibrated terrain produced a height outside f32 range".into());
+                }
+                minimum_height = minimum_height.min(height);
+                maximum_height = maximum_height.max(height);
+                bytes.extend_from_slice(&heightmap_f32(height).to_le_bytes());
+            }
+        }
+        fs::write(output_path.join(format!("{id}.f32")), bytes)?;
+        let metadata = serde_json::json!({
+            "id": id,
+            "format": "little-endian-f32-row-major-south-to-north",
+            "edge": edge,
+            "span_meters": span,
+            "spacing_meters": spacing,
+            "center_x_meters": center_x,
+            "center_z_meters": center_z,
+            "seed": format!("{seed:016x}"),
+            "generator_version": generator_version,
+            "parameter_fingerprint": format!("{parameter_fingerprint:016x}"),
+            "minimum_height_meters": minimum_height,
+            "maximum_height_meters": maximum_height,
+        });
+        fs::write(
+            output_path.join(format!("{id}.json")),
+            serde_json::to_vec_pretty(&metadata)?,
+        )?;
+    }
+    println!(
+        "Heightmap batch wrote {} raster(s) to {} with parameter fingerprint {parameter_fingerprint:016x}",
+        rasters.len(),
+        output_path.display()
+    );
+    Ok(())
+}
+
+fn parse_json_seed(value: &serde_json::Value) -> Result<u64, Box<dyn Error>> {
+    if let Some(seed) = value.as_u64() {
+        return Ok(seed);
+    }
+    let text = value
+        .as_str()
+        .ok_or("raster seed must be an unsigned integer or string")?;
+    Ok(text.strip_prefix("0x").map_or_else(
+        || text.parse::<u64>(),
+        |hexadecimal| u64::from_str_radix(hexadecimal, 16),
+    )?)
+}
+
+fn json_f64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<f64, Box<dyn Error>> {
+    let value = object
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("raster {key} must be a number"))?;
+    if !value.is_finite() {
+        return Err(format!("raster {key} must be finite").into());
+    }
+    Ok(value)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn heightmap_f32(value: f64) -> f32 {
+    value as f32
 }
 
 fn run_audit(config: &AuditConfig) -> Result<(), Box<dyn Error>> {
@@ -2748,6 +2964,75 @@ mod tests {
         assert_eq!(config.seeds, [0x5eed, 42]);
         assert!(!config.accept_baseline);
         assert!(config.require_coverage);
+    }
+
+    #[test]
+    fn heightmap_batch_writes_deterministic_float_rasters_and_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("treeline-heightmap-test-{}", std::process::id()));
+        let request_path = root.join("request.json");
+        let output_path = root.join("output");
+        fs::create_dir_all(&root).expect("temporary root");
+        fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "generator_version": 18,
+                "parameters": {"rolling_regional_relief_meters": 180.0},
+                "rasters": [{
+                    "id": "small",
+                    "seed": "0x5eed",
+                    "center_x_meters": -512_000.0,
+                    "center_z_meters": 0.0,
+                    "span_meters": 4000.0,
+                    "edge": 4
+                }]
+            }))
+            .expect("request JSON"),
+        )
+        .expect("request file");
+        run_heightmap_batch(&[
+            "--request".to_owned(),
+            request_path.display().to_string(),
+            "--output".to_owned(),
+            output_path.display().to_string(),
+        ])
+        .expect("batch succeeds");
+        assert_eq!(
+            fs::read(output_path.join("small.f32"))
+                .expect("float raster")
+                .len(),
+            4 * 4 * std::mem::size_of::<f32>()
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_path.join("small.json")).expect("metadata"))
+                .expect("metadata JSON");
+        assert_eq!(metadata["edge"], 4);
+        assert_eq!(
+            metadata["format"],
+            "little-endian-f32-row-major-south-to-north"
+        );
+        fs::remove_dir_all(root).expect("remove precise temporary test root");
+    }
+
+    #[test]
+    fn checked_in_parameter_schema_matches_rust_version_eighteen_defaults() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tools/terrain_calibration/parameters.json"
+        ))
+        .expect("parameter schema JSON");
+        let schema = schema.as_object().expect("parameter schema object");
+        let named = LandformParameters::VERSION_18.named_values();
+        assert_eq!(schema.len(), named.len());
+        for (name, value) in named {
+            assert_eq!(
+                schema[name]["default"]
+                    .as_f64()
+                    .expect("numeric default")
+                    .to_bits(),
+                value.to_bits(),
+                "schema default drifted for {name}"
+            );
+        }
     }
 
     #[test]

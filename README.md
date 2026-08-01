@@ -144,6 +144,14 @@ intentional visual change. Use `--help` to see seed, region-count, and
 output-path controls; pass `--require-coverage` when the audit should fail on
 any missing required outcome or qualified viewpoint family.
 
+For real-terrain calibration, `world-viewer heightmap-batch` exports deterministic
+physical height rasters using explicit offline landform parameters. The Python
+pipeline in `tools/terrain_calibration` prepares ETOPO/NASADEM references,
+measures multi-scale morphology, runs sensitivity and bounded CMA-style search,
+and produces labeled or blind fixed-scale heightmap galleries. See
+`tools/terrain_calibration/README.md`; reference data and generated calibration
+runs are intentionally excluded from Git.
+
 Run the playable terrain toy with:
 
 ```sh
