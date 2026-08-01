@@ -47,12 +47,15 @@ and boundary invariants, perspective rendering, and the full repository gate.
 
 ## Local toolchain state
 
-- Homebrew `jpeg-xl` is installed at 0.12.0. The old missing-library error named
-  `libjxl.0.11.dylib`, so rebuilding/upgrading GDAL should relink it to 0.12.
-- Homebrew GDAL is installed at `3.13.1_1`; `3.13.2` is available.
+- Homebrew `jpeg-xl` 0.12.0 and GDAL 3.13.2 are installed. GDAL was upgraded
+  from `3.13.1_1` on 2026-07-31 and now links to `libjxl.0.12.dylib` rather than
+  the missing `libjxl.0.11.dylib`.
+- `gdalinfo --version`, opening the ETOPO proof tile, and
+  `python3 -c 'from osgeo import gdal; print(gdal.VersionInfo())'` all succeed;
+  the binding reports native version `3130200`.
 - The Pillow fallback successfully reads simple floating-point, north-up
-  geographic GeoTIFF tiles. Full mosaics, VRTs, and arbitrary projections still
-  require working GDAL command-line tools.
+  geographic GeoTIFF tiles. Working GDAL now provides mosaics, VRTs, and
+  arbitrary source projections.
 
 Verify the repaired stack with:
 
@@ -120,4 +123,4 @@ Append entries here rather than replacing them.
 | ID | Corpus | Search | Result | Decision |
 |---|---|---|---|---|
 | baseline-001 | One Southwest US ETOPO macro patch; one stratified v18 sample | None | Treeline quiet fraction 0.940 vs real 0.406; p95 slope 0.053 vs 0.240 | Build a geographically diverse smoke corpus and tune broad relief before considering v19 |
-
+| toolchain-001 | Homebrew local environment | Upgrade GDAL 3.13.1_1 → 3.13.2; keep jpeg-xl 0.12.0 | ETOPO opens; GDAL links `libjxl.0.12`; Python binding reports 3130200 | Use GDAL for the multi-tile smoke corpus |
