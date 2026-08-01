@@ -86,7 +86,7 @@ shasum -a 256 data/terrain-calibration/sources/etopo/ETOPO_2022_v1_15s_N45W120_s
 python3 -m tools.terrain_calibration extract \
   --source data/terrain-calibration/sources/etopo/ETOPO_2022_v1_15s_N45W120_surface.tif \
   --output data/terrain-calibration/etopo-proof --id southwest-us \
-  --latitude 39 --longitude -112.5 --span-m 512000 --edge 1024
+  --latitude 39 --longitude -112.5 --span 512000 --edge 1024
 ```
 
 The next reproducible experiment is:

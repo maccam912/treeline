@@ -536,6 +536,67 @@ def extract_reference(args) -> None:
     write_raster(output / f"{args.id}.f32", raster, metadata)
 
 
+def extract_manifest(args) -> None:
+    manifest_path = Path(args.manifest)
+    manifest = _json_read(manifest_path)
+    source_root = Path(args.source_root)
+    output = Path(args.output)
+    tier = manifest["tier"]
+    span = float(manifest.get("span_meters", MACRO_SPAN_METERS if tier == "macro" else LOCAL_SPAN_METERS))
+    edge = int(manifest.get("edge", MACRO_EDGE if tier == "macro" else LOCAL_EDGE))
+    extracted = []
+    identifiers = set()
+    for item in manifest["rasters"]:
+        identifier = item["id"]
+        if identifier in identifiers:
+            raise ValueError(f"duplicate raster id {identifier}")
+        identifiers.add(identifier)
+        split = item["split"]
+        if split not in {"train", "validation", "holdout"}:
+            raise ValueError(f"invalid split {split!r} for {identifier}")
+        source = source_root / item["source"]
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        raster = _extract_gdal(
+            source,
+            output / split / f"{identifier}.f32",
+            float(item["latitude"]),
+            float(item["longitude"]),
+            span,
+            edge,
+        )
+        if not np.all(np.isfinite(raster)):
+            raise ValueError(f"extracted reference {identifier} contains non-finite cells")
+        metadata = {
+            "id": identifier,
+            "source": str(source),
+            "source_kind": manifest["source_product"],
+            "source_sha256": manifest["sources"][item["source"]]["sha256"],
+            "latitude": float(item["latitude"]),
+            "longitude": float(item["longitude"]),
+            "projection": "local-azimuthal-equidistant",
+            "vertical_units": "meters",
+            "edge": edge,
+            "span_meters": span,
+            "spacing_meters": span / edge,
+            "land_fraction": float(np.mean(raster >= 0.0)),
+            "split": split,
+            "format": "little-endian-f32-row-major-south-to-north",
+            "corpus_manifest": str(manifest_path),
+        }
+        write_raster(output / split / f"{identifier}.f32", raster, metadata)
+        extracted.append(metadata)
+    _json_write(
+        output / "manifest.json",
+        {
+            "corpus": manifest["name"],
+            "source_manifest": str(manifest_path),
+            "tier": tier,
+            "rasters": extracted,
+        },
+    )
+
+
 def make_generated_request(args) -> None:
     rng = random.Random(args.seed)
     rasters = []
@@ -860,6 +921,14 @@ def main(argv: list[str] | None = None) -> None:
     extract.add_argument("--span", type=float)
     extract.add_argument("--edge", type=int)
     extract.set_defaults(func=extract_reference)
+
+    extract_set = subparsers.add_parser(
+        "extract-manifest", help="extract a checked-in reference-corpus manifest"
+    )
+    extract_set.add_argument("--manifest", required=True)
+    extract_set.add_argument("--source-root", required=True)
+    extract_set.add_argument("--output", required=True)
+    extract_set.set_defaults(func=extract_manifest)
 
     request = subparsers.add_parser("make-request", help="create deterministic generated-world raster requests")
     request.add_argument("--output", required=True)

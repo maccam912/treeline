@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image, TiffImagePlugin
@@ -55,6 +56,46 @@ class TerrainCalibrationTests(unittest.TestCase):
             self.assertEqual(extracted.shape, (16, 16))
             self.assertTrue(np.all(np.isfinite(extracted)))
             self.assertGreater(float(np.ptp(extracted)), 0.0)
+
+    def test_extract_manifest_writes_split_rasters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "tile.tif"
+            source.touch()
+            manifest = {
+                "name": "test-corpus",
+                "tier": "macro",
+                "source_product": "ETOPO-2022",
+                "span_meters": 8_000.0,
+                "edge": 4,
+                "sources": {"tile.tif": {"sha256": "abc"}},
+                "rasters": [
+                    {
+                        "id": "sample",
+                        "source": "tile.tif",
+                        "latitude": 1.0,
+                        "longitude": 2.0,
+                        "split": "validation",
+                    }
+                ],
+            }
+            manifest_path = root / "manifest.json"
+            pipeline._json_write(manifest_path, manifest)
+            args = type(
+                "Args",
+                (),
+                {
+                    "manifest": str(manifest_path),
+                    "source_root": str(root),
+                    "output": str(root / "output"),
+                },
+            )()
+            with patch.object(pipeline, "_extract_gdal", return_value=np.ones((4, 4))):
+                pipeline.extract_manifest(args)
+            metadata = pipeline._json_read(root / "output/validation/sample.json")
+            self.assertEqual(metadata["split"], "validation")
+            self.assertEqual(metadata["source_sha256"], "abc")
+            self.assertEqual(metadata["spacing_meters"], 2_000.0)
 
 
 if __name__ == "__main__":
