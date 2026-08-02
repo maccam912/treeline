@@ -24,7 +24,7 @@ Add to the `mod tests` block at the bottom of `crates/renderer/src/vertex.rs`:
 ```rust
     #[test]
     fn every_surface_kind_occupies_a_distinct_band() {
-        let mut kinds = [
+        let mut kinds = vec![
             SURFACE_KIND_SOLID,
             SURFACE_KIND_WATER,
             SURFACE_KIND_PINE_BARK,
