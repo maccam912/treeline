@@ -34,7 +34,7 @@ Add to the `mod tests` block at the bottom of `crates/renderer/src/vertex.rs`:
         kinds.sort_by(f32::total_cmp);
         kinds.dedup();
         assert_eq!(kinds.len(), 5);
-        assert!(SURFACE_KIND_NEEDLE_FOLIAGE > SURFACE_KIND_OAK_BARK);
+        const _: () = assert!(SURFACE_KIND_NEEDLE_FOLIAGE > SURFACE_KIND_OAK_BARK);
     }
 ```
 
@@ -48,8 +48,11 @@ Expected: FAIL — `SURFACE_KIND_NEEDLE_FOLIAGE` is not defined.
 In `crates/renderer/src/vertex.rs`, after line 17 (`pub(crate) const SURFACE_KIND_OAK_BARK: f32 = 3.0;`):
 
 ```rust
+#[allow(dead_code)]
 pub(crate) const SURFACE_KIND_NEEDLE_FOLIAGE: f32 = 4.0;
 ```
+
+Note: the `#[allow(dead_code)]` is temporary — the constant has no consumer until Task 4, and the workspace clippy gate runs with `-D warnings`. Task 4 removes it.
 
 - [ ] **Step 4: Run it to verify it passes**
 
@@ -75,9 +78,10 @@ git commit -m "Add needle foliage surface kind"
 
 Create `crates/renderer/src/needle_texture.rs` with only the test module first, plus the module declaration in `lib.rs`:
 
-In `crates/renderer/src/lib.rs`, after line 18 (`mod material;`), add:
+In `crates/renderer/src/lib.rs`, after line 18 (`mod material;`), add (the `#[allow(dead_code)]` is temporary — Task 3 removes it once `material.rs` consumes the generator):
 
 ```rust
+#[allow(dead_code)]
 mod needle_texture;
 ```
 
@@ -159,13 +163,14 @@ impl Xorshift64 {
     }
 
     /// A value in `[0, 1)`.
+    #[allow(clippy::cast_precision_loss)]
     fn next(&mut self) -> f64 {
         let mut state = self.0;
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
         self.0 = state;
-        f64::from(state >> 11) / f64::from(u64::MAX >> 11)
+        (state >> 11) as f64 / (u64::MAX >> 11) as f64
     }
 }
 
@@ -383,6 +388,12 @@ use image::imageops::{FilterType, resize};
 use image::RgbaImage;
 
 use crate::needle_texture::generate_needle_maps;
+```
+
+In `crates/renderer/src/lib.rs`, remove the `#[allow(dead_code)]` from `mod needle_texture` (the generator now has a consumer):
+
+```rust
+mod needle_texture;
 ```
 
 Replace the body of `MaterialTextures::new` (currently lines 75–136) so it builds five layers from the four embedded JPEGs plus the generated needle maps, and replace `upload_material_layers` (currently lines 160–210) so it accepts `RgbaImage` layers. Add a `material_layers` helper. The full new `new`, helper, and `upload_material_layers`:
@@ -645,6 +656,8 @@ use crate::vertex::{SURFACE_KIND_NEEDLE_FOLIAGE, TerrainVertex, f64_as_f32, hash
 ```rust
 use shape::{CylinderSpec, append_conical_crown, append_needle_puff, append_octahedral_crown, append_tapered_cylinder};
 ```
+
+In `crates/renderer/src/vertex.rs`, remove the temporary `#[allow(dead_code)]` from `SURFACE_KIND_NEEDLE_FOLIAGE` (it now has a consumer).
 
 - [ ] **Step 4: Run it to verify it passes**
 
