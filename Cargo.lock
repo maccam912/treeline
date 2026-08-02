@@ -246,12 +246,11 @@ dependencies = [
  "js-sys",
  "libm",
  "pollster",
+ "treeline-climate",
  "treeline-coordinates",
  "treeline-ecology",
- "treeline-geography",
  "treeline-mesher",
  "treeline-renderer",
- "treeline-simulation",
  "treeline-terrain",
  "treeline-voxel",
  "treeline-world",
@@ -575,12 +574,9 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "glam",
- "libm",
  "pollster",
- "treeline-coordinates",
+ "treeline-climate",
  "treeline-ecology",
- "treeline-geography",
- "treeline-hydrology",
  "treeline-mesher",
  "treeline-renderer",
  "treeline-terrain",
@@ -770,12 +766,6 @@ dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
 ]
-
-[[package]]
-name = "itoa"
-version = "1.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jni"
@@ -1742,19 +1732,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_json"
-version = "1.0.151"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
-dependencies = [
- "itoa",
- "memchr",
- "serde",
- "serde_core",
- "zmij",
-]
-
-[[package]]
 name = "server"
 version = "0.1.0"
 dependencies = [
@@ -2043,14 +2020,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31c8adc977f8b18a6894d2dea6c300b73cdd1f653b3adaf0c32749ed5a633a34"
 
 [[package]]
-name = "treeline-caves"
+name = "treeline-climate"
 version = "0.1.0"
-dependencies = [
- "libm",
- "treeline-coordinates",
- "treeline-geography",
- "treeline-terrain",
-]
 
 [[package]]
 name = "treeline-coordinates"
@@ -2065,26 +2036,6 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "treeline-coordinates",
- "treeline-geography",
- "treeline-terrain",
-]
-
-[[package]]
-name = "treeline-geography"
-version = "0.1.0"
-dependencies = [
- "libm",
- "treeline-coordinates",
-]
-
-[[package]]
-name = "treeline-hydrology"
-version = "0.1.0"
-dependencies = [
- "libm",
- "treeline-coordinates",
- "treeline-geography",
- "treeline-terrain",
 ]
 
 [[package]]
@@ -2124,19 +2075,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "treeline-simulation"
-version = "0.1.0"
-dependencies = [
- "treeline-hydrology",
-]
-
-[[package]]
 name = "treeline-terrain"
 version = "0.1.0"
 dependencies = [
  "libm",
  "treeline-coordinates",
- "treeline-geography",
 ]
 
 [[package]]
@@ -2153,11 +2096,9 @@ name = "treeline-world"
 version = "0.1.0"
 dependencies = [
  "libm",
- "treeline-caves",
+ "treeline-climate",
  "treeline-coordinates",
  "treeline-ecology",
- "treeline-geography",
- "treeline-hydrology",
  "treeline-mesher",
  "treeline-terrain",
  "treeline-voxel",
@@ -2759,21 +2700,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
-name = "world-viewer"
-version = "0.1.0"
-dependencies = [
- "libm",
- "serde_json",
- "treeline-coordinates",
- "treeline-ecology",
- "treeline-geography",
- "treeline-renderer",
- "treeline-terrain",
- "treeline-voxel",
- "treeline-world",
-]
-
-[[package]]
 name = "x11-dl"
 version = "2.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2855,12 +2781,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "zmij"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zune-core"

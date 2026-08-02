@@ -2,109 +2,109 @@
 
 ## Purpose
 
-Treeline is a wilderness exploration game. Its central promise is that a player
-can choose a distant natural landmark, travel to it through coherent geography,
+Treeline is a wilderness exploration game. Its promise is that a player can
+choose a distant natural landmark, travel to it through coherent geography,
 survive the journey, and return with a story. Combat, loot ladders, quests, and
-general-purpose engine work are not current pillars.
+general-purpose engine work are not pillars.
 
-Read `DESIGN.md` before making architectural or product changes. Keep it in the
-repository: it is the source of truth for the game's direction and the document
-against which proposals should be reviewed.
+Read `DESIGN.md` before making architectural or product changes. It is the
+source of truth for direction, and the document proposals are reviewed against.
+`SURVEYED_WORLD.md` is the data contract for the measured world.
 
 ## Architecture
 
-The repository is a Rust workspace split by stable domain boundaries:
+A Rust workspace split by stable domain boundaries:
 
 ```text
 crates/
-  coordinates/  World identity, positions, hierarchical cells, stable hashing
-  terrain/      Signed density fields and surface/material sampling
-  geography/    Macro regions, geology, climate, drainage, and watersheds
-  ecology/      Species suitability, vegetation, and forest structure
-  caves/        Geological cave graphs and subterranean connectivity
-  hydrology/    Rivers, basins, lakes, and local water-state primitives
-  voxel/        Samples, chunks, edits, material channels, and LOD alignment
-  mesher/       Marching Cubes first; Transvoxel and transition meshes later
-  world/        Streaming, region lifecycle, caches, and generation scheduling
-  simulation/   Player, weather, wildlife, survival, and active-region state
-  protocol/     Versioned network messages and replication data
-  renderer/     wgpu-facing render tiers for terrain, water, plants, atmosphere
-  platform/     Window, input, storage, jobs, networking, and lifecycle adapters
+  coordinates/  World identity, positions, cells, stable hashing
+  terrain/      The surveyed bundle, and the density/surface contracts
+  climate/      Seasonal normals for the site
+  ecology/      Forest structure and tree individuals
+  voxel/        Chunks, LOD levels, lattice alignment
+  mesher/       Marching Cubes, Transvoxel, surface grids
+  world/        Composition, streaming, and the mesh queue
+  renderer/     wgpu: terrain, water, trees, sky
+  platform/     Platform boundaries kept out of generation
+  protocol/     Versioned network contracts
 
 apps/
-  client/         Player-facing game client
-  server/         Headless authoritative simulation
-  world-viewer/   Streaming and LOD inspection tool
-  generator-lab/  World-generation inspection and experimentation tool
+  client/         The game
+  server/         Headless host scaffold
+  generator-lab/  Top-down inspector for every layer
 ```
 
-Dependencies should generally point downward through these layers:
+Dependencies point downward:
 
 ```text
-apps
-  -> renderer / platform / protocol / simulation / world
-  -> ecology / caves / hydrology / voxel / mesher
-  -> geography / terrain
-  -> coordinates
+apps -> renderer / platform / protocol / world
+     -> ecology / voxel / mesher
+     -> terrain / climate
+     -> coordinates
 ```
 
-Avoid circular dependencies. If two crates need the same value type, move that
-type to the lowest domain crate that owns its meaning; do not create a generic
-utilities crate.
+Avoid circular dependencies. If two crates need the same value type, move it to
+the lowest crate that owns its meaning; do not create a utilities crate.
 
 ## Core invariants
 
+- The world is measured. Terrain, lake footprints, and canopy structure come
+  from the surveyed bundle, not from synthesis.
+- What is not measured is absent, not invented. Admitting a new layer means
+  finding an authoritative source and writing down what it means.
+- Measurements bound derivations. Nothing derived may exceed what was measured —
+  a tree cannot grow past its stand's canopy top.
 - Generation is a pure function of world identity, coordinates, explicit
   settings, and versioned artifacts.
-- The same input must produce bit-for-bit stable output on every machine we
-  support.
-- Generation never depends on visitation order, job completion order, wall
-  clock time, or a process-randomized hash.
+- The same input produces bit-for-bit stable output on every supported machine.
+- Generation never depends on visitation order, job completion order, wall clock
+  time, or a process-randomized hash.
 - Spatially adjacent regions share deterministic boundary conditions.
 - Signed density is negative inside solid terrain, zero on the surface, and
   positive in air.
-- Pristine terrain is regenerated, not persisted. Store only identity,
-  generation version, summaries, and deviations from the procedural base.
-- Distant representations may be cheaper, but they must remain spatially
-  aligned with near-world representations.
-- Simulation is active only around players. Frozen regions retain compact,
-  deterministic summaries.
+- Terrain is regenerated, not persisted. Store only identity, generation
+  version, summaries, and deviations.
+- Distant representations may be cheaper, but must stay spatially aligned with
+  near-world ones.
 - Protocol changes are explicitly versioned.
 
 ## Working conventions
 
-- Work directly on `main`; do not create feature branches unless the user
-  explicitly asks for one.
-- Use plain `git`, not the GitHub CLI (`gh`), for commit and push operations.
-  When the user asks to commit and push, commit and push directly on `main`
-  unless they explicitly request a different branch or pull-request workflow.
-- Build only machinery required by this game. Do not add a generic scene graph,
-  scripting runtime, editor framework, plugin system, or reusable game engine.
-- Prefer functional sampling APIs such as `terrain.sample(position)` and
-  `climate.sample(xz)`.
-- Add expensive external dependencies only with the first feature that uses
-  them end to end.
-- Keep platform APIs out of deterministic generation crates.
-- Use integer or deliberately specified floating-point operations in generation
-  code. Document any operation whose cross-platform behavior affects a world.
+- Work directly on `main`; do not create feature branches unless asked.
+- Use plain `git`, not `gh`, for commits and pushes.
+- Build only machinery this game needs. No scene graph, scripting runtime,
+  editor framework, plugin system, or reusable engine.
+- Prefer functional sampling APIs — `terrain.surface_height_at(x, z)`,
+  `climate.season(season, elevation)`.
+- Add expensive dependencies only with the first feature that uses them end to
+  end.
+- Keep platform APIs out of generation crates.
+- Use integer or deliberately specified floating-point operations in generation.
+  Document any operation whose cross-platform behavior affects a world.
 - Never use `std::collections::hash_map::DefaultHasher` for world generation.
 - Treat `generator-lab` as a product, not a disposable debug executable.
 - Keep public APIs small and domain-named. Avoid `common`, `helpers`, and
   catch-all modules.
+- Keep files short enough to hold in your head — roughly two screens. When a
+  file grows past that, it is usually doing more than one job; split it by
+  concern rather than by line count.
+- Order code so it reads top to bottom: a reader should not need what is below
+  to understand what is above. Name a function for what it does, and let its
+  body be the only place that says how.
 
 ## Testing expectations
 
-Every generator change should add or update tests for the applicable invariants:
+Every generator change should add or update tests for the applicable
+invariants:
 
-- determinism and golden hashes;
-- generation-order independence;
+- determinism, including golden fingerprints where they matter;
+- generation-order and request-order independence;
 - negative-coordinate and cell-boundary behavior;
-- river descent, basin spill levels, and water conservation;
-- cave graph connectivity;
-- LOD alignment and transition integrity;
-- serialization/protocol compatibility once persistence and networking arrive.
+- chunk seams and LOD transition alignment;
+- measured bounds — nothing derived exceeds its source;
+- serialization and protocol compatibility, once those exist.
 
-Run the full local gate before submitting changes:
+Run the full local gate before submitting:
 
 ```sh
 cargo fmt --all -- --check
@@ -113,28 +113,27 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-When shell access includes RTK, prefix shell commands with `rtk` to keep command
-output compact.
+Browser-only code is behind `cfg(target_arch = "wasm32")` and the native gate
+never compiles it. Check it separately:
+
+```sh
+cargo clippy -p client --target wasm32-unknown-unknown --all-targets -- -D warnings
+```
+
+When shell access includes RTK, prefix shell commands with `rtk` to keep output
+compact.
 
 ## Roadmap tracking
 
-When implementation work materially changes the status of a roadmap item,
-update the implementation tracker in `DESIGN.md` as part of the same change.
-Before finishing, review the affected phase and:
-
-- mark features complete only when they have landed end to end and are usable;
-- use `PARTIAL` for foundations that do not yet meet the full design goal, and
-  state what remains;
-- remove stale `NEXT` or `PARTIAL` labels from completed work; and
-- move `NEXT` to the actual next planned milestone and update the phase status
-  when appropriate.
-
-Do not leave `DESIGN.md` claiming that implemented work is still missing, or
-claim completion when only types, contracts, or other foundations exist.
+When work materially changes the status of a roadmap item, update the tracker in
+`DESIGN.md` in the same change. Mark something done only when it has landed end
+to end and is usable; when it has not, say what remains. Do not leave `DESIGN.md`
+claiming implemented work is missing, or claiming completion when only types and
+contracts exist.
 
 ## Definition of done
 
 A change is done when it is scoped to a design pillar, respects crate
-boundaries, includes relevant invariant tests, passes formatting/lint/test/docs,
-keeps the `DESIGN.md` implementation tracker current, and explains any
-intentional generator-version or persistence impact.
+boundaries, includes relevant invariant tests, passes formatting, lint, test,
+and docs, keeps the `DESIGN.md` tracker current, and explains any intentional
+generator-version or persistence impact.

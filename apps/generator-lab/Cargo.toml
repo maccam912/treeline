@@ -1,6 +1,6 @@
 [package]
 name = "generator-lab"
-description = "Treeline world-generation inspection and experimentation tool"
+description = "Treeline surveyed-world inspection tool"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,9 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 glam.workspace = true
-libm.workspace = true
 pollster.workspace = true
-treeline-coordinates.workspace = true
+treeline-climate.workspace = true
 treeline-ecology.workspace = true
-treeline-geography.workspace = true
-treeline-hydrology.workspace = true
 treeline-mesher.workspace = true
 treeline-renderer.workspace = true
 treeline-terrain.workspace = true

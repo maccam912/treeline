@@ -1,6 +1,6 @@
 [package]
 name = "treeline-ecology"
-description = "Environmental suitability, vegetation, species, and forest structure"
+description = "Forest structure and deterministic tree individuals"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,6 @@ authors.workspace = true
 [dependencies]
 libm.workspace = true
 treeline-coordinates.workspace = true
-treeline-geography.workspace = true
-treeline-terrain.workspace = true
 
 [lints]
 workspace = true

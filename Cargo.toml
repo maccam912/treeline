@@ -1,5 +1,19 @@
 [workspace]
-members = ["apps/*", "crates/*"]
+members = [
+    "apps/client",
+    "apps/generator-lab",
+    "apps/server",
+    "crates/climate",
+    "crates/coordinates",
+    "crates/ecology",
+    "crates/mesher",
+    "crates/platform",
+    "crates/protocol",
+    "crates/renderer",
+    "crates/terrain",
+    "crates/voxel",
+    "crates/world",
+]
 resolver = "3"
 
 [workspace.package]
@@ -23,16 +37,13 @@ mcubes = "0.1.7"
 pollster = "0.4.0"
 serde_json = "1.0"
 transvoxel = "2.0.0"
-treeline-caves = { path = "crates/caves" }
+treeline-climate = { path = "crates/climate" }
 treeline-coordinates = { path = "crates/coordinates" }
 treeline-ecology = { path = "crates/ecology" }
-treeline-geography = { path = "crates/geography" }
-treeline-hydrology = { path = "crates/hydrology" }
 treeline-mesher = { path = "crates/mesher" }
 treeline-platform = { path = "crates/platform" }
 treeline-protocol = { path = "crates/protocol" }
 treeline-renderer = { path = "crates/renderer" }
-treeline-simulation = { path = "crates/simulation" }
 treeline-terrain = { path = "crates/terrain" }
 treeline-voxel = { path = "crates/voxel" }
 treeline-world = { path = "crates/world" }

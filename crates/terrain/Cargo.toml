@@ -1,6 +1,6 @@
 [package]
 name = "treeline-terrain"
-description = "Functional signed-density and terrain material sampling"
+description = "Surveyed terrain sampling and the signed-density surface contract"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,6 @@ authors.workspace = true
 [dependencies]
 libm.workspace = true
 treeline-coordinates.workspace = true
-treeline-geography.workspace = true
 
 [lints]
 workspace = true

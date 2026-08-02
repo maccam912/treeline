@@ -1,10 +1,14 @@
 # Surveyed-world data contract
 
-Treeline's player-facing default is terrain reconstructed from measured Earth
-data. The first checked-in bundle is a 10 km square in Michigan's Upper
-Peninsula. Procedural terrain remains available for generator research, tests,
-subsurface features, and an eventual explicit gap-filling policy; it is not the
-default surface presented to players.
+Treeline's world is terrain reconstructed from measured Earth data. The only
+bundle is a 10 km square in Michigan's Upper Peninsula.
+
+There is no procedural surface to fall back on. Treeline once synthesized its
+terrain, hydrology, and forest cover; that machinery has been removed. A layer
+this contract does not admit is simply absent from the world, and growing the
+world means admitting more measured data — not resuming synthesis. The one place
+a reviewed procedural contract clearly belongs is genuinely unobserved
+structure, such as caves.
 
 This document is the source of truth for turning real-world observations into
 a Treeline terrain bundle. `tools/surveyed_tile/prepare.py` is the current
@@ -103,15 +107,16 @@ Each canopy cell stores:
 - canopy-top height: the maximum terrain-normalized return, quantized to half
   meters.
 
-Cover controls local procedural-tree counts; measured height bounds individual
-tree stature. Species, branching, age, damage, and stable placement identity
-remain procedural because these inputs do not identify individual trees or
-species. Cells without measured canopy remain open.
+Cover scales local stem counts and measured height bounds individual tree
+stature: no tree may exceed the canopy top measured over it. Species, branching,
+age, damage, and stable placement identity stay procedural, because these
+measurements identify neither individual trees nor species. Cells without
+measured canopy are open ground, not sparse forest.
 
 ### 5. Create surface color
 
-Natural-color aerial imagery is optional for geometry but part of the default
-bundle's appearance. Reproject it to the same bounds, average it to eight-meter
+Natural-color aerial imagery is optional for geometry but part of the bundle's
+appearance. Reproject it to the same bounds, average it to eight-meter
 cells, and encode RGB565. Do not use imagery pixels to change terrain height,
 lake level, or canopy height.
 
@@ -135,16 +140,16 @@ python3 tools/surveyed_tile/prepare.py \
 
 Review the generated metadata and run the full Rust gate. Tests verify artifact
 dimensions, spacing, orientation, elevation range, mapped lake identity and
-level, canopy variation, default-world selection, and deterministic tree
-placement under measured stand adjustments.
+level, footprint dilation, canopy variation, world selection, and that generated
+trees stay inside the canopy measured over them.
 
 ## Identity and evolution
 
-The surveyed bundle is selected by `DEFAULT_SURVEYED_SETTINGS_HASH`, while the
-generator version continues to version procedural representations derived from
-the measurements. Any incompatible change to an embedded artifact, coordinate
-frame, sampler, or layer meaning requires a new settings identity. Never replace
-bundle bytes while retaining an identity used by saved worlds.
+Two version numbers keep worlds honest. `SURVEYED_SETTINGS_HASH` selects the
+bundle: any incompatible change to an embedded artifact, coordinate frame,
+sampler, or layer meaning requires a new value. The generator version covers
+everything derived from those measurements — tree individuals, meshes, snow.
+Never replace bundle bytes while retaining an identity a saved world could use.
 
 The current out-of-bounds DEM behavior clamps to the nearest edge only so mesh
 residency can complete at the finite tile boundary. Travel and random warps

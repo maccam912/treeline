@@ -13,8 +13,8 @@ mod worker {
     use treeline_mesher::{Mesh, MeshingError};
     use treeline_voxel::{ChunkIndex, LodLevel, TransitionFaces};
     use treeline_world::{
-        FarTerrainMeshSpec, FarTileIndex, GeneratedWorldTerrain, GenerationPriority,
-        TerrainMeshSpec, generate_world_terrain_mesh,
+        FarTerrainMeshSpec, FarTileIndex, GenerationPriority, TerrainMeshSpec, WorldTerrain,
+        generate_world_terrain_mesh,
     };
     use wasm_bindgen::{JsCast, JsValue, closure::Closure};
     use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
@@ -41,7 +41,7 @@ mod worker {
 
     fn generate_request(
         request: &Array,
-        terrain: &mut Option<GeneratedWorldTerrain>,
+        terrain: &mut Option<WorldTerrain>,
     ) -> treeline_world::GeneratedTerrainMesh {
         let world = WorldIdentity::new(
             parse_u64(&request.get(0)),
@@ -66,7 +66,7 @@ mod worker {
             .as_ref()
             .is_none_or(|terrain| terrain.world() != world)
         {
-            *terrain = Some(GeneratedWorldTerrain::new(world));
+            *terrain = Some(WorldTerrain::new(world));
         }
         generate_world_terrain_mesh(
             terrain.as_ref().expect("terrain should be initialized"),

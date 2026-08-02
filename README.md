@@ -1,229 +1,95 @@
 # Treeline
 
-Treeline is an early-stage multiplayer wilderness exploration game whose
-player-facing world begins with deterministic, surveyed real-world geography.
-The wilderness is the content: mountains, watersheds, forests, caves, weather,
-camps, and the stories players bring home.
+An early wilderness exploration game built on measured terrain.
 
-The complete product and technical direction lives in
-[`DESIGN.md`](DESIGN.md). Keep that document in the repository and consult it
-before changing architecture or priorities.
+The world is a real place: a 10 km square in Michigan's Upper Peninsula,
+reconstructed from public survey data at 1:1 horizontal and vertical scale. The
+ground you walk on is a lidar elevation model, the lakes are mapped
+hydrography, and the forest is sized by lidar canopy returns. Nothing in the
+landscape was placed by hand or synthesized from noise.
 
-## Current status
+The full direction lives in [`DESIGN.md`](DESIGN.md); the data contract lives in
+[`SURVEYED_WORLD.md`](SURVEYED_WORLD.md).
 
-This repository now includes a small playable terrain toy alongside the
-test-backed foundations described in the design. The prototype provides:
+## What works today
 
-- a default 10 km surveyed Michigan world at 1:1 horizontal and vertical scale,
-  reconstructed from USGS bare-earth elevation, mapped lakes, aerial color,
-  and lidar-derived canopy structure;
-- a versioned, reproducible surveyed-data contract for terrain, lakes, and tree
-  cover, with the current bundle embedded at build time;
-- stable world identity and coordinate hashing;
-- deterministic 512 km geographical-province artifacts with explicit shared
-  boundary conditions, parent-scale controls, and fixed generation halos;
-- deterministic macro elevation and elongated mountain systems;
-- condition-driven plains, rolling uplands, plateaus, scarps, rugged and
-  weathered mountains, glacial valleys, dune fields, and closed salt basins;
-- explainable terrain samples that identify base elevation and dominant uplift;
-- Marching Cubes terrain extraction;
-- a native `winit` + `wgpu` client with a coherent dawn/noon/dusk sky and sun
-  model, stabilized cascaded terrain and vegetation shadows, climate-tinted
-  aerial perspective, and dedicated reflective water lighting;
-- mouse-look, walking, sprinting, and terrain-following movement;
-- deterministic 32 m terrain chunks streamed around the moving player;
-- distance-selected 2 m, 4 m, and 8 m terrain LODs with Transvoxel seams;
-- vertically aligned near-terrain slabs that follow high mountain surfaces;
-- coarse surface-only terrain extending the visible landscape beyond 20 km;
-- prioritized asynchronous terrain meshing outside the window thread, using
-  native threads or independent message-passing Wasm Web Workers;
-- direction-aware terrain prewarming and a bounded exact-mesh cache that reuse
-  completed terrain and lake meshes across chunk crossings;
-- phase-aware initial-generation progress and timing reports;
-- frame-budgeted terrain uploads, worker-built lake meshes, and shader-based
-  near/far cutouts that avoid rebuilding 2 km far tiles at each chunk boundary;
-- continuous deterministic regional fields;
-- deterministic 128 km watershed artifacts with depression filling, basin spill
-  levels, cross-region drainage exits, and flow accumulation;
-- deterministic rainfall-fed regional river networks with discharge and
-  catchment area;
-- cached river-driven valley and channel incision shared by near and distant
-  terrain representations;
-- versioned multi-scale erosion: regional mountain weathering and sediment
-  plains, drainage-graph gullies, and slope/geology-driven rock, scree, soil,
-  and micro-relief;
-- explainable climate with latitude-like temperature structure,
-  ocean-proximity and continentality effects, prevailing winds, elevation
-  cooling, windward precipitation, lee-side rain shadows, explicit seasons,
-  deterministic snowpack and meltwater-fed runoff;
-- deterministic climate-conditioned lakes derived from drainage basins, with
-  stable identities, topographic and active outlets, seasonal high/low water,
-  saline closed basins, dry playas, and near/far rendering;
-- deterministic soil profiles, continuous forest distributions, and globally
-  anchored procedural tree individuals with varied architecture, age, damage,
-  wind response, competition response, and life history;
-- near-client tree rendering generated from continuous trunk, branch, crown,
-  bark, and foliage grammars rather than a fixed tree-model library;
-- deterministic surface rocks, ground vegetation, wetlands, reefs, and
-  seasonal snow surface treatment;
-- overlapping, cause-driven closed forest, open woodland, prairie, grassland,
-  steppe, shrubland, desert, tundra, exposed alpine, wetland, and salt-playa
-  potentials without mutually exclusive biome IDs;
-- geology-, climate-, and drainage-driven karst, lava-tube, fault, sea, talus,
-  glacial, and erosional cave systems with connected passages, chambers,
-  entrances, sinkholes, shafts, sumps, and underground rivers;
-- cave subtraction and deep-layer near-terrain meshing, cave-aware traversal,
-  rendered subterranean water, and surface openings kept clear of unsupported
-  vegetation;
-- deterministic active-region water storage and routing with terrain-change
-  response, lake filling and spill, flooding, surface-to-cave connections,
-  generated cascades, waterfalls, plunge pools and gorges, and compact frozen
-  summaries reconstructed as the player moves;
-- an interactive Generator Lab with pan, zoom, seed regeneration, teleport,
-  terrain/watershed/flow/river/lake/erosion/province/temperature/precipitation/snowpack
-  /soil/forest/ground-vegetation/rock/wetland/reef/cave/living-water views,
-  selectable seasons, controlled water-response scenarios, and explainable
-  ecosystem and cave inspection;
-- hydrology and generated cave topology/determinism invariants;
-- voxel LOD alignment;
-- world-region lifecycle, protocol, simulation, and render tiers.
+- **The measured world.** Bare-earth elevation, mapped lakes, lidar canopy, and
+  aerial imagery, decoded from an embedded versioned bundle.
+- **Walking it.** Smooth voxel terrain with terrain-following movement, streamed
+  around the player at three levels of detail with a coarse surface tier out to
+  the horizon.
+- **A real forest.** Individual trees, placed and sized by measured stand
+  structure, with procedural species and architecture. Visible to the horizon
+  without ever becoming a canopy texture.
+- **Rendering.** Scanned PBR materials, cascaded sun shadows, three daylight
+  states, seasonal snow, animated water, and climate-tinted haze.
+- **In a browser.** The same world, with terrain generation on Web Workers.
 
-The terrain toy now has an unbounded movement path through deterministic
-near-to-mid terrain chunks backed by a cheaper mountain-scale vista
-representation. Macro terrain was introduced with generator version 2, and
-river-shaped terrain with version 3; older world identities retain their
-previous terrain contracts. Filled drainage basins become rendered lakes with
-generator version 4. Multi-scale erosion is enabled by generator version 5.
-Orographic climate begins with generator version 6. Latitude-like climate,
-continentality, seasons, snowpack, and meltwater runoff begin with generator
-version 7. Soil profiles begin with generator version 8, forest distribution
-with version 9, and procedural tree individuals with version 10. Generator
-version 11 standardizes non-basic floating-point operations on pure-Rust
-`libm`; version 10 and older worlds require their original executable to retain
-their previous platform-math behavior. Surface rocks begin with version 12,
-ground vegetation with version 13, wetlands with version 14, reefs with version
-15, cave subtraction with version 16, and fast-water terrain morphology with
-version 17. Expedition survival and live networking have not been added yet.
-Generator version 18 is an intentional pristine-world reset: top-down
-geographical provinces now coordinate geology, landforms, climate controls,
-soil, hydrology, and broad overlapping ecosystem regimes. Version 17 and older
-world identities retain their previous generation paths. Generator version 19
-promotes the first ETOPO-calibrated multiscale terrain parameters and is the
-calibrated landform base; version 18 remains reproducible for direct comparison.
+Camping, survival, weather, navigation, wildlife, and multiplayer are not built
+yet — see the roadmap in `DESIGN.md`.
 
-Generator version 20 aligns river and gully centerlines with the calibrated
-non-fluvial surface instead of the older macro-only elevation. Shared nodes are
-fit over each drainage graph before exact downhill ordering is enforced. This
-removes widespread false canyon walls at 1–8 km scales while preserving channel
-connectivity. It remains the current procedural-generator contract; version 19
-retains its original channel contract. The player-facing client selects the
-versioned surveyed bundle by default. Procedural generation remains available
-to Generator Lab, world-quality tools, tests, and future explicit gap filling.
+## Running it
 
-## Getting started
+```bash
+cargo run -p client --release
+```
 
-Install Rust 1.97.1 or newer, then run:
+| Key | Action |
+| --- | --- |
+| `W` `A` `S` `D` | Walk |
+| `Shift` | Sprint |
+| Mouse | Look (click to capture, `Escape` to release) |
+| `F` | Toggle the aerial survey view |
+| `T` | Cycle dawn, noon, and dusk |
+| `R` | Warp to a random spot in the tile |
+| `B` | Warp to a lake shore |
 
-```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+Touch devices get on-screen sticks: the left half of the screen moves, the right
+half looks.
+
+## Inspecting the world
+
+The Generator Lab draws any one layer as a top-down map and reports every layer
+at a clicked position. When something looks wrong in the game, this is how you
+find out which layer disagrees.
+
+```bash
+cargo run -p generator-lab --release
+```
+
+Number keys select the layer, `WASD` pans, `+`/`-` zooms, `C` cycles the season,
+left click inspects, and right click recenters.
+
+## Preparing a surveyed tile
+
+`tools/surveyed_tile/prepare.py` turns source rasters into the four embedded
+layers. `SURVEYED_WORLD.md` documents the contract those layers satisfy, the
+exact command that produced the current bundle, and the rules for admitting a
+new one.
+
+Bundle artifacts and scanned textures are stored with Git LFS, so clone with
+LFS enabled.
+
+## Developing
+
+```bash
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-Run the world-generation viewer with:
+Browser-only code is behind `cfg(target_arch = "wasm32")` and needs its own
+pass:
 
-```sh
-cargo run -p generator-lab
+```bash
+cargo clippy -p client --target wasm32-unknown-unknown --all-targets -- -D warnings
 ```
 
-In Generator Lab, use WASD or the arrow keys to pan, `+`/`-` or the mouse wheel
-to zoom, `R` to advance the seed, and `1` through `9` to view terrain,
-watersheds, flow accumulation, rivers, lakes, erosion, seasonal temperature,
-seasonal precipitation, or snowpack. Press `0` for soil and `F` for forest
-distribution. Press `P` for the province/causal-landform layer and `C` to
-advance the displayed season. Left-click to inspect a location, and right-click
-to teleport the view. Additional ecosystem layers use `V` for ground
-vegetation, `G` for rocks, `M` for wetlands, `Q` for reefs, and `K` for caves.
-
-Run the deterministic world-quality survey with:
-
-```sh
-cargo run -p world-viewer -- audit
-```
-
-The survey samples terrain morphology, province causes, overlapping ecosystem
-potentials, drainage, climate, forest identity, soil, wetlands, reefs, and caves
-across far-apart regions. It writes descriptor data, a 17-view deterministic
-contact sheet with explicit fallback frames, novelty and plausibility findings,
-required-outcome coverage, and a stable regression fingerprint to
-`artifacts/world-quality`. Existing baselines are retained when results change;
-after reviewing the report and contact sheet, pass `--accept` to adopt an
-intentional visual change. Use `--help` to see seed, region-count, and
-output-path controls; pass `--require-coverage` when the audit should fail on
-any missing required outcome or qualified viewpoint family.
-
-For real-terrain calibration, `world-viewer heightmap-batch` exports deterministic
-physical height rasters using explicit offline landform parameters. The Python
-pipeline in `tools/terrain_calibration` prepares ETOPO/NASADEM references,
-measures multi-scale morphology, runs sensitivity and bounded CMA-style search,
-and produces labeled or blind fixed-scale heightmap galleries. See
-`tools/terrain_calibration/README.md`; reference data and generated calibration
-runs are intentionally excluded from Git.
-
-Run the playable terrain toy with:
-
-```sh
-cargo run -p client
-```
-
-The client opens the default surveyed world and spawns at `46.16084629042455,
--88.3374704874157`. The checked-in artifact covers one 10 km USGS 3DEP tile,
-uses two-meter horizontal samples and decimeter elevations, and preserves both
-horizontal and vertical meters at 1:1 scale. It is decoded in full at startup;
-an eight-meter USGS NAIP layer supplies terrain color, and mapped NHD lake
-polygons supply static water sheets at DEM-derived elevations. Press `B` to
-warp to nearby Upper Holmes Lake. A six-meter canopy artifact derived from the
-matching USGS point cloud supplies spatially varying canopy occupancy and
-terrain-normalized top height. Those measurements control local procedural-tree
-counts and scale while the ecology system retains species, architecture, age,
-and damage variation. Terrain-data streaming, river integration, and
-bathymetry remain outside the current data contract. The tile's local X axis
-points east and its Z axis points south so geographic
-orientation agrees with the right-handed camera. One world unit is one meter;
-the eye is 1.72 m high, walking is 1.4 m/s, and sprinting is 4.5 m/s.
-See [`SURVEYED_WORLD.md`](SURVEYED_WORLD.md) for the authoritative preparation,
-alignment, provenance, versioning, and future delivery contract.
-
-Use the mouse to look, `WASD` or the arrow keys to walk, and either Shift key
-to sprint. Press Escape to release the cursor; click the window to capture it
-again. Press `F` to toggle aerial mode, which follows the ground from 1 km up
-and moves ten times faster. Press `T` to cycle the coherent dawn, noon, and dusk
-lighting states. Press `R` to warp to random dry ground within the surveyed tile
-or `B` to warp near Upper Holmes Lake. Surveyed caves are not yet part of the
-data contract, so `C` reports that no cave is available. Browsers expose aerial
-mode and both non-cave warps as buttons.
-
-Build the browser version with [Trunk](https://trunk-rs.dev/):
-
-```sh
-rustup target add wasm32-unknown-unknown
-trunk build apps/client/index.html --release
-```
-
-Pushes to `main` build this browser version and deploy it through GitHub Pages.
-
-## Repository map
-
-- `crates/` contains narrowly scoped game libraries.
-- `apps/` contains executable composition roots.
-- `SURVEYED_WORLD.md` defines how real terrain, lakes, and tree cover become a
-  versioned Treeline world.
-- `.github/workflows/ci.yml` runs formatting, lint, test, and documentation
-  checks.
-- `.github/workflows/pages.yml` builds and deploys the browser client.
-- `AGENTS.md` is the contributor and coding-agent guide.
-- `DESIGN.md` is the durable product and architecture north star.
+[`AGENTS.md`](AGENTS.md) covers the crate layout, invariants, and conventions.
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
+Apache-2.0. Terrain sources are public domain (USGS 3DEP, NHD, NAIP); scanned
+surface and bark materials are CC0 from Poly Haven, credited in the `README.md`
+beside each asset directory.

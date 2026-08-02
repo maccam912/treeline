@@ -100,8 +100,8 @@ jobs:
         run: >-
           cargo test
           -p treeline-coordinates
-          -p treeline-geography
           -p treeline-terrain
-          -p treeline-hydrology
+          -p treeline-climate
           -p treeline-ecology
+          -p treeline-mesher
           --lib
