@@ -16,7 +16,6 @@
 mod gpu;
 mod lighting;
 mod material;
-#[allow(dead_code)]
 mod needle_texture;
 mod renderer;
 mod snow;

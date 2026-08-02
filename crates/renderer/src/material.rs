@@ -5,10 +5,13 @@
 //! of a compute pass purely for downsampling.
 
 use image::ImageFormat;
+use image::RgbaImage;
 use image::imageops::{FilterType, resize};
 
+use crate::needle_texture::generate_needle_maps;
+
 pub(crate) const MATERIAL_TEXTURE_EDGE: u32 = 512;
-pub(crate) const MATERIAL_TEXTURE_LAYER_COUNT: u32 = 4;
+pub(crate) const MATERIAL_TEXTURE_LAYER_COUNT: u32 = 5;
 pub(crate) const MATERIAL_TEXTURE_MIP_COUNT: u32 = 10;
 
 pub(crate) const FOREST_FLOOR_DIFFUSE: &[u8] =
@@ -73,6 +76,17 @@ pub(crate) struct MaterialTextures {
 
 impl MaterialTextures {
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let needle = generate_needle_maps();
+        let diffuse_layers = material_layers(
+            EMBEDDED_MATERIALS.map(|material| material.diffuse),
+            needle.diffuse,
+        );
+        let normal_layers = material_layers(
+            EMBEDDED_MATERIALS.map(|material| material.normal),
+            needle.normal,
+        );
+        let arm_layers =
+            material_layers(EMBEDDED_MATERIALS.map(|material| material.arm), needle.arm);
         let diffuse_texture = create_material_texture(
             device,
             "Poly Haven material diffuse array",
@@ -88,21 +102,9 @@ impl MaterialTextures {
             "Poly Haven material AO roughness metalness array",
             wgpu::TextureFormat::Rgba8Unorm,
         );
-        upload_material_layers(
-            queue,
-            &diffuse_texture,
-            EMBEDDED_MATERIALS.map(|material| material.diffuse),
-        );
-        upload_material_layers(
-            queue,
-            &normal_texture,
-            EMBEDDED_MATERIALS.map(|material| material.normal),
-        );
-        upload_material_layers(
-            queue,
-            &arm_texture,
-            EMBEDDED_MATERIALS.map(|material| material.arm),
-        );
+        upload_material_layers(queue, &diffuse_texture, &diffuse_layers);
+        upload_material_layers(queue, &normal_texture, &normal_layers);
+        upload_material_layers(queue, &arm_texture, &arm_layers);
         let array_view = |texture: &wgpu::Texture, label| {
             texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some(label),
@@ -136,6 +138,25 @@ impl MaterialTextures {
     }
 }
 
+/// Decodes the four embedded scans and appends the generated needle layer.
+fn material_layers(embedded: [&[u8]; 4], generated: RgbaImage) -> Vec<RgbaImage> {
+    let mut layers = embedded
+        .map(|encoded| {
+            let decoded = image::load_from_memory_with_format(encoded, ImageFormat::Jpeg)
+                .expect("embedded Poly Haven material JPEG must decode")
+                .to_rgba8();
+            assert_eq!(
+                decoded.dimensions(),
+                (1_024, 1_024),
+                "embedded Poly Haven material maps must retain their source dimensions"
+            );
+            decoded
+        })
+        .to_vec();
+    layers.push(generated);
+    layers
+}
+
 pub(crate) fn create_material_texture(
     device: &wgpu::Device,
     label: &str,
@@ -160,19 +181,11 @@ pub(crate) fn create_material_texture(
 pub(crate) fn upload_material_layers(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
-    encoded_layers: [&[u8]; 4],
+    layers: &[RgbaImage],
 ) {
-    for (layer, encoded) in encoded_layers.into_iter().enumerate() {
-        let decoded = image::load_from_memory_with_format(encoded, ImageFormat::Jpeg)
-            .expect("embedded Poly Haven material JPEG must decode")
-            .to_rgba8();
-        assert_eq!(
-            decoded.dimensions(),
-            (1_024, 1_024),
-            "embedded Poly Haven material maps must retain their source dimensions"
-        );
+    for (layer, decoded) in layers.iter().enumerate() {
         let mut mip = resize(
-            &decoded,
+            decoded,
             MATERIAL_TEXTURE_EDGE,
             MATERIAL_TEXTURE_EDGE,
             FilterType::Triangle,
@@ -236,7 +249,7 @@ mod tests {
     fn the_array_texture_has_one_layer_per_material() {
         assert_eq!(
             usize::try_from(MATERIAL_TEXTURE_LAYER_COUNT).expect("layer count fits usize"),
-            EMBEDDED_MATERIALS.len()
+            EMBEDDED_MATERIALS.len() + 1
         );
     }
 }
