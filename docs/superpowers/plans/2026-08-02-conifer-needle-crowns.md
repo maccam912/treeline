@@ -695,8 +695,11 @@ Add these tests to `mod tests` in `crates/renderer/src/tree_mesh/mod.rs` (after 
     fn sapling() -> ProceduralTree {
         (0..10_000_u64)
             .map(tree)
-            .find(|tree| tree.condition == TreeCondition::Sapling)
-            .expect("a sapling in the population")
+            .find(|tree| {
+                tree.condition == TreeCondition::Sapling
+                    && tree.genotype.crown_shape == CrownShape::Conical
+            })
+            .expect("a conifer sapling in the population")
     }
 
     /// Every tier places its puffs inside the same cone envelope, so distant
@@ -713,6 +716,7 @@ Add these tests to `mod tests` in `crates/renderer/src/tree_mesh/mod.rs` (after 
         let axis = apex - crown_base;
         let axis_length = axis.length();
         let axis_dir = axis / axis_length;
+        let t_margin = margin / axis_length;
         for detail in [
             TreeMeshDetail::Full,
             TreeMeshDetail::Simplified,
@@ -741,7 +745,10 @@ Add these tests to `mod tests` in `crates/renderer/src/tree_mesh/mod.rs` (after 
                 let relative = position - crown_base;
                 let along = relative.dot(axis_dir);
                 let t = along / axis_length;
-                assert!(t > -0.01 && t < 1.01, "{detail:?} puff at t={t}");
+                assert!(
+                    t > -0.01 - t_margin && t < 1.01 + t_margin,
+                    "{detail:?} puff at t={t}"
+                );
                 let lateral = relative - (axis_dir * along);
                 let distance = lateral.length();
                 let envelope = crown_radius * (1.0 - t).max(0.0);
@@ -863,6 +870,7 @@ use color::{
 /// combined branch and leaf density; quad size stays constant so coarser tiers
 /// never poke past the fuller one.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_needle_crown(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
@@ -981,6 +989,7 @@ pub(crate) fn append_tree_crown(
 Replace the Conical arm of `append_terminal_crown` (currently lines 241–249) with a call to `append_needle_crown`, and add the `detail` parameter to its signature (line 232–240):
 
 ```rust
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_terminal_crown(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
