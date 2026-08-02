@@ -15,6 +15,7 @@ pub(crate) const SURFACE_KIND_SOLID: f32 = 0.0;
 pub(crate) const SURFACE_KIND_WATER: f32 = 1.0;
 pub(crate) const SURFACE_KIND_PINE_BARK: f32 = 2.0;
 pub(crate) const SURFACE_KIND_OAK_BARK: f32 = 3.0;
+pub(crate) const SURFACE_KIND_NEEDLE_FOLIAGE: f32 = 4.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -226,5 +227,20 @@ mod tests {
 
         assert!((reconstructed[0] - 1_000_001.0).abs() < 1.0e-6);
         assert!((reconstructed[2] + 999_997.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn every_surface_kind_occupies_a_distinct_band() {
+        let mut kinds = vec![
+            SURFACE_KIND_SOLID,
+            SURFACE_KIND_WATER,
+            SURFACE_KIND_PINE_BARK,
+            SURFACE_KIND_OAK_BARK,
+            SURFACE_KIND_NEEDLE_FOLIAGE,
+        ];
+        kinds.sort_by(f32::total_cmp);
+        kinds.dedup();
+        assert_eq!(kinds.len(), 5);
+        assert!(SURFACE_KIND_NEEDLE_FOLIAGE > SURFACE_KIND_OAK_BARK);
     }
 }
