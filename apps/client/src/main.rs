@@ -68,7 +68,7 @@ const WINDOW_TITLE: &str = "Treeline — Surveyed Wilderness";
 const EYE_HEIGHT: f64 = 1.72;
 const WALK_SPEED: f64 = 1.4;
 const SPRINT_SPEED: f64 = 4.5;
-const AERIAL_HEIGHT_METERS: f64 = 1_000.0;
+const AERIAL_HEIGHT_METERS: f64 = 200.0;
 const AERIAL_SPEED_MULTIPLIER: f64 = 10.0;
 // 46.16084629042455, -88.3374704874157 in the tile's right-handed local frame.
 #[cfg(not(test))]
@@ -746,6 +746,7 @@ impl Game {
             eprintln!("active water simulation failed: {error}");
         }
         self.update_atmosphere();
+        self.renderer.advance_water_time(&self.queue, delta_seconds);
         if let Err(error) = update_terrain(
             &self.device,
             &self.renderer,
@@ -2655,7 +2656,7 @@ mod tests {
     }
 
     #[test]
-    fn aerial_toggle_uses_one_kilometer_ground_clearance() {
+    fn aerial_toggle_uses_two_hundred_meter_ground_clearance() {
         let terrain = SlopedGround;
         let x = 24.0;
         let z = -12.0;
@@ -2666,7 +2667,7 @@ mod tests {
 
         assert!(camera.toggle_aerial_mode(&terrain));
         assert_eq!(camera.mode, CameraMode::Aerial);
-        assert_eq!(camera.position, DVec3::new(x, surface + 1_000.0, z));
+        assert_eq!(camera.position, DVec3::new(x, surface + 200.0, z));
         assert!((camera.yaw - yaw).abs() < f64::EPSILON);
         assert!((camera.pitch - pitch).abs() < f64::EPSILON);
 

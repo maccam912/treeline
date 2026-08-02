@@ -3,3 +3,4 @@
 *.tlrgb filter=lfs diff=lfs merge=lfs -text
 *.tlwater filter=lfs diff=lfs merge=lfs -text
 crates/renderer/assets/bark/*.jpg filter=lfs diff=lfs merge=lfs -text
+crates/renderer/assets/surfaces/*.jpg filter=lfs diff=lfs merge=lfs -text

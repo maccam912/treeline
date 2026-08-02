@@ -2647,6 +2647,10 @@ product work begins at **Surveyed player-world default**.
       exposure, forest and ground cover, wetlands, reefs, cave family, and
       seasonal snow. Inputs are sampled in world space and travel with the
       shared near/far mesh path so material geography stays aligned across LODs.
+      The shared native/WebGPU shader now preserves those broad measured and
+      derived colors while applying mipmapped CC0 forest-floor albedo, normal,
+      AO, and roughness on horizontal terrain and triplanar CC0 rock-face maps
+      on surfaces steeper than 45 degrees. Snow suppresses both detail sets.
 - [ ] **PARTIAL** — World lighting and atmosphere. A coherent dawn/noon/dusk
       sky and sun model now drives the sky, terrain illumination, water
       reflections and glints, cool sky fill, and ground bounce. Three
@@ -2675,9 +2679,10 @@ product work begins at **Surveyed player-world default**.
 - [ ] **PARTIAL** — Dedicated water presentation. Oceans and lakes now carry
       distinct hydrology colors, reef-bearing shallows and wetland water alter
       those colors, and a dedicated water shading path adds world-anchored
-      long/short waves, Fresnel sky reflection, and sun glints. Cave water uses
-      its own generated color. River surface ribbons, shoreline transitions,
-      depth/underwater treatment, and water-specific blending remain.
+      animated multi-scale wind waves, normal-driven Fresnel sky reflection,
+      and sun glints. Cave water uses its own generated color. River surface
+      ribbons, shoreline transitions, depth/underwater treatment, and
+      water-specific blending remain.
 - [ ] **PARTIAL** — Geography-driven visible weather. Regional precipitation,
       ocean proximity, soil moisture, temperature, and prevailing wind now
       control fog color/density and water-wave orientation in 8 km

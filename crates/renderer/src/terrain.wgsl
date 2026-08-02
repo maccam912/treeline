@@ -46,16 +46,16 @@ var shadow_map: texture_depth_2d_array;
 var shadow_sampler: sampler_comparison;
 
 @group(0) @binding(6)
-var bark_diffuse: texture_2d_array<f32>;
+var material_diffuse: texture_2d_array<f32>;
 
 @group(0) @binding(7)
-var bark_normal: texture_2d_array<f32>;
+var material_normal: texture_2d_array<f32>;
 
 @group(0) @binding(8)
-var bark_arm: texture_2d_array<f32>;
+var material_arm: texture_2d_array<f32>;
 
 @group(0) @binding(9)
-var bark_sampler: sampler;
+var material_sampler: sampler;
 
 struct VertexInput {
     @location(0) position_high: vec3<f32>,
@@ -139,6 +139,17 @@ fn cotangent_frame(
         bitangent * inverse_scale,
         geometric_normal,
     );
+}
+
+fn wave_gradient(
+    position: vec2<f32>,
+    direction: vec2<f32>,
+    frequency: f32,
+    amplitude: f32,
+    phase: f32,
+) -> vec2<f32> {
+    return direction
+        * (cos(dot(position, direction) * frequency + phase) * amplitude * frequency);
 }
 
 fn sky_radiance(direction: vec3<f32>) -> vec3<f32> {
@@ -237,12 +248,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var normal = normalize(input.world_normal);
+    let geometric_normal = normal;
+    let position_dx = dpdx(input.render_position);
+    let position_dy = dpdy(input.render_position);
     let material_uv_dx = dpdx(input.material_uv);
     let material_uv_dy = dpdy(input.material_uv);
     let bark_frame = cotangent_frame(
         normal,
-        dpdx(input.render_position),
-        dpdy(input.render_position),
+        position_dx,
+        position_dy,
         material_uv_dx,
         material_uv_dy,
     );
@@ -274,31 +288,185 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     );
     let base = ground_base * (1.0 + broad_detail + fine_detail);
     var visualized = mix(base, input.color.rgb, input.color.a);
+    var surface_ambient_occlusion = 1.0;
+    var surface_roughness = 1.0;
+
+    // Terrain materials stay fixed in world space. Horizontal surfaces use
+    // forest litter, while steeper-than-45-degree faces blend to rock through
+    // two side projections so cliffs do not stretch or expose UV seams.
+    let is_solid = input.surface_kind < 0.5;
+    if (is_solid) {
+        let forest_uv = input.world_position.xz / 2.1;
+        let rock_x_uv = vec2<f32>(input.world_position.z, -input.world_position.y) / 2.4;
+        let rock_z_uv = vec2<f32>(input.world_position.x, -input.world_position.y) / 2.4;
+        let forest_uv_dx = dpdx(forest_uv);
+        let forest_uv_dy = dpdy(forest_uv);
+        let rock_x_uv_dx = dpdx(rock_x_uv);
+        let rock_x_uv_dy = dpdy(rock_x_uv);
+        let rock_z_uv_dx = dpdx(rock_z_uv);
+        let rock_z_uv_dy = dpdy(rock_z_uv);
+
+        let forest_diffuse = textureSampleGrad(
+            material_diffuse,
+            material_sampler,
+            forest_uv,
+            0,
+            forest_uv_dx,
+            forest_uv_dy,
+        );
+        let forest_normal_map = textureSampleGrad(
+            material_normal,
+            material_sampler,
+            forest_uv,
+            0,
+            forest_uv_dx,
+            forest_uv_dy,
+        );
+        let forest_arm = textureSampleGrad(
+            material_arm,
+            material_sampler,
+            forest_uv,
+            0,
+            forest_uv_dx,
+            forest_uv_dy,
+        );
+        let rock_x_diffuse = textureSampleGrad(
+            material_diffuse,
+            material_sampler,
+            rock_x_uv,
+            1,
+            rock_x_uv_dx,
+            rock_x_uv_dy,
+        );
+        let rock_z_diffuse = textureSampleGrad(
+            material_diffuse,
+            material_sampler,
+            rock_z_uv,
+            1,
+            rock_z_uv_dx,
+            rock_z_uv_dy,
+        );
+        let rock_x_normal_map = textureSampleGrad(
+            material_normal,
+            material_sampler,
+            rock_x_uv,
+            1,
+            rock_x_uv_dx,
+            rock_x_uv_dy,
+        );
+        let rock_z_normal_map = textureSampleGrad(
+            material_normal,
+            material_sampler,
+            rock_z_uv,
+            1,
+            rock_z_uv_dx,
+            rock_z_uv_dy,
+        );
+        let rock_x_arm = textureSampleGrad(
+            material_arm,
+            material_sampler,
+            rock_x_uv,
+            1,
+            rock_x_uv_dx,
+            rock_x_uv_dy,
+        );
+        let rock_z_arm = textureSampleGrad(
+            material_arm,
+            material_sampler,
+            rock_z_uv,
+            1,
+            rock_z_uv_dx,
+            rock_z_uv_dy,
+        );
+
+        var rock_axis_weights = pow(abs(geometric_normal.xz), vec2<f32>(8.0));
+        rock_axis_weights /= max(rock_axis_weights.x + rock_axis_weights.y, 0.0001);
+        let rock_diffuse = mix(rock_z_diffuse, rock_x_diffuse, rock_axis_weights.x);
+        let rock_arm = mix(rock_z_arm, rock_x_arm, rock_axis_weights.x);
+        let rock_amount = 1.0 - smoothstep(0.62, 0.78, abs(geometric_normal.y));
+        let sampled_diffuse = mix(forest_diffuse.rgb, rock_diffuse.rgb, rock_amount);
+        let sampled_arm = mix(forest_arm, rock_arm, rock_amount);
+
+        let forest_frame = cotangent_frame(
+            geometric_normal,
+            position_dx,
+            position_dy,
+            forest_uv_dx,
+            forest_uv_dy,
+        );
+        let rock_x_frame = cotangent_frame(
+            geometric_normal,
+            position_dx,
+            position_dy,
+            rock_x_uv_dx,
+            rock_x_uv_dy,
+        );
+        let rock_z_frame = cotangent_frame(
+            geometric_normal,
+            position_dx,
+            position_dy,
+            rock_z_uv_dx,
+            rock_z_uv_dy,
+        );
+        let forest_tangent_normal = forest_normal_map.xyz * 2.0 - 1.0;
+        let rock_x_tangent_normal = rock_x_normal_map.xyz * 2.0 - 1.0;
+        let rock_z_tangent_normal = rock_z_normal_map.xyz * 2.0 - 1.0;
+        let forest_surface_normal = normalize(
+            forest_frame * normalize(vec3<f32>(forest_tangent_normal.xy * 0.52, max(forest_tangent_normal.z, 0.1)))
+        );
+        let rock_x_surface_normal = normalize(
+            rock_x_frame * normalize(vec3<f32>(rock_x_tangent_normal.xy * 0.72, max(rock_x_tangent_normal.z, 0.1)))
+        );
+        let rock_z_surface_normal = normalize(
+            rock_z_frame * normalize(vec3<f32>(rock_z_tangent_normal.xy * 0.72, max(rock_z_tangent_normal.z, 0.1)))
+        );
+        let rock_surface_normal = normalize(
+            mix(rock_z_surface_normal, rock_x_surface_normal, rock_axis_weights.x)
+        );
+        let terrain_surface_normal = normalize(
+            mix(forest_surface_normal, rock_surface_normal, rock_amount)
+        );
+        normal = normalize(mix(terrain_surface_normal, geometric_normal, snow_amount));
+
+        // Preserve measured imagery and geography color at broad scales while
+        // allowing the scans to contribute real albedo variation up close.
+        let macro_color = mix(visualized, snow, snow_amount);
+        let forest_reference = vec3<f32>(0.22, 0.16, 0.085);
+        let rock_reference = vec3<f32>(0.36, 0.27, 0.22);
+        let reference_color = mix(forest_reference, rock_reference, rock_amount);
+        let material_detail = clamp(
+            sampled_diffuse / reference_color,
+            vec3<f32>(0.48),
+            vec3<f32>(1.58),
+        );
+        let texture_visibility = fine_visibility * (1.0 - snow_amount);
+        visualized = macro_color * mix(vec3<f32>(1.0), material_detail, texture_visibility);
+        surface_ambient_occlusion = mix(1.0, sampled_arm.r, texture_visibility * 0.72);
+        surface_roughness = sampled_arm.g;
+    }
 
     let is_bark = input.surface_kind > 1.5;
-    var bark_ambient_occlusion = 1.0;
-    var bark_roughness = 1.0;
     if (is_bark) {
-        let bark_layer = i32(clamp(input.surface_kind - 2.0, 0.0, 1.0));
+        let bark_layer = i32(clamp(input.surface_kind, 2.0, 3.0));
         let diffuse_sample = textureSampleGrad(
-            bark_diffuse,
-            bark_sampler,
+            material_diffuse,
+            material_sampler,
             input.material_uv,
             bark_layer,
             material_uv_dx,
             material_uv_dy,
         );
         let normal_sample = textureSampleGrad(
-            bark_normal,
-            bark_sampler,
+            material_normal,
+            material_sampler,
             input.material_uv,
             bark_layer,
             material_uv_dx,
             material_uv_dy,
         );
         let arm_sample = textureSampleGrad(
-            bark_arm,
-            bark_sampler,
+            material_arm,
+            material_sampler,
             input.material_uv,
             bark_layer,
             material_uv_dx,
@@ -313,8 +481,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 max(tangent_normal.z, 0.08),
             ))
         );
-        bark_ambient_occlusion = arm_sample.r;
-        bark_roughness = arm_sample.g;
+        surface_ambient_occlusion = arm_sample.r;
+        surface_roughness = arm_sample.g;
         let pine_reference = vec3<f32>(0.25, 0.18, 0.11);
         let oak_reference = vec3<f32>(0.27, 0.20, 0.14);
         let reference_color = mix(oak_reference, pine_reference, pine_amount);
@@ -325,7 +493,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         );
         visualized = diffuse_sample.rgb
             * individual_tint
-            * mix(0.62, 1.0, bark_ambient_occlusion);
+            * mix(0.62, 1.0, surface_ambient_occlusion);
     }
 
     // Dedicated hydrology sheets retain their generated ocean/lake/wetland
@@ -335,18 +503,32 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (is_water) {
         let wind = normalize(atmosphere.wind_moisture.xy + vec2<f32>(0.0001, 0.0001));
         let cross_wind = vec2<f32>(-wind.y, wind.x);
-        let wave_position = vec2<f32>(
-            dot(ground_position, wind),
-            dot(ground_position, cross_wind),
+        let time = atmosphere.wind_moisture.w;
+        let diagonal_wind = normalize((wind * 0.72) + (cross_wind * 0.69));
+        let moisture = clamp(atmosphere.wind_moisture.z, 0.0, 1.0);
+        let wave_scale = mix(0.72, 1.18, moisture);
+        var gradient = wave_gradient(ground_position, wind, 0.31, 0.23 * wave_scale, time * 0.82);
+        gradient += wave_gradient(
+            ground_position,
+            diagonal_wind,
+            0.73,
+            0.075 * wave_scale,
+            time * 1.27 + 1.8,
         );
-        let long_wave = (value_noise(wave_position * 0.018) - 0.5) * 0.055;
-        let short_wave = (value_noise(wave_position * 0.11) - 0.5) * 0.025;
-        normal = normalize(vec3<f32>(long_wave, 1.0, short_wave));
+        gradient += wave_gradient(
+            ground_position,
+            cross_wind,
+            2.35,
+            0.012 * wave_scale,
+            time * 2.15 + 4.1,
+        );
+        normal = normalize(vec3<f32>(-gradient.x, 1.0, -gradient.y));
         let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
-        let fresnel = 0.04 + (0.56 * pow(1.0 - facing, 5.0));
+        let fresnel = 0.025 + (0.72 * pow(1.0 - facing, 5.0));
         let reflection_direction = reflect(-view_direction, normal);
         let reflected_sky = sky_radiance(reflection_direction);
-        visualized = mix(input.color.rgb * 0.72, reflected_sky, fresnel);
+        let water_body_color = input.color.rgb * mix(0.58, 0.76, facing);
+        visualized = mix(water_body_color, reflected_sky, fresnel);
     }
 
     // The sky, direct light, reflections, and shadow maps share one sun model.
@@ -367,17 +549,31 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         * lighting.sun_direction_intensity.w;
     let ground_bounce = lighting.ground_ambient.rgb * ground_exposure;
     var lit = visualized * (
-        skylight * bark_ambient_occlusion
+        skylight * surface_ambient_occlusion
         + direct_light
-        + ground_bounce * bark_ambient_occlusion
+        + ground_bounce * surface_ambient_occlusion
     );
     if (is_bark) {
         let half_direction = normalize(sun_direction + view_direction);
-        let highlight_power = mix(72.0, 9.0, bark_roughness);
-        let highlight_strength = mix(0.065, 0.012, bark_roughness);
+        let highlight_power = mix(72.0, 9.0, surface_roughness);
+        let highlight_strength = mix(0.065, 0.012, surface_roughness);
         let bark_highlight = pow(max(dot(normal, half_direction), 0.0), highlight_power);
         lit += lighting.sun_color.rgb
             * bark_highlight
+            * highlight_strength
+            * shadow
+            * lighting.sun_direction_intensity.w;
+    }
+    if (is_solid) {
+        let half_direction = normalize(sun_direction + view_direction);
+        let highlight_power = mix(92.0, 5.0, surface_roughness);
+        let highlight_strength = mix(0.045, 0.003, surface_roughness);
+        let material_highlight = pow(
+            max(dot(normal, half_direction), 0.0),
+            highlight_power,
+        );
+        lit += lighting.sun_color.rgb
+            * material_highlight
             * highlight_strength
             * shadow
             * lighting.sun_direction_intensity.w;
