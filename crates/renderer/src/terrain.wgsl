@@ -45,6 +45,18 @@ var shadow_map: texture_depth_2d_array;
 @group(0) @binding(5)
 var shadow_sampler: sampler_comparison;
 
+@group(0) @binding(6)
+var bark_diffuse: texture_2d_array<f32>;
+
+@group(0) @binding(7)
+var bark_normal: texture_2d_array<f32>;
+
+@group(0) @binding(8)
+var bark_arm: texture_2d_array<f32>;
+
+@group(0) @binding(9)
+var bark_sampler: sampler;
+
 struct VertexInput {
     @location(0) position_high: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -52,6 +64,7 @@ struct VertexInput {
     @location(3) snow_coverage: f32,
     @location(4) position_low: vec3<f32>,
     @location(5) surface_kind: f32,
+    @location(6) material_uv: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -62,7 +75,8 @@ struct VertexOutput {
     @location(3) world_position: vec3<f32>,
     @location(4) snow_coverage: f32,
     @location(5) render_position: vec3<f32>,
-    @location(6) surface_kind: f32,
+    @location(6) @interpolate(flat) surface_kind: f32,
+    @location(7) material_uv: vec2<f32>,
 };
 
 @vertex
@@ -84,6 +98,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.snow_coverage = input.snow_coverage * slope_retention;
     output.render_position = render_position;
     output.surface_kind = input.surface_kind;
+    output.material_uv = input.material_uv;
     return output;
 }
 
@@ -103,6 +118,27 @@ fn value_noise(position: vec2<f32>) -> f32 {
         blend.x,
     );
     return mix(bottom, top, blend.y);
+}
+
+fn cotangent_frame(
+    geometric_normal: vec3<f32>,
+    position_dx: vec3<f32>,
+    position_dy: vec3<f32>,
+    uv_dx: vec2<f32>,
+    uv_dy: vec2<f32>,
+) -> mat3x3<f32> {
+    let position_dy_perpendicular = cross(position_dy, geometric_normal);
+    let position_dx_perpendicular = cross(geometric_normal, position_dx);
+    let tangent = position_dy_perpendicular * uv_dx.x
+        + position_dx_perpendicular * uv_dy.x;
+    let bitangent = position_dy_perpendicular * uv_dx.y
+        + position_dx_perpendicular * uv_dy.y;
+    let inverse_scale = inverseSqrt(max(max(dot(tangent, tangent), dot(bitangent, bitangent)), 0.00000001));
+    return mat3x3<f32>(
+        tangent * inverse_scale,
+        bitangent * inverse_scale,
+        geometric_normal,
+    );
 }
 
 fn sky_radiance(direction: vec3<f32>) -> vec3<f32> {
@@ -201,6 +237,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var normal = normalize(input.world_normal);
+    let material_uv_dx = dpdx(input.material_uv);
+    let material_uv_dy = dpdy(input.material_uv);
+    let bark_frame = cotangent_frame(
+        normal,
+        dpdx(input.render_position),
+        dpdy(input.render_position),
+        material_uv_dx,
+        material_uv_dy,
+    );
+    let pine_amount = 1.0 - smoothstep(2.25, 2.75, input.surface_kind);
     let slope = 1.0 - max(normal.y, 0.0);
     let grass = vec3<f32>(0.17, 0.34, 0.14);
     let stone = vec3<f32>(0.35, 0.34, 0.31);
@@ -229,9 +275,62 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let base = ground_base * (1.0 + broad_detail + fine_detail);
     var visualized = mix(base, input.color.rgb, input.color.a);
 
+    let is_bark = input.surface_kind > 1.5;
+    var bark_ambient_occlusion = 1.0;
+    var bark_roughness = 1.0;
+    if (is_bark) {
+        let bark_layer = i32(clamp(input.surface_kind - 2.0, 0.0, 1.0));
+        let diffuse_sample = textureSampleGrad(
+            bark_diffuse,
+            bark_sampler,
+            input.material_uv,
+            bark_layer,
+            material_uv_dx,
+            material_uv_dy,
+        );
+        let normal_sample = textureSampleGrad(
+            bark_normal,
+            bark_sampler,
+            input.material_uv,
+            bark_layer,
+            material_uv_dx,
+            material_uv_dy,
+        );
+        let arm_sample = textureSampleGrad(
+            bark_arm,
+            bark_sampler,
+            input.material_uv,
+            bark_layer,
+            material_uv_dx,
+            material_uv_dy,
+        );
+        let tangent_normal = normal_sample.xyz * 2.0 - 1.0;
+        let normal_strength = mix(0.88, 0.72, pine_amount);
+        normal = normalize(
+            bark_frame
+            * normalize(vec3<f32>(
+                tangent_normal.xy * normal_strength,
+                max(tangent_normal.z, 0.08),
+            ))
+        );
+        bark_ambient_occlusion = arm_sample.r;
+        bark_roughness = arm_sample.g;
+        let pine_reference = vec3<f32>(0.25, 0.18, 0.11);
+        let oak_reference = vec3<f32>(0.27, 0.20, 0.14);
+        let reference_color = mix(oak_reference, pine_reference, pine_amount);
+        let individual_tint = clamp(
+            input.color.rgb / reference_color,
+            vec3<f32>(0.72),
+            vec3<f32>(1.65),
+        );
+        visualized = diffuse_sample.rgb
+            * individual_tint
+            * mix(0.62, 1.0, bark_ambient_occlusion);
+    }
+
     // Dedicated hydrology sheets retain their generated ocean/lake/wetland
     // color but read as reflective water instead of flat colored terrain.
-    let is_water = input.surface_kind > 0.5;
+    let is_water = input.surface_kind > 0.5 && input.surface_kind < 1.5;
     let view_direction = normalize(-input.render_position);
     if (is_water) {
         let wind = normalize(atmosphere.wind_moisture.xy + vec2<f32>(0.0001, 0.0001));
@@ -267,7 +366,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         * shadow
         * lighting.sun_direction_intensity.w;
     let ground_bounce = lighting.ground_ambient.rgb * ground_exposure;
-    var lit = visualized * (skylight + direct_light + ground_bounce);
+    var lit = visualized * (
+        skylight * bark_ambient_occlusion
+        + direct_light
+        + ground_bounce * bark_ambient_occlusion
+    );
+    if (is_bark) {
+        let half_direction = normalize(sun_direction + view_direction);
+        let highlight_power = mix(72.0, 9.0, bark_roughness);
+        let highlight_strength = mix(0.065, 0.012, bark_roughness);
+        let bark_highlight = pow(max(dot(normal, half_direction), 0.0), highlight_power);
+        lit += lighting.sun_color.rgb
+            * bark_highlight
+            * highlight_strength
+            * shadow
+            * lighting.sun_direction_intensity.w;
+    }
     if (is_water) {
         let half_direction = normalize(sun_direction + view_direction);
         let sun_glint = pow(max(dot(normal, half_direction), 0.0), 180.0);

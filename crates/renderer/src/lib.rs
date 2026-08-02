@@ -5,6 +5,8 @@ use std::fmt::{Display, Formatter};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Mat4, Quat, Vec3};
+use image::ImageFormat;
+use image::imageops::{FilterType, resize};
 use treeline_ecology::{
     BarkStyle, CrownShape, GroundCoverGroup, GroundPlant, ProceduralTree, RockForm, SurfaceRock,
     TreeCondition, TreeFunctionalGroup,
@@ -21,6 +23,20 @@ const SHADOW_MAP_SIZE: u32 = 1_024;
 const SHADOW_CASCADE_SPLITS_METERS: [f32; SHADOW_CASCADE_COUNT] = [48.0, 140.0, 360.0];
 const SHADOW_CASCADE_RADII_METERS: [f64; SHADOW_CASCADE_COUNT] = [56.0, 164.0, 424.0];
 const SHADOW_DEPTH_METERS: f64 = 3_000.0;
+const SURFACE_KIND_SOLID: f32 = 0.0;
+const SURFACE_KIND_WATER: f32 = 1.0;
+const SURFACE_KIND_PINE_BARK: f32 = 2.0;
+const SURFACE_KIND_OAK_BARK: f32 = 3.0;
+const BARK_TEXTURE_EDGE: u32 = 512;
+const BARK_TEXTURE_LAYER_COUNT: u32 = 2;
+const BARK_TEXTURE_MIP_COUNT: u32 = 10;
+
+const PINE_BARK_DIFFUSE: &[u8] = include_bytes!("../assets/bark/pine_bark_diff_1k.jpg");
+const PINE_BARK_NORMAL: &[u8] = include_bytes!("../assets/bark/pine_bark_nor_gl_1k.jpg");
+const PINE_BARK_ARM: &[u8] = include_bytes!("../assets/bark/pine_bark_arm_1k.jpg");
+const OAK_BARK_DIFFUSE: &[u8] = include_bytes!("../assets/bark/bark_brown_02_diff_1k.jpg");
+const OAK_BARK_NORMAL: &[u8] = include_bytes!("../assets/bark/bark_brown_02_nor_gl_1k.jpg");
+const OAK_BARK_ARM: &[u8] = include_bytes!("../assets/bark/bark_brown_02_arm_1k.jpg");
 
 /// Maximum horizontal caster distance needed by the cascaded shadow maps.
 pub const SHADOW_CASTER_DISTANCE_METERS: f64 = 480.0;
@@ -162,16 +178,18 @@ struct TerrainVertex {
     snow_coverage: f32,
     position_low: [f32; 3],
     surface_kind: f32,
+    material_uv: [f32; 2],
 }
 
 impl TerrainVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x4,
         3 => Float32,
         4 => Float32x3,
         5 => Float32,
+        6 => Float32x2,
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -196,7 +214,8 @@ fn terrain_vertex(
         color,
         snow_coverage,
         position_low,
-        surface_kind: 0.0,
+        surface_kind: SURFACE_KIND_SOLID,
+        material_uv: [0.0; 2],
     }
 }
 
@@ -233,6 +252,19 @@ fn local_vertex(
         color,
         snow_coverage,
     )
+}
+
+fn material_vertex(
+    position: Vec3,
+    normal: Vec3,
+    color: [f32; 4],
+    surface_kind: f32,
+    material_uv: [f32; 2],
+) -> TerrainVertex {
+    let mut vertex = local_vertex(position, normal, color, 0.0);
+    vertex.surface_kind = surface_kind;
+    vertex.material_uv = material_uv;
+    vertex
 }
 
 fn split_position(position: [f64; 3]) -> ([f32; 3], [f32; 3]) {
@@ -537,6 +569,7 @@ pub struct TerrainRenderer {
     shadow_map: ShadowMap,
     shadow_camera_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT],
     shadow_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT],
+    _bark_materials: BarkMaterialTextures,
     depth: DepthTarget,
 }
 
@@ -556,6 +589,171 @@ struct ShadowMap {
     sampling_view: wgpu::TextureView,
     layer_views: [wgpu::TextureView; SHADOW_CASCADE_COUNT],
     sampler: wgpu::Sampler,
+}
+
+#[derive(Clone, Copy)]
+struct EmbeddedBarkMaterial {
+    diffuse: &'static [u8],
+    normal: &'static [u8],
+    arm: &'static [u8],
+}
+
+const EMBEDDED_BARK_MATERIALS: [EmbeddedBarkMaterial; 2] = [
+    EmbeddedBarkMaterial {
+        diffuse: PINE_BARK_DIFFUSE,
+        normal: PINE_BARK_NORMAL,
+        arm: PINE_BARK_ARM,
+    },
+    EmbeddedBarkMaterial {
+        diffuse: OAK_BARK_DIFFUSE,
+        normal: OAK_BARK_NORMAL,
+        arm: OAK_BARK_ARM,
+    },
+];
+
+#[derive(Debug)]
+struct BarkMaterialTextures {
+    _diffuse_texture: wgpu::Texture,
+    diffuse_view: wgpu::TextureView,
+    _normal_texture: wgpu::Texture,
+    normal_view: wgpu::TextureView,
+    _arm_texture: wgpu::Texture,
+    arm_view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+}
+
+impl BarkMaterialTextures {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let diffuse_texture = create_bark_texture(
+            device,
+            "Poly Haven bark diffuse array",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let normal_texture = create_bark_texture(
+            device,
+            "Poly Haven bark normal array",
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let arm_texture = create_bark_texture(
+            device,
+            "Poly Haven bark AO roughness metalness array",
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        upload_bark_layers(
+            queue,
+            &diffuse_texture,
+            EMBEDDED_BARK_MATERIALS.map(|material| material.diffuse),
+        );
+        upload_bark_layers(
+            queue,
+            &normal_texture,
+            EMBEDDED_BARK_MATERIALS.map(|material| material.normal),
+        );
+        upload_bark_layers(
+            queue,
+            &arm_texture,
+            EMBEDDED_BARK_MATERIALS.map(|material| material.arm),
+        );
+        let array_view = |texture: &wgpu::Texture, label| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(label),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
+        let diffuse_view = array_view(&diffuse_texture, "Poly Haven bark diffuse array view");
+        let normal_view = array_view(&normal_texture, "Poly Haven bark normal array view");
+        let arm_view = array_view(&arm_texture, "Poly Haven bark ARM array view");
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("bark material sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            anisotropy_clamp: 4,
+            ..Default::default()
+        });
+        Self {
+            _diffuse_texture: diffuse_texture,
+            diffuse_view,
+            _normal_texture: normal_texture,
+            normal_view,
+            _arm_texture: arm_texture,
+            arm_view,
+            sampler,
+        }
+    }
+}
+
+fn create_bark_texture(
+    device: &wgpu::Device,
+    label: &str,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: BARK_TEXTURE_EDGE,
+            height: BARK_TEXTURE_EDGE,
+            depth_or_array_layers: BARK_TEXTURE_LAYER_COUNT,
+        },
+        mip_level_count: BARK_TEXTURE_MIP_COUNT,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
+fn upload_bark_layers(queue: &wgpu::Queue, texture: &wgpu::Texture, encoded_layers: [&[u8]; 2]) {
+    for (layer, encoded) in encoded_layers.into_iter().enumerate() {
+        let decoded = image::load_from_memory_with_format(encoded, ImageFormat::Jpeg)
+            .expect("embedded Poly Haven bark JPEG must decode")
+            .to_rgba8();
+        assert_eq!(
+            decoded.dimensions(),
+            (1_024, 1_024),
+            "embedded Poly Haven bark maps must retain their source dimensions"
+        );
+        let mut mip = resize(
+            &decoded,
+            BARK_TEXTURE_EDGE,
+            BARK_TEXTURE_EDGE,
+            FilterType::Triangle,
+        );
+        for mip_level in 0..BARK_TEXTURE_MIP_COUNT {
+            let (width, height) = mip.dimensions();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: u32::try_from(layer).expect("bark layer count fits u32"),
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                mip.as_raw(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            if width > 1 {
+                mip = resize(&mip, width / 2, height / 2, FilterType::Triangle);
+            }
+        }
+    }
 }
 
 impl ShadowMap {
@@ -651,7 +849,11 @@ impl ShadowBindings {
 }
 
 impl TerrainBindings {
-    fn new(device: &wgpu::Device, shadow_map: &ShadowMap) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        shadow_map: &ShadowMap,
+        bark_materials: &BarkMaterialTextures,
+    ) -> Self {
         let camera_uniform = CameraUniform {
             view_projection: [[0.0; 4]; 4],
             inverse_view_projection: [[0.0; 4]; 4],
@@ -690,6 +892,10 @@ impl TerrainBindings {
                 uniform_layout_entry(3, wgpu::ShaderStages::FRAGMENT),
                 depth_texture_layout_entry(4),
                 comparison_sampler_layout_entry(5),
+                sampled_texture_array_layout_entry(6),
+                sampled_texture_array_layout_entry(7),
+                sampled_texture_array_layout_entry(8),
+                filtering_sampler_layout_entry(9),
             ],
         });
         let atmosphere = AtmosphereSettings::default();
@@ -710,6 +916,7 @@ impl TerrainBindings {
             atmosphere_buffer: &atmosphere_buffer,
             lighting_buffer: &lighting_buffer,
             shadow_map,
+            bark_materials,
         };
         let far_bind_group = terrain_bind_group(
             device,
@@ -787,6 +994,28 @@ const fn comparison_sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutE
     }
 }
 
+const fn sampled_texture_array_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+const fn filtering_sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TerrainBindGroupResources<'a> {
     camera_buffer: &'a wgpu::Buffer,
@@ -794,6 +1023,7 @@ struct TerrainBindGroupResources<'a> {
     atmosphere_buffer: &'a wgpu::Buffer,
     lighting_buffer: &'a wgpu::Buffer,
     shadow_map: &'a ShadowMap,
+    bark_materials: &'a BarkMaterialTextures,
 }
 
 fn terrain_bind_group(
@@ -829,6 +1059,24 @@ fn terrain_bind_group(
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: wgpu::BindingResource::Sampler(&resources.shadow_map.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(
+                    &resources.bark_materials.diffuse_view,
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&resources.bark_materials.normal_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&resources.bark_materials.arm_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::Sampler(&resources.bark_materials.sampler),
             },
         ],
     })
@@ -980,12 +1228,14 @@ impl TerrainRenderer {
     /// Creates the shared lit terrain pipeline and camera/depth resources.
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Self {
         let shadow_map = ShadowMap::new(device);
-        let bindings = TerrainBindings::new(device, &shadow_map);
+        let bark_materials = BarkMaterialTextures::new(device, queue);
+        let bindings = TerrainBindings::new(device, &shadow_map, &bark_materials);
         let shadow_bindings = ShadowBindings::new(device);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1010,6 +1260,7 @@ impl TerrainRenderer {
             shadow_map,
             shadow_camera_buffers: shadow_bindings.camera_buffers,
             shadow_bind_groups: shadow_bindings.bind_groups,
+            _bark_materials: bark_materials,
             depth: DepthTarget::new(device, width, height),
         }
     }
@@ -1025,7 +1276,7 @@ impl TerrainRenderer {
         device: &wgpu::Device,
         mesh: &Mesh,
     ) -> Result<TerrainMesh, RendererError> {
-        Self::upload_mesh_with_kind(device, mesh, 0.0, "terrain vertices")
+        Self::upload_mesh_with_kind(device, mesh, SURFACE_KIND_SOLID, "terrain vertices")
     }
 
     /// Uploads a dedicated water sheet. Water vertices use the supplied
@@ -1041,7 +1292,7 @@ impl TerrainRenderer {
         device: &wgpu::Device,
         mesh: &Mesh,
     ) -> Result<TerrainMesh, RendererError> {
-        Self::upload_mesh_with_kind(device, mesh, 1.0, "water vertices")
+        Self::upload_mesh_with_kind(device, mesh, SURFACE_KIND_WATER, "water vertices")
     }
 
     fn upload_mesh_with_kind(
@@ -1515,6 +1766,7 @@ fn append_forb(
             end_radius: (height * 0.012).clamp(0.004, 0.012),
             sides: 4,
             color: ground_plant_color(plant, 0),
+            material: CylinderMaterial::UNTEXTURED,
         },
     )?;
     let leaf_count = usize::from(plant.genotype.leaf_count).min(6);
@@ -1600,6 +1852,7 @@ fn append_low_shrub(
                 end_radius: (height * 0.008).clamp(0.004, 0.015),
                 sides: 4,
                 color: woody_color,
+                material: CylinderMaterial::UNTEXTURED,
             },
         )?;
         let cluster_radius = radius * (0.20 + (scale * 0.12));
@@ -1920,6 +2173,11 @@ fn append_tree(
             end_radius: top_radius,
             sides: trunk_sides,
             color: bark_color(tree),
+            material: if detail == TreeMeshDetail::Silhouette {
+                CylinderMaterial::UNTEXTURED
+            } else {
+                bark_cylinder_material(tree, 0)
+            },
         },
     )?;
 
@@ -2047,6 +2305,7 @@ fn append_tree_branch(
             end_radius: frame.trunk_radius * 0.045,
             sides: 4,
             color: bark_color(tree),
+            material: bark_cylinder_material(tree, branch_index + 1),
         },
     )?;
     if tree_has_foliage(tree) && tree.genotype.crown_shape != CrownShape::Conical {
@@ -2203,6 +2462,32 @@ fn foliage_color(tree: ProceduralTree) -> [f32; 4] {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct CylinderMaterial {
+    surface_kind: f32,
+    seed: f32,
+}
+
+impl CylinderMaterial {
+    const UNTEXTURED: Self = Self {
+        surface_kind: SURFACE_KIND_SOLID,
+        seed: 0.0,
+    };
+}
+
+fn bark_cylinder_material(tree: ProceduralTree, lane: usize) -> CylinderMaterial {
+    let surface_kind = match tree.genotype.functional_group {
+        TreeFunctionalGroup::EvergreenNeedleleaf => SURFACE_KIND_PINE_BARK,
+        TreeFunctionalGroup::ColdDeciduous
+        | TreeFunctionalGroup::TemperateBroadleaf
+        | TreeFunctionalGroup::DryWoodland => SURFACE_KIND_OAK_BARK,
+    };
+    CylinderMaterial {
+        surface_kind,
+        seed: hash_lane(tree.id.rotate_left(29), lane + 41),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct CylinderSpec {
     start: Vec3,
     end: Vec3,
@@ -2210,6 +2495,7 @@ struct CylinderSpec {
     end_radius: f32,
     sides: usize,
     color: [f32; 4],
+    material: CylinderMaterial,
 }
 
 fn append_tapered_cylinder(
@@ -2229,31 +2515,61 @@ fn append_tapered_cylinder(
     let tangent = axis.cross(reference).normalize_or_zero();
     let bitangent = axis.cross(tangent).normalize_or_zero();
     let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
+    let is_bark = spec.material.surface_kind >= SURFACE_KIND_PINE_BARK;
+    let vertices_per_ring = if is_bark { spec.sides + 1 } else { spec.sides };
+    let average_radius = (spec.start_radius + spec.end_radius) * 0.5;
+    let is_pine_bark = spec.material.surface_kind < SURFACE_KIND_OAK_BARK;
+    let repeat_width_meters = if is_pine_bark { 2.0 } else { 1.0 };
+    let around_repeats =
+        libm::roundf((std::f32::consts::TAU * average_radius / repeat_width_meters).max(1.0))
+            .clamp(1.0, 12.0);
+    let axial_repeats_per_meter = if is_pine_bark { 0.5 } else { 1.0 };
+    let axis_length = (spec.end - spec.start).length();
+    let u_offset = spec.material.seed * 7.0;
+    let v_offset = (spec.material.seed * 17.0).fract();
     for ring in 0..2 {
         let (center, radius) = if ring == 0 {
             (spec.start, spec.start_radius)
         } else {
             (spec.end, spec.end_radius)
         };
-        for side in 0..spec.sides {
+        for side in 0..vertices_per_ring {
             let angle = usize_as_f32(side) / usize_as_f32(spec.sides) * std::f32::consts::TAU;
             let radial = (tangent * libm::cosf(angle)) + (bitangent * libm::sinf(angle));
             let position = center + (radial * radius);
-            vertices.push(local_vertex(position, radial, spec.color, 0.0));
+            if is_bark {
+                vertices.push(material_vertex(
+                    position,
+                    radial,
+                    spec.color,
+                    spec.material.surface_kind,
+                    [
+                        u_offset + (usize_as_f32(side) / usize_as_f32(spec.sides) * around_repeats),
+                        v_offset + (usize_as_f32(ring) * axis_length * axial_repeats_per_meter),
+                    ],
+                ));
+            } else {
+                vertices.push(local_vertex(position, radial, spec.color, 0.0));
+            }
         }
     }
     for side in 0..spec.sides {
-        let next = (side + 1) % spec.sides;
+        let next = if is_bark {
+            side + 1
+        } else {
+            (side + 1) % spec.sides
+        };
         let side = u32::try_from(side).map_err(|_| RendererError::TooManyIndices)?;
         let next = u32::try_from(next).map_err(|_| RendererError::TooManyIndices)?;
-        let sides = u32::try_from(spec.sides).map_err(|_| RendererError::TooManyIndices)?;
+        let ring_stride =
+            u32::try_from(vertices_per_ring).map_err(|_| RendererError::TooManyIndices)?;
         indices.extend_from_slice(&[
             base_index + side,
             base_index + next,
-            base_index + sides + side,
+            base_index + ring_stride + side,
             base_index + next,
-            base_index + sides + next,
-            base_index + sides + side,
+            base_index + ring_stride + next,
+            base_index + ring_stride + side,
         ]);
     }
     Ok(())
@@ -2576,6 +2892,82 @@ mod tests {
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
         assert_front_facing_geometry(&vertices, &indices);
+    }
+
+    #[test]
+    fn pine_and_oak_bark_cylinders_have_distinct_seam_safe_material_coordinates() {
+        let pine = tree_fixture(
+            21,
+            TreeFunctionalGroup::EvergreenNeedleleaf,
+            CrownShape::Conical,
+            TreeCondition::Mature,
+        );
+        let oak = tree_fixture(
+            22,
+            TreeFunctionalGroup::TemperateBroadleaf,
+            CrownShape::Rounded,
+            TreeCondition::Mature,
+        );
+        let pine_material = bark_cylinder_material(pine, 0);
+        let oak_material = bark_cylinder_material(oak, 0);
+
+        assert!((pine_material.surface_kind - SURFACE_KIND_PINE_BARK).abs() < f32::EPSILON);
+        assert!((oak_material.surface_kind - SURFACE_KIND_OAK_BARK).abs() < f32::EPSILON);
+
+        for material in [pine_material, oak_material] {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            append_tapered_cylinder(
+                &mut vertices,
+                &mut indices,
+                CylinderSpec {
+                    start: Vec3::ZERO,
+                    end: Vec3::Y * 4.0,
+                    start_radius: 0.42,
+                    end_radius: 0.28,
+                    sides: 7,
+                    color: [0.3, 0.2, 0.1, 1.0],
+                    material,
+                },
+            )
+            .expect("bark cylinder");
+
+            assert_eq!(vertices.len(), 16);
+            assert_eq!(indices.len(), 42);
+            assert!(vertices.iter().all(|vertex| {
+                (vertex.surface_kind - material.surface_kind).abs() < f32::EPSILON
+                    && vertex.material_uv.into_iter().all(f32::is_finite)
+            }));
+
+            let seam_start = vertices[0];
+            let seam_end = vertices[7];
+            let start_position = Vec3::from_array(seam_start.position_high)
+                + Vec3::from_array(seam_start.position_low);
+            let end_position =
+                Vec3::from_array(seam_end.position_high) + Vec3::from_array(seam_end.position_low);
+            let repeat_span = seam_end.material_uv[0] - seam_start.material_uv[0];
+            assert!((start_position - end_position).length() < 0.000_01);
+            assert!(repeat_span >= 1.0);
+            assert!((repeat_span - libm::roundf(repeat_span)).abs() < f32::EPSILON);
+            assert!(vertices[8].material_uv[1] > vertices[0].material_uv[1]);
+        }
+    }
+
+    #[test]
+    fn embedded_poly_haven_bark_maps_decode_with_complete_mip_coverage() {
+        for material in EMBEDDED_BARK_MATERIALS {
+            for encoded in [material.diffuse, material.normal, material.arm] {
+                let image = image::load_from_memory_with_format(encoded, ImageFormat::Jpeg)
+                    .expect("embedded bark map");
+                assert_eq!(image.width(), 1_024);
+                assert_eq!(image.height(), 1_024);
+            }
+        }
+        assert_eq!(
+            BARK_TEXTURE_MIP_COUNT,
+            BARK_TEXTURE_EDGE.ilog2() + 1,
+            "the mip chain must reach a one-pixel final level"
+        );
     }
 
     #[test]

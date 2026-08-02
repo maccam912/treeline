@@ -16,6 +16,7 @@ egui = "0.31.1"
 egui-wgpu = "0.31.1"
 egui-winit = { version = "0.31.1", default-features = false }
 glam = { version = "0.30.5", features = ["libm"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 libm = { version = "0.2.16", default-features = false }
 js-sys = "0.3"
 mcubes = "0.1.7"

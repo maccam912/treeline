@@ -407,7 +407,7 @@ impl Game {
         let world_generation_started = Instant::now();
         window.set_title("Treeline — Preparing spawn geography…");
         let terrain = GeneratedWorldTerrain::new(WORLD);
-        let renderer = create_terrain_renderer(&device, &surface_config);
+        let renderer = create_terrain_renderer(&device, &queue, &surface_config);
         let chunk_streamer = ChunkStreamer::new(chunk_streaming_config());
         let far_terrain_streamer = FarTerrainStreamer::new(far_terrain_streaming_config());
         let (mut terrain_chunks, mut far_terrain_tiles) = (BTreeMap::new(), BTreeMap::new());
@@ -1883,10 +1883,12 @@ fn active_water_footprint(
 
 fn create_terrain_renderer(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     surface_config: &wgpu::SurfaceConfiguration,
 ) -> TerrainRenderer {
     TerrainRenderer::new(
         device,
+        queue,
         surface_config.format,
         surface_config.width,
         surface_config.height,

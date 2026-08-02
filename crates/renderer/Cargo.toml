@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 bytemuck.workspace = true
 glam.workspace = true
+image.workspace = true
 libm.workspace = true
 treeline-ecology.workspace = true
 treeline-mesher.workspace = true

@@ -337,12 +337,7 @@ impl GeneratorLab {
             view_formats: vec![],
         };
         surface.configure(&device, &surface_config);
-        let renderer = TerrainRenderer::new(
-            &device,
-            surface_format,
-            surface_config.width,
-            surface_config.height,
-        );
+        let renderer = create_terrain_renderer(&device, &queue, &surface_config);
         let egui_context = egui::Context::default();
         let egui_state = egui_winit::State::new(
             egui_context.clone(),
@@ -784,6 +779,20 @@ impl GeneratorLab {
             eprintln!("failed to update Generator Lab from UI: {error}");
         }
     }
+}
+
+fn create_terrain_renderer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    surface_config: &wgpu::SurfaceConfiguration,
+) -> TerrainRenderer {
+    TerrainRenderer::new(
+        device,
+        queue,
+        surface_config.format,
+        surface_config.width,
+        surface_config.height,
+    )
 }
 
 #[derive(Clone, Copy, Debug)]

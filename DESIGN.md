@@ -2425,7 +2425,13 @@ available.**
       age, and damage traits from forest structure. Saplings, mature and ancient
       trees, wind damage, fallen trees, standing deadwood, and storm breaks are
       deterministic; the client renders their generated trunks, branches, and
-      crowns, and Generator Lab inspection explains nearby individuals.
+      crowns, and Generator Lab inspection explains nearby individuals. Near and
+      simplified woody geometry carries seam-safe material coordinates; the
+      shared native/WebGPU shader applies versioned CC0 Poly Haven pine and
+      furrowed oak-like PBR scans with albedo, normal, ambient-occlusion,
+      roughness, physical source scale, and full mip chains. Individual color
+      variation remains deterministic, while silhouette trees retain flat color
+      rather than paying for surface detail that cannot be resolved.
 - [x] Surface rocks. Continuous geology-, erosion-, slope-, and soil-driven
       rock distributions feed globally anchored rounded boulders, angular
       blocks, weathered slabs, and scree fragments. Individuals have
