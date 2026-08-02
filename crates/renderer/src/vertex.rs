@@ -15,7 +15,6 @@ pub(crate) const SURFACE_KIND_SOLID: f32 = 0.0;
 pub(crate) const SURFACE_KIND_WATER: f32 = 1.0;
 pub(crate) const SURFACE_KIND_PINE_BARK: f32 = 2.0;
 pub(crate) const SURFACE_KIND_OAK_BARK: f32 = 3.0;
-#[allow(dead_code)]
 pub(crate) const SURFACE_KIND_NEEDLE_FOLIAGE: f32 = 4.0;
 
 #[repr(C)]

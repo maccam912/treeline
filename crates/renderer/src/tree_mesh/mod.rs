@@ -18,6 +18,11 @@ use color::{
 };
 use shape::{CylinderSpec, append_conical_crown, append_octahedral_crown, append_tapered_cylinder};
 
+#[cfg(test)]
+use crate::vertex::SURFACE_KIND_NEEDLE_FOLIAGE;
+#[cfg(test)]
+use shape::append_needle_puff;
+
 pub(crate) fn procedural_tree_geometry(
     trees: &[ProceduralTree],
     detail: TreeMeshDetail,
@@ -351,6 +356,30 @@ mod tests {
                 && vertex.normal.into_iter().all(f32::is_finite)
                 && (vertex.color[3] - 1.0).abs() < f32::EPSILON
         }));
+    }
+
+    #[test]
+    fn a_needle_puff_builds_crossed_front_facing_quads() {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        append_needle_puff(
+            &mut vertices,
+            &mut indices,
+            Vec3::ZERO,
+            1.0,
+            2,
+            0.0,
+            [0.3, 0.5, 0.3, 1.0],
+        )
+        .expect("puff geometry");
+        assert_eq!(vertices.len(), 2 * 4);
+        assert_eq!(indices.len(), 2 * 2 * 3);
+        assert_well_formed(&vertices, &indices);
+        assert!(
+            vertices
+                .iter()
+                .all(|vertex| vertex.surface_kind == SURFACE_KIND_NEEDLE_FOLIAGE)
+        );
     }
 
     #[test]
