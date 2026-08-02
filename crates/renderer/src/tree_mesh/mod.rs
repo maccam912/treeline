@@ -14,14 +14,13 @@ use treeline_ecology::{CrownShape, ProceduralTree, TreeCondition};
 use crate::vertex::{TerrainVertex, f64_as_f32, hash_lane, translate_local_vertices, usize_as_f32};
 use crate::{RendererError, TreeMeshDetail};
 use color::{
-    CylinderMaterial, bark_color, bark_cylinder_material, foliage_color, tree_has_foliage,
+    CylinderMaterial, bark_color, bark_cylinder_material, foliage_color, puff_color,
+    tree_has_foliage,
 };
-use shape::{CylinderSpec, append_conical_crown, append_octahedral_crown, append_tapered_cylinder};
+use shape::{CylinderSpec, append_needle_puff, append_octahedral_crown, append_tapered_cylinder};
 
 #[cfg(test)]
 use crate::vertex::SURFACE_KIND_NEEDLE_FOLIAGE;
-#[cfg(test)]
-use shape::append_needle_puff;
 
 pub(crate) fn procedural_tree_geometry(
     trees: &[ProceduralTree],
@@ -99,7 +98,7 @@ pub(crate) fn append_tree(
         trunk_radius,
     };
     if detail == TreeMeshDetail::Full {
-        append_tree_crown(vertices, indices, tree, frame)
+        append_tree_crown(vertices, indices, tree, frame, detail)
     } else if tree_has_foliage(tree) {
         let crown_start = match tree.genotype.crown_shape {
             CrownShape::Conical => 0.24,
@@ -114,6 +113,7 @@ pub(crate) fn append_tree(
             crown_start,
             f64_as_f32(tree.crown_radius_meters),
             foliage_color(tree),
+            detail,
         )
     } else {
         Ok(())
@@ -133,6 +133,7 @@ pub(crate) fn append_tree_crown(
     indices: &mut Vec<u32>,
     tree: ProceduralTree,
     frame: TreeFrame,
+    detail: TreeMeshDetail,
 ) -> Result<(), RendererError> {
     let branch_count = branch_count(tree);
     let crown_start = match tree.genotype.crown_shape {
@@ -165,6 +166,7 @@ pub(crate) fn append_tree_crown(
         crown_start,
         crown_radius,
         foliage,
+        detail,
     )
 }
 
@@ -234,6 +236,81 @@ pub(crate) fn append_tree_branch(
     Ok(())
 }
 
+/// A conifer crown as a cloud of crossed-quad needle puffs.
+///
+/// Puffs spiral up the same envelope the old cone used, so every detail tier
+/// keeps the crown silhouette aligned. Puff count scales with the genotype's
+/// combined branch and leaf density; quad size stays constant so coarser tiers
+/// never poke past the fuller one.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_needle_crown(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    tree: ProceduralTree,
+    crown_base: Vec3,
+    apex: Vec3,
+    crown_radius: f32,
+    foliage: [f32; 4],
+    detail: TreeMeshDetail,
+) -> Result<(), RendererError> {
+    let axis = apex - crown_base;
+    let axis_length = axis.length();
+    if axis_length <= f32::EPSILON {
+        return Ok(());
+    }
+    let direction = axis / axis_length;
+    let density =
+        f64_as_f32(tree.genotype.branch_density_fraction * tree.genotype.leaf_density_fraction);
+    let (planes, base_count) = match detail {
+        TreeMeshDetail::Full => (3, 12.0 + density * 12.0),
+        TreeMeshDetail::Simplified => (2, 6.0 + density * 6.0),
+        TreeMeshDetail::Silhouette => (2, 4.0 + density * 3.0),
+    };
+    let count = usize::try_from(libm::roundf(base_count.clamp(1.0, 48.0)) as i32)
+        .expect("puff count fits usize");
+    let half_extent =
+        crown_radius * (0.15 + f64_as_f32(tree.genotype.leaf_density_fraction) * 0.10);
+    let reference = if direction.y.abs() < 0.92 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let tangent = direction.cross(reference).normalize_or_zero();
+    let bitangent = direction.cross(tangent).normalize_or_zero();
+    let golden = 0.618_034_f32;
+    for index in 0..count {
+        let t = usize_as_f32(index + 1) / usize_as_f32(count + 1);
+        let azimuth = (golden * usize_as_f32(index) + hash_lane(tree.id, index) * 0.5)
+            * std::f32::consts::TAU;
+        let radial = (tangent * libm::cosf(azimuth)) + (bitangent * libm::sinf(azimuth));
+        let envelope_radius =
+            crown_radius * (1.0 - t) * (0.55 + hash_lane(tree.id, index + 8) * 0.45);
+        let position = (crown_base + (direction * (axis_length * t))) + (radial * envelope_radius);
+        let rotation = hash_lane(tree.id, index + 16) * std::f32::consts::TAU;
+        append_needle_puff(
+            vertices,
+            indices,
+            position,
+            half_extent,
+            planes,
+            rotation,
+            puff_color(tree, foliage, index),
+        )?;
+    }
+    append_needle_puff(
+        vertices,
+        indices,
+        apex,
+        half_extent * 0.7,
+        planes,
+        hash_lane(tree.id, 31) * std::f32::consts::TAU,
+        puff_color(tree, foliage, count),
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_terminal_crown(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
@@ -242,15 +319,18 @@ pub(crate) fn append_terminal_crown(
     crown_start: f32,
     crown_radius: f32,
     foliage: [f32; 4],
+    detail: TreeMeshDetail,
 ) -> Result<(), RendererError> {
     match tree.genotype.crown_shape {
-        CrownShape::Conical => append_conical_crown(
+        CrownShape::Conical => append_needle_crown(
             vertices,
             indices,
+            tree,
             frame.base + (frame.trunk_vector * crown_start),
             frame.top + (Vec3::Y * crown_radius * 0.18),
             crown_radius,
             foliage,
+            detail,
         ),
         CrownShape::Columnar | CrownShape::Rounded => append_octahedral_crown(
             vertices,
@@ -283,13 +363,15 @@ pub(crate) fn append_sapling_crown(
     }
     let radius = f64_as_f32(tree.crown_radius_meters);
     if tree.genotype.crown_shape == CrownShape::Conical {
-        append_conical_crown(
+        append_needle_crown(
             vertices,
             indices,
+            tree,
             base + ((top - base) * 0.36),
             top,
             radius,
             foliage_color(tree),
+            TreeMeshDetail::Simplified,
         )
     } else {
         append_octahedral_crown(
@@ -380,6 +462,147 @@ mod tests {
                 .iter()
                 .all(|vertex| vertex.surface_kind == SURFACE_KIND_NEEDLE_FOLIAGE)
         );
+    }
+
+    fn conifer() -> ProceduralTree {
+        stand()
+            .into_iter()
+            .find(|tree| tree.genotype.crown_shape == CrownShape::Conical)
+            .expect("a conifer in the mixture")
+    }
+
+    fn sapling() -> ProceduralTree {
+        (0..10_000_u64)
+            .map(tree)
+            .find(|tree| {
+                tree.condition == TreeCondition::Sapling
+                    && tree.genotype.crown_shape == CrownShape::Conical
+            })
+            .expect("a conifer sapling in the population")
+    }
+
+    /// Every tier places its puffs inside the same cone envelope, so distant
+    /// crowns stay spatially aligned with near ones.
+    #[test]
+    fn needle_puffs_stay_within_the_crown_envelope_at_every_tier() {
+        let tree = conifer();
+        let crown_base = Vec3::ZERO;
+        let apex = Vec3::new(0.0, 20.0, 0.0);
+        let crown_radius = 4.0;
+        let half_extent =
+            crown_radius * (0.15 + f64_as_f32(tree.genotype.leaf_density_fraction) * 0.10);
+        let margin = half_extent * 1.6 + 0.05;
+        let axis = apex - crown_base;
+        let axis_length = axis.length();
+        let axis_dir = axis / axis_length;
+        let t_margin = margin / axis_length;
+        for detail in [
+            TreeMeshDetail::Full,
+            TreeMeshDetail::Simplified,
+            TreeMeshDetail::Silhouette,
+        ] {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            append_needle_crown(
+                &mut vertices,
+                &mut indices,
+                tree,
+                crown_base,
+                apex,
+                crown_radius,
+                [0.3, 0.5, 0.3, 1.0],
+                detail,
+            )
+            .expect("crown geometry");
+            assert!(!vertices.is_empty(), "{detail:?} produced no puffs");
+            for vertex in &vertices {
+                let position = Vec3::new(
+                    vertex.position_high[0] + vertex.position_low[0],
+                    vertex.position_high[1] + vertex.position_low[1],
+                    vertex.position_high[2] + vertex.position_low[2],
+                );
+                let relative = position - crown_base;
+                let along = relative.dot(axis_dir);
+                let t = along / axis_length;
+                assert!(
+                    t > -0.01 - t_margin && t < 1.01 + t_margin,
+                    "{detail:?} puff at t={t}"
+                );
+                let lateral = relative - (axis_dir * along);
+                let distance = lateral.length();
+                let envelope = crown_radius * (1.0 - t).max(0.0);
+                assert!(
+                    distance <= envelope + margin,
+                    "{detail:?} puff escaped the envelope: {distance} > {envelope} + {margin}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_tier_keeps_needle_puffs() {
+        let stand = stand();
+        for detail in [
+            TreeMeshDetail::Full,
+            TreeMeshDetail::Simplified,
+            TreeMeshDetail::Silhouette,
+        ] {
+            let (vertices, _) =
+                procedural_tree_geometry(&stand, detail, |_, _| Some(42.0)).expect("tree geometry");
+            assert!(
+                vertices
+                    .iter()
+                    .any(|vertex| vertex.surface_kind == SURFACE_KIND_NEEDLE_FOLIAGE),
+                "{detail:?} lost its needle puffs"
+            );
+        }
+    }
+
+    #[test]
+    fn saplings_render_needle_puffs() {
+        let (vertices, _) =
+            procedural_tree_geometry(&[sapling()], TreeMeshDetail::Full, |_, _| Some(42.0))
+                .expect("tree geometry");
+        assert!(
+            vertices
+                .iter()
+                .any(|vertex| vertex.surface_kind == SURFACE_KIND_NEEDLE_FOLIAGE)
+        );
+    }
+
+    /// Geometry must be bit-stable for one input and identical whether trees
+    /// are meshed together or one at a time.
+    #[test]
+    fn a_trees_geometry_is_bit_stable_and_neighbor_independent() {
+        let stand = stand();
+        let batch = procedural_tree_geometry(&stand, TreeMeshDetail::Full, |_, _| Some(42.0))
+            .expect("tree geometry");
+        let again = procedural_tree_geometry(&stand, TreeMeshDetail::Full, |_, _| Some(42.0))
+            .expect("tree geometry");
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&batch.0),
+            bytemuck::cast_slice::<_, u8>(&again.0)
+        );
+        assert_eq!(batch.1, again.1);
+
+        let mut concatenated_vertices = Vec::new();
+        let mut concatenated_indices = Vec::new();
+        for tree in &stand {
+            let (mut vertices, mut indices) =
+                procedural_tree_geometry(&[*tree], TreeMeshDetail::Full, |_, _| Some(42.0))
+                    .expect("tree geometry");
+            let base = u32::try_from(concatenated_vertices.len()).expect("vertex count fits u32");
+            for index in &mut indices {
+                *index += base;
+            }
+            concatenated_vertices.append(&mut vertices);
+            concatenated_indices.append(&mut indices);
+        }
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&batch.0),
+            bytemuck::cast_slice::<_, u8>(&concatenated_vertices)
+        );
+        assert_eq!(batch.1, concatenated_indices);
     }
 
     #[test]

@@ -48,6 +48,16 @@ pub(crate) fn foliage_color(tree: ProceduralTree) -> [f32; 4] {
     ]
 }
 
+pub(crate) fn puff_color(tree: ProceduralTree, foliage: [f32; 4], lane: usize) -> [f32; 4] {
+    let jitter = (hash_lane(tree.id, lane + 24) - 0.5) * 0.14;
+    [
+        (foliage[0] + jitter).clamp(0.0, 1.0),
+        (foliage[1] + jitter).clamp(0.0, 1.0),
+        (foliage[2] + (jitter * 0.5)).clamp(0.0, 1.0),
+        1.0,
+    ]
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CylinderMaterial {
     pub(crate) surface_kind: f32,

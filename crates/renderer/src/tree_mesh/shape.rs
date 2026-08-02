@@ -100,52 +100,6 @@ pub(crate) fn append_tapered_cylinder(
     Ok(())
 }
 
-pub(crate) fn append_conical_crown(
-    vertices: &mut Vec<TerrainVertex>,
-    indices: &mut Vec<u32>,
-    base: Vec3,
-    apex: Vec3,
-    radius: f32,
-    color: [f32; 4],
-) -> Result<(), RendererError> {
-    let sides = 9_usize;
-    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
-    let axis = (apex - base).normalize_or_zero();
-    let reference = if axis.y.abs() < 0.92 {
-        Vec3::Y
-    } else {
-        Vec3::X
-    };
-    let tangent = axis.cross(reference).normalize_or_zero();
-    let bitangent = axis.cross(tangent).normalize_or_zero();
-    for side in 0..sides {
-        let angle = usize_as_f32(side) / usize_as_f32(sides) * std::f32::consts::TAU;
-        let radial = (tangent * libm::cosf(angle)) + (bitangent * libm::sinf(angle));
-        vertices.push(local_vertex(
-            base + (radial * radius),
-            (radial + (axis * 0.35)).normalize_or_zero(),
-            color,
-            0.0,
-        ));
-    }
-    vertices.push(local_vertex(apex, axis, color, 0.0));
-    let apex_index =
-        base_index + u32::try_from(sides).map_err(|_| RendererError::TooManyIndices)?;
-    vertices.push(local_vertex(base, -axis, color, 0.0));
-    let base_center_index = apex_index + 1;
-    for side in 0..sides {
-        let next = (side + 1) % sides;
-        let side_index =
-            base_index + u32::try_from(side).map_err(|_| RendererError::TooManyIndices)?;
-        let next_index =
-            base_index + u32::try_from(next).map_err(|_| RendererError::TooManyIndices)?;
-        indices.extend_from_slice(&[side_index, next_index, apex_index]);
-        indices.extend_from_slice(&[base_center_index, next_index, side_index]);
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
 pub(crate) fn append_needle_puff(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
