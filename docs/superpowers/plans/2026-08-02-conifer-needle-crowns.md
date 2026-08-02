@@ -1067,11 +1067,13 @@ pub(crate) fn append_terminal_crown(
 
 Note: saplings use the `Simplified` tier, so they get 6–12 small puffs scaled down by their small `crown_radius` rather than the spec table's nominal 2–4 — the smaller envelope keeps them proportionate, and this avoids inventing a fourth `TreeMeshDetail` variant.
 
-6. Remove `append_conical_crown` from `crates/renderer/src/tree_mesh/shape.rs` (lines 103–146) and drop it from the `use shape::{...}` list in `mod.rs`:
+6. Remove `append_conical_crown` from `crates/renderer/src/tree_mesh/shape.rs` (lines 103–146). In `mod.rs`, update the top-level `use shape::{...}` list to the final form and delete the temporary `#[cfg(test)] use shape::append_needle_puff;` line left by Task 4:
 
 ```rust
 use shape::{CylinderSpec, append_needle_puff, append_octahedral_crown, append_tapered_cylinder};
 ```
+
+7. In `crates/renderer/src/tree_mesh/shape.rs`, remove the temporary `#[allow(dead_code)]` from `append_needle_puff` (it now has a real consumer in `append_needle_crown`). The `#[cfg(test)] use crate::vertex::SURFACE_KIND_NEEDLE_FOLIAGE;` line from Task 4 stays as-is — `append_needle_crown` does not reference the constant directly.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
