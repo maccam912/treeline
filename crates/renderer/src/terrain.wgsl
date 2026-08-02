@@ -445,7 +445,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         surface_roughness = sampled_arm.g;
     }
 
-    let is_bark = input.surface_kind > 1.5;
+    let is_bark = input.surface_kind > 1.5 && input.surface_kind < 4.0;
     if (is_bark) {
         let bark_layer = i32(clamp(input.surface_kind, 2.0, 3.0));
         let diffuse_sample = textureSampleGrad(
@@ -494,6 +494,48 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         visualized = diffuse_sample.rgb
             * individual_tint
             * mix(0.62, 1.0, surface_ambient_occlusion);
+    }
+
+    let is_needle = input.surface_kind > 3.5 && input.surface_kind < 4.5;
+    if (is_needle) {
+        let needle_diffuse = textureSampleGrad(
+            material_diffuse,
+            material_sampler,
+            input.material_uv,
+            4,
+            material_uv_dx,
+            material_uv_dy,
+        );
+        if (needle_diffuse.a < 0.35) {
+            discard;
+        }
+        let needle_normal_map = textureSampleGrad(
+            material_normal,
+            material_sampler,
+            input.material_uv,
+            4,
+            material_uv_dx,
+            material_uv_dy,
+        );
+        let needle_arm = textureSampleGrad(
+            material_arm,
+            material_sampler,
+            input.material_uv,
+            4,
+            material_uv_dx,
+            material_uv_dy,
+        );
+        let tangent_normal = needle_normal_map.xyz * 2.0 - 1.0;
+        normal = normalize(
+            bark_frame
+            * normalize(vec3<f32>(
+                tangent_normal.xy * 0.6,
+                max(tangent_normal.z, 0.1),
+            ))
+        );
+        surface_ambient_occlusion = needle_arm.r;
+        surface_roughness = needle_arm.g;
+        visualized = needle_diffuse.rgb * input.color.rgb;
     }
 
     // Dedicated hydrology sheets retain their generated ocean/lake/wetland
