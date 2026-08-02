@@ -15,7 +15,7 @@ use wasm_bindgen::closure::Closure;
 struct ButtonListener {
     event: &'static str,
     requested: Rc<Cell<bool>>,
-    _listener: Closure<dyn FnMut(web_sys::Event)>,
+    listener: Closure<dyn FnMut(web_sys::Event)>,
 }
 
 impl ButtonListener {
@@ -36,7 +36,7 @@ impl ButtonListener {
         Ok(Self {
             event,
             requested,
-            _listener: listener,
+            listener,
         })
     }
 
@@ -50,7 +50,7 @@ impl Drop for ButtonListener {
         if let Some(window) = web_sys::window() {
             let _ = window.remove_event_listener_with_callback(
                 self.event,
-                self._listener.as_ref().unchecked_ref(),
+                self.listener.as_ref().unchecked_ref(),
             );
         }
     }
