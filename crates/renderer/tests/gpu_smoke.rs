@@ -33,7 +33,14 @@ fn every_pipeline_builds_and_draws_a_stand_of_trees() {
     ))
     .expect("a device on an adapter that exists");
 
-    let renderer = TerrainRenderer::new(&device, &queue, TARGET_FORMAT, TARGET_EDGE, TARGET_EDGE);
+    let renderer = TerrainRenderer::new(
+        &device,
+        &queue,
+        TARGET_FORMAT,
+        TARGET_EDGE,
+        TARGET_EDGE,
+        true,
+    );
     let trees = stand();
     let mesh = renderer
         .upload_trees(&device, &trees, TreeMeshDetail::Full, |_, _| Some(10.0))

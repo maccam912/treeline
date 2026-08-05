@@ -27,7 +27,7 @@ pub(crate) struct TerrainBindings {
 impl TerrainBindings {
     pub(crate) fn new(
         device: &wgpu::Device,
-        shadow_map: &ShadowMap,
+        shadow_map: Option<&ShadowMap>,
         material_textures: &MaterialTextures,
     ) -> Self {
         let camera_uniform = CameraUniform {
@@ -59,26 +59,33 @@ impl TerrainBindings {
             &no_cutout,
             wgpu::BufferUsages::UNIFORM,
         );
+
+        // Materials live at bindings 4-7 always. Shadows, when the backend
+        // supports them, take bindings 8-11; on backends without shadow maps
+        // (WebGL2) those bindings and the shader that samples them are omitted
+        // entirely rather than bound to a texture that cannot exist.
+        let mut layout_entries = vec![
+            uniform_layout_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+            uniform_layout_entry(1, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+            // Wind reaches the vertex stage too: needle shells sway on it.
+            uniform_layout_entry(2, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+            uniform_layout_entry(3, wgpu::ShaderStages::FRAGMENT),
+            sampled_texture_array_layout_entry(4),
+            sampled_texture_array_layout_entry(5),
+            sampled_texture_array_layout_entry(6),
+            filtering_sampler_layout_entry(7),
+        ];
+        if shadow_map.is_some() {
+            layout_entries.extend([
+                depth_texture_layout_entry(8),
+                depth_texture_layout_entry(9),
+                depth_texture_layout_entry(10),
+                comparison_sampler_layout_entry(11),
+            ]);
+        }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera bind group layout"),
-            entries: &[
-                uniform_layout_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-                uniform_layout_entry(1, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-                // Wind reaches the vertex stage too: needle shells sway on it.
-                uniform_layout_entry(2, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-                uniform_layout_entry(3, wgpu::ShaderStages::FRAGMENT),
-                // One depth texture per cascade. WebGL2 has no depth array
-                // textures, so the cascades cannot share a single array the way
-                // they do on native backends; each stays its own 2D texture.
-                depth_texture_layout_entry(4),
-                depth_texture_layout_entry(5),
-                depth_texture_layout_entry(6),
-                comparison_sampler_layout_entry(7),
-                sampled_texture_array_layout_entry(8),
-                sampled_texture_array_layout_entry(9),
-                sampled_texture_array_layout_entry(10),
-                filtering_sampler_layout_entry(11),
-            ],
+            entries: &layout_entries,
         });
         let atmosphere = AtmosphereSettings::default();
         let atmosphere_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -144,7 +151,7 @@ pub(crate) struct TerrainBindGroupResources<'a> {
     pub(crate) cutout_buffer: &'a wgpu::Buffer,
     pub(crate) atmosphere_buffer: &'a wgpu::Buffer,
     pub(crate) lighting_buffer: &'a wgpu::Buffer,
-    pub(crate) shadow_map: &'a ShadowMap,
+    pub(crate) shadow_map: Option<&'a ShadowMap>,
     pub(crate) material_textures: &'a MaterialTextures,
 }
 
@@ -154,62 +161,63 @@ pub(crate) fn terrain_bind_group(
     resources: TerrainBindGroupResources<'_>,
     label: &str,
 ) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: resources.camera_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: resources.cutout_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: resources.atmosphere_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: resources.lighting_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.layer_views[0]),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.layer_views[1]),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.layer_views[2]),
-            },
-            wgpu::BindGroupEntry {
-                binding: 7,
-                resource: wgpu::BindingResource::Sampler(&resources.shadow_map.sampler),
-            },
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: resources.camera_buffer.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: resources.cutout_buffer.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: resources.atmosphere_buffer.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 3,
+            resource: resources.lighting_buffer.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::TextureView(&resources.material_textures.diffuse_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 5,
+            resource: wgpu::BindingResource::TextureView(&resources.material_textures.normal_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 6,
+            resource: wgpu::BindingResource::TextureView(&resources.material_textures.arm_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 7,
+            resource: wgpu::BindingResource::Sampler(&resources.material_textures.sampler),
+        },
+    ];
+    if let Some(shadow_map) = resources.shadow_map {
+        entries.extend([
             wgpu::BindGroupEntry {
                 binding: 8,
-                resource: wgpu::BindingResource::TextureView(
-                    &resources.material_textures.diffuse_view,
-                ),
+                resource: wgpu::BindingResource::TextureView(&shadow_map.layer_views[0]),
             },
             wgpu::BindGroupEntry {
                 binding: 9,
-                resource: wgpu::BindingResource::TextureView(
-                    &resources.material_textures.normal_view,
-                ),
+                resource: wgpu::BindingResource::TextureView(&shadow_map.layer_views[1]),
             },
             wgpu::BindGroupEntry {
                 binding: 10,
-                resource: wgpu::BindingResource::TextureView(&resources.material_textures.arm_view),
+                resource: wgpu::BindingResource::TextureView(&shadow_map.layer_views[2]),
             },
             wgpu::BindGroupEntry {
                 binding: 11,
-                resource: wgpu::BindingResource::Sampler(&resources.material_textures.sampler),
+                resource: wgpu::BindingResource::Sampler(&shadow_map.sampler),
             },
-        ],
+        ]);
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &entries,
     })
 }

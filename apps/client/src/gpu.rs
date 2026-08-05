@@ -14,6 +14,8 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub surface_config: wgpu::SurfaceConfiguration,
+    /// Whether the adapter can render the shadow maps.
+    pub shadows_enabled: bool,
 }
 
 impl Gpu {
@@ -48,6 +50,9 @@ impl Gpu {
 
         let size = window.inner_size();
         let capabilities = surface.get_capabilities(&adapter);
+        // WebGL2 cannot represent the renderer's shadow depth textures, so the
+        // browser build turns shadows off and lights everything with the sun.
+        let shadows_enabled = adapter.get_info().backend != wgpu::Backend::Gl;
         // An sRGB surface lets the hardware do the final color conversion, so
         // shading stays linear all the way through.
         let format = capabilities
@@ -74,6 +79,7 @@ impl Gpu {
             device,
             queue,
             surface_config,
+            shadows_enabled,
         })
     }
 }

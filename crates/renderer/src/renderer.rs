@@ -37,16 +37,16 @@ use crate::{RendererError, TreeMeshDetail};
 pub struct TerrainRenderer {
     world: WorldPipelines,
     sky_pipeline: wgpu::RenderPipeline,
-    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: Option<wgpu::RenderPipeline>,
     camera_buffer: wgpu::Buffer,
     far_bind_group: wgpu::BindGroup,
     near_bind_group: wgpu::BindGroup,
     far_cutout_buffer: wgpu::Buffer,
     atmosphere_buffer: wgpu::Buffer,
     lighting_buffer: wgpu::Buffer,
-    shadow_map: ShadowMap,
-    shadow_camera_buffers: [wgpu::Buffer; SHADOW_CASCADE_COUNT],
-    shadow_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT],
+    shadow_map: Option<ShadowMap>,
+    shadow_camera_buffers: Option<[wgpu::Buffer; SHADOW_CASCADE_COUNT]>,
+    shadow_bind_groups: Option<[wgpu::BindGroup; SHADOW_CASCADE_COUNT]>,
     _material_textures: MaterialTextures,
     water_animation_seconds: f64,
     depth: DepthTarget,
@@ -54,26 +54,46 @@ pub struct TerrainRenderer {
 
 impl TerrainRenderer {
     /// Creates the shared lit terrain pipeline and camera/depth resources.
+    ///
+    /// When `shadows` is false, no shadow map, shadow pipeline, or shadow
+    /// bindings are created and every surface is lit as fully visible to the
+    /// sun. Backends without depth texture support (WebGL2) pass false so the
+    /// pipeline compiles at all.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        shadows: bool,
     ) -> Self {
-        let shadow_map = ShadowMap::new(device);
         let material_textures = MaterialTextures::new(device, queue);
-        let bindings = TerrainBindings::new(device, &shadow_map, &material_textures);
-        let shadow_bindings = ShadowBindings::new(device);
+        let shadow_map = shadows.then(|| ShadowMap::new(device));
+        let bindings = TerrainBindings::new(device, shadow_map.as_ref(), &material_textures);
+        let (shadow_bind_groups, shadow_camera_buffers, shadow_pipeline) = if shadows {
+            let shadow_bindings = ShadowBindings::new(device);
+            let shadow_pipeline = create_shadow_pipeline(device, &shadow_bindings.layout);
+            (
+                Some(shadow_bindings.bind_groups),
+                Some(shadow_bindings.camera_buffers),
+                Some(shadow_pipeline),
+            )
+        } else {
+            (None, None, None)
+        };
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain pipeline layout"),
             bind_group_layouts: &[&bindings.layout],
             push_constant_ranges: &[],
         });
-        let world = create_world_pipelines(device, &pipeline_layout, surface_format);
+        let world = create_world_pipelines(
+            device,
+            &pipeline_layout,
+            surface_format,
+            shadow_map.is_some(),
+        );
         let sky_pipeline = create_sky_pipeline(device, &pipeline_layout, surface_format);
-        let shadow_pipeline = create_shadow_pipeline(device, &shadow_bindings.layout);
 
         Self {
             world,
@@ -86,8 +106,8 @@ impl TerrainRenderer {
             atmosphere_buffer: bindings.atmosphere_buffer,
             lighting_buffer: bindings.lighting_buffer,
             shadow_map,
-            shadow_camera_buffers: shadow_bindings.camera_buffers,
-            shadow_bind_groups: shadow_bindings.bind_groups,
+            shadow_camera_buffers,
+            shadow_bind_groups,
             _material_textures: material_textures,
             water_animation_seconds: 0.0,
             depth: DepthTarget::new(device, width, height),
@@ -293,26 +313,28 @@ impl TerrainRenderer {
         );
         let lighting = lighting_uniform(lighting, render_origin, view_direction);
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&lighting));
-        for (cascade, buffer) in self.shadow_camera_buffers.iter().enumerate() {
-            queue.write_buffer(
-                buffer,
-                0,
-                bytemuck::bytes_of(&ShadowCameraUniform {
-                    view_projection: lighting.shadow_view_projection[cascade],
-                    render_origin_high: [
-                        render_origin_high[0],
-                        render_origin_high[1],
-                        render_origin_high[2],
-                        0.0,
-                    ],
-                    render_origin_low: [
-                        render_origin_low[0],
-                        render_origin_low[1],
-                        render_origin_low[2],
-                        0.0,
-                    ],
-                }),
-            );
+        if let Some(shadow_camera_buffers) = &self.shadow_camera_buffers {
+            for (cascade, buffer) in shadow_camera_buffers.iter().enumerate() {
+                queue.write_buffer(
+                    buffer,
+                    0,
+                    bytemuck::bytes_of(&ShadowCameraUniform {
+                        view_projection: lighting.shadow_view_projection[cascade],
+                        render_origin_high: [
+                            render_origin_high[0],
+                            render_origin_high[1],
+                            render_origin_high[2],
+                            0.0,
+                        ],
+                        render_origin_low: [
+                            render_origin_low[0],
+                            render_origin_low[1],
+                            render_origin_low[2],
+                            0.0,
+                        ],
+                    }),
+                );
+            }
         }
     }
 
@@ -370,24 +392,30 @@ impl TerrainRenderer {
         let far_meshes = far_meshes.into_iter().collect::<Vec<_>>();
         let near_meshes = near_meshes.into_iter().collect::<Vec<_>>();
 
-        for cascade in 0..SHADOW_CASCADE_COUNT {
-            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("sun shadow cascade pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_map.layer_views[cascade],
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+        if let (Some(shadow_map), Some(shadow_pipeline), Some(shadow_bind_groups)) = (
+            &self.shadow_map,
+            &self.shadow_pipeline,
+            &self.shadow_bind_groups,
+        ) {
+            for (cascade, bind_group) in shadow_bind_groups.iter().enumerate() {
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("sun shadow cascade pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &shadow_map.layer_views[cascade],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            shadow_pass.set_pipeline(&self.shadow_pipeline);
-            shadow_pass.set_bind_group(0, &self.shadow_bind_groups[cascade], &[]);
-            draw_meshes(&mut shadow_pass, shadow_meshes, TerrainMesh::shadow_indices);
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                shadow_pass.set_pipeline(shadow_pipeline);
+                shadow_pass.set_bind_group(0, bind_group, &[]);
+                draw_meshes(&mut shadow_pass, shadow_meshes, TerrainMesh::shadow_indices);
+            }
         }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

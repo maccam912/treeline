@@ -76,6 +76,7 @@ impl Game {
             gpu.surface_config.format,
             gpu.surface_config.width,
             gpu.surface_config.height,
+            gpu.shadows_enabled,
         );
         if let Some(settings) = atmosphere::settings_for(terrain.climate()) {
             renderer.update_atmosphere(&gpu.queue, settings);

@@ -58,6 +58,7 @@ impl Lab {
             surface_config.format,
             surface_config.width,
             surface_config.height,
+            true,
         );
         let egui = ui::Egui::new(&window, &device, surface_config.format);
         let terrain = WorldTerrain::new(DEFAULT_WORLD_IDENTITY);

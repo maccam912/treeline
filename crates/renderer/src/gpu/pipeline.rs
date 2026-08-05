@@ -18,6 +18,8 @@ pub(crate) const FAR_GROUND_SHADER: &str = include_str!("../shader/far_ground.wg
 pub(crate) const FOLIAGE_SHADER: &str = include_str!("../shader/foliage.wgsl");
 pub(crate) const SHADOW_SHADER: &str = include_str!("../shader/shadow.wgsl");
 pub(crate) const SKY_SHADER: &str = include_str!("../shader/sky.wgsl");
+pub(crate) const SHADOWS_ENABLED: &str = include_str!("../shader/shadows_enabled.wgsl");
+pub(crate) const SHADOWS_DISABLED: &str = include_str!("../shader/shadows_disabled.wgsl");
 
 /// The three pipelines a frame draws the world with.
 ///
@@ -38,16 +40,24 @@ pub(crate) fn create_world_pipelines(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     surface_format: wgpu::TextureFormat,
+    shadows: bool,
 ) -> WorldPipelines {
+    let shadow_stage = if shadows {
+        SHADOWS_ENABLED
+    } else {
+        SHADOWS_DISABLED
+    };
     let ground = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("ground shader"),
         source: wgpu::ShaderSource::Wgsl(
-            format!("{SCENE_SHADER}\n{GROUND_SHADER}\n{FAR_GROUND_SHADER}").into(),
+            format!("{SCENE_SHADER}\n{shadow_stage}\n{GROUND_SHADER}\n{FAR_GROUND_SHADER}").into(),
         ),
     });
     let foliage = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("foliage shader"),
-        source: wgpu::ShaderSource::Wgsl(format!("{SCENE_SHADER}\n{FOLIAGE_SHADER}").into()),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{SCENE_SHADER}\n{shadow_stage}\n{FOLIAGE_SHADER}").into(),
+        ),
     });
     WorldPipelines {
         far_ground: create_surface_pipeline(
