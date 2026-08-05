@@ -3,15 +3,17 @@
 //! Four material layers share one array texture: ground, rock, and two barks.
 //! Mip levels are generated on the CPU at load, which keeps the renderer free
 //! of a compute pass purely for downsampling.
+//!
+//! Conifer foliage is not here. Needles are finer than any map this size could
+//! hold at the distance a crown is looked at, so they are grown in the shader
+//! out of the shells they stand on instead.
 
 use image::ImageFormat;
 use image::RgbaImage;
 use image::imageops::{FilterType, resize};
 
-use crate::needle_texture::generate_needle_maps;
-
 pub(crate) const MATERIAL_TEXTURE_EDGE: u32 = 512;
-pub(crate) const MATERIAL_TEXTURE_LAYER_COUNT: u32 = 5;
+pub(crate) const MATERIAL_TEXTURE_LAYER_COUNT: u32 = 4;
 pub(crate) const MATERIAL_TEXTURE_MIP_COUNT: u32 = 10;
 
 pub(crate) const FOREST_FLOOR_DIFFUSE: &[u8] =
@@ -76,17 +78,9 @@ pub(crate) struct MaterialTextures {
 
 impl MaterialTextures {
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let needle = generate_needle_maps();
-        let diffuse_layers = material_layers(
-            EMBEDDED_MATERIALS.map(|material| material.diffuse),
-            needle.diffuse,
-        );
-        let normal_layers = material_layers(
-            EMBEDDED_MATERIALS.map(|material| material.normal),
-            needle.normal,
-        );
-        let arm_layers =
-            material_layers(EMBEDDED_MATERIALS.map(|material| material.arm), needle.arm);
+        let diffuse_layers = material_layers(EMBEDDED_MATERIALS.map(|material| material.diffuse));
+        let normal_layers = material_layers(EMBEDDED_MATERIALS.map(|material| material.normal));
+        let arm_layers = material_layers(EMBEDDED_MATERIALS.map(|material| material.arm));
         let diffuse_texture = create_material_texture(
             device,
             "Poly Haven material diffuse array",
@@ -138,9 +132,9 @@ impl MaterialTextures {
     }
 }
 
-/// Decodes the four embedded scans and appends the generated needle layer.
-fn material_layers(embedded: [&[u8]; 4], generated: RgbaImage) -> Vec<RgbaImage> {
-    let mut layers = embedded
+/// Decodes the four embedded scans.
+fn material_layers(embedded: [&[u8]; 4]) -> Vec<RgbaImage> {
+    embedded
         .map(|encoded| {
             let decoded = image::load_from_memory_with_format(encoded, ImageFormat::Jpeg)
                 .expect("embedded Poly Haven material JPEG must decode")
@@ -152,9 +146,7 @@ fn material_layers(embedded: [&[u8]; 4], generated: RgbaImage) -> Vec<RgbaImage>
             );
             decoded
         })
-        .to_vec();
-    layers.push(generated);
-    layers
+        .to_vec()
 }
 
 pub(crate) fn create_material_texture(
@@ -249,7 +241,7 @@ mod tests {
     fn the_array_texture_has_one_layer_per_material() {
         assert_eq!(
             usize::try_from(MATERIAL_TEXTURE_LAYER_COUNT).expect("layer count fits usize"),
-            EMBEDDED_MATERIALS.len() + 1
+            EMBEDDED_MATERIALS.len()
         );
     }
 }

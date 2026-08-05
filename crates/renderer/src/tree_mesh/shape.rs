@@ -1,16 +1,17 @@
 //! The primitive solids tree geometry is assembled from.
 //!
-//! Trunks and branches are tapered cylinders; crowns are cones or octahedra
-//! depending on species. Keeping them here lets the tree grammar read as
-//! structure rather than vertex arithmetic.
+//! Trunks and branches are tapered cylinders; broadleaf crowns are octahedra.
+//! Keeping them here lets the tree grammar read as structure rather than vertex
+//! arithmetic. Conifer foliage is not here at all: it is shelled, and lives in
+//! [`crate::tree_mesh::cluster`].
 
 use glam::Vec3;
 
 use crate::RendererError;
 use crate::tree_mesh::color::CylinderMaterial;
+use crate::tree_mesh::geometry::TreeGeometry;
 use crate::vertex::{
-    SURFACE_KIND_NEEDLE_FOLIAGE, SURFACE_KIND_OAK_BARK, SURFACE_KIND_PINE_BARK, TerrainVertex,
-    local_vertex, material_vertex, usize_as_f32,
+    SURFACE_KIND_OAK_BARK, SURFACE_KIND_PINE_BARK, local_vertex, material_vertex, usize_as_f32,
 };
 
 pub(crate) struct CylinderSpec {
@@ -24,10 +25,11 @@ pub(crate) struct CylinderSpec {
 }
 
 pub(crate) fn append_tapered_cylinder(
-    vertices: &mut Vec<TerrainVertex>,
-    indices: &mut Vec<u32>,
+    geometry: &mut TreeGeometry,
     spec: &CylinderSpec,
 ) -> Result<(), RendererError> {
+    let vertices = &mut geometry.vertices;
+    let indices = &mut geometry.indices;
     let axis = (spec.end - spec.start).normalize_or_zero();
     if axis == Vec3::ZERO {
         return Ok(());
@@ -100,61 +102,14 @@ pub(crate) fn append_tapered_cylinder(
     Ok(())
 }
 
-pub(crate) fn append_needle_puff(
-    vertices: &mut Vec<TerrainVertex>,
-    indices: &mut Vec<u32>,
-    center: Vec3,
-    half_extent: f32,
-    planes: usize,
-    rotation_radians: f32,
-    color: [f32; 4],
-) -> Result<(), RendererError> {
-    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
-    for plane in 0..planes {
-        let angle =
-            rotation_radians + usize_as_f32(plane) / usize_as_f32(planes) * std::f32::consts::PI;
-        let normal = Vec3::new(libm::cosf(angle), 0.0, libm::sinf(angle));
-        let width = normal.cross(Vec3::Y);
-        let corner = |sign_x: f32, sign_y: f32| {
-            center + (width * (sign_x * half_extent)) + (Vec3::Y * (sign_y * half_extent))
-        };
-        let corners = [
-            corner(-1.0, 1.0),
-            corner(1.0, 1.0),
-            corner(1.0, -1.0),
-            corner(-1.0, -1.0),
-        ];
-        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        for (corner, uv) in corners.into_iter().zip(uvs) {
-            vertices.push(material_vertex(
-                corner,
-                normal,
-                color,
-                SURFACE_KIND_NEEDLE_FOLIAGE,
-                uv,
-            ));
-        }
-        let plane_base =
-            base_index + u32::try_from(plane * 4).map_err(|_| RendererError::TooManyIndices)?;
-        indices.extend_from_slice(&[
-            plane_base,
-            plane_base + 1,
-            plane_base + 2,
-            plane_base,
-            plane_base + 2,
-            plane_base + 3,
-        ]);
-    }
-    Ok(())
-}
-
 pub(crate) fn append_octahedral_crown(
-    vertices: &mut Vec<TerrainVertex>,
-    indices: &mut Vec<u32>,
+    geometry: &mut TreeGeometry,
     center: Vec3,
     radius: Vec3,
     color: [f32; 4],
 ) -> Result<(), RendererError> {
+    let vertices = &mut geometry.vertices;
+    let indices = &mut geometry.indices;
     let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
     let offsets = [
         Vec3::Y * radius.y,

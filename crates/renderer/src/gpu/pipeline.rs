@@ -1,33 +1,104 @@
-//! Render pipelines: lit terrain, the sky backdrop, and shadow depth passes.
+//! Render pipelines: lit ground, foliage, the sky backdrop, and shadow depth.
+//!
+//! Terrain, water, trunks, and foliage are still one vertex format and one bind
+//! group — they are different surface kinds, not different materials. What they
+//! no longer share is a fragment shader. Each world pipeline is [`SCENE_SHADER`]
+//! with one entry point appended to it, so a surface kind is compiled on its
+//! own: it costs the registers its own path needs, and it gives up an early
+//! depth test only if it is a kind that discards.
 
 use crate::gpu::DEPTH_FORMAT;
 use crate::vertex::TerrainVertex;
 
-pub(crate) const TERRAIN_SHADER: &str = include_str!("../terrain.wgsl");
-pub(crate) const SHADOW_SHADER: &str = include_str!("../shadow.wgsl");
-pub(crate) const SKY_SHADER: &str = include_str!("../sky.wgsl");
+/// Uniforms, the shared vertex shader, and the light and air every surface is
+/// drawn through. Never compiled alone: an entry point is appended to it.
+pub(crate) const SCENE_SHADER: &str = include_str!("../shader/scene.wgsl");
+pub(crate) const GROUND_SHADER: &str = include_str!("../shader/ground.wgsl");
+pub(crate) const FAR_GROUND_SHADER: &str = include_str!("../shader/far_ground.wgsl");
+pub(crate) const FOLIAGE_SHADER: &str = include_str!("../shader/foliage.wgsl");
+pub(crate) const SHADOW_SHADER: &str = include_str!("../shader/shadow.wgsl");
+pub(crate) const SKY_SHADER: &str = include_str!("../shader/sky.wgsl");
 
-pub(crate) fn create_terrain_pipeline(
+/// The three pipelines a frame draws the world with.
+///
+/// They differ only in their fragment entry point. Splitting them is what lets
+/// the near tier — most of the pixels in a forest — keep the early depth test
+/// that the foliage cutout and the far tier's cutout each have to give up.
+#[derive(Debug)]
+pub(crate) struct WorldPipelines {
+    /// Coarse terrain, cut away where the near tier covers it.
+    pub(crate) far_ground: wgpu::RenderPipeline,
+    /// Near terrain, water, and bark. Opaque throughout, and never discards.
+    pub(crate) near_ground: wgpu::RenderPipeline,
+    /// Conifer needle shells, which cut their own silhouette per fragment.
+    pub(crate) foliage: wgpu::RenderPipeline,
+}
+
+pub(crate) fn create_world_pipelines(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     surface_format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("terrain shader"),
-        source: wgpu::ShaderSource::Wgsl(TERRAIN_SHADER.into()),
+) -> WorldPipelines {
+    let ground = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("ground shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{SCENE_SHADER}\n{GROUND_SHADER}\n{FAR_GROUND_SHADER}").into(),
+        ),
     });
+    let foliage = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("foliage shader"),
+        source: wgpu::ShaderSource::Wgsl(format!("{SCENE_SHADER}\n{FOLIAGE_SHADER}").into()),
+    });
+    WorldPipelines {
+        far_ground: create_surface_pipeline(
+            device,
+            layout,
+            surface_format,
+            "far ground pipeline",
+            &ground,
+            "fs_far_ground",
+        ),
+        near_ground: create_surface_pipeline(
+            device,
+            layout,
+            surface_format,
+            "near ground pipeline",
+            &ground,
+            "fs_ground",
+        ),
+        foliage: create_surface_pipeline(
+            device,
+            layout,
+            surface_format,
+            "foliage pipeline",
+            &foliage,
+            "fs_foliage",
+        ),
+    }
+}
+
+/// One world pipeline: the shared vertex shader, one fragment entry point, and
+/// the reverse-Z depth state every opaque surface in the frame agrees on.
+fn create_surface_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    surface_format: wgpu::TextureFormat,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    fragment_entry: &str,
+) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("terrain pipeline"),
+        label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[TerrainVertex::layout()],
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
+            module,
+            entry_point: Some(fragment_entry),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
@@ -139,4 +210,112 @@ pub(crate) fn create_shadow_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vertex::SURFACE_KIND_NEEDLE_FOLIAGE;
+
+    /// Surface kinds are agreed on across a language boundary: foliage vertices
+    /// are tagged in Rust and recognized in WGSL, and nothing but this catches
+    /// the two drifting apart.
+    #[test]
+    fn the_shader_tests_the_surface_kind_foliage_is_tagged_with() {
+        assert!(
+            FOLIAGE_SHADER.contains(&format!(
+                "const FOLIAGE_SURFACE_KIND: f32 = {SURFACE_KIND_NEEDLE_FOLIAGE:.1};"
+            )),
+            "the foliage shader no longer declares surface kind {SURFACE_KIND_NEEDLE_FOLIAGE}"
+        );
+    }
+
+    /// A fragment shader that can discard cannot be depth-tested before it
+    /// runs, so a discard anywhere in the near tier's shader is paid for by
+    /// every hillside a forest stands in front of.
+    ///
+    /// Two discards earn their place, and each is quarantined in the pipeline
+    /// that needs it. The far tier's cutout is one; it is drawn first, into a
+    /// depth buffer holding nothing but sky, so it has no early rejection to
+    /// lose. The other bites the gaps between needles out of a crown's rim.
+    /// Anything else means a surface kind has gone back to alpha testing — or,
+    /// worse, has dragged the ground back down with it.
+    ///
+    /// Statements are counted, not the word: prose about discarding is fine.
+    #[test]
+    fn only_the_shaders_that_cut_holes_in_themselves_discard() {
+        for (name, source) in [("scene", SCENE_SHADER), ("ground", GROUND_SHADER)] {
+            assert_eq!(
+                source.matches("discard;").count(),
+                0,
+                "the {name} shader discards, costing every opaque surface its early depth test"
+            );
+        }
+        for (name, source) in [
+            ("far ground", FAR_GROUND_SHADER),
+            ("foliage", FOLIAGE_SHADER),
+        ] {
+            assert_eq!(
+                source.matches("discard;").count(),
+                1,
+                "the {name} shader no longer cuts itself out the way its pipeline assumes"
+            );
+        }
+    }
+
+    /// The foliage shader looks at four cells for the strand nearest a
+    /// fragment where a cellular noise would normally need nine, and that is
+    /// exact rather than approximate only while two numbers agree.
+    ///
+    /// A strand held to the middle of its cell stands some clearance away from
+    /// anything outside the four; a strand narrower than that clearance cannot
+    /// have covered the fragment from out there, so not finding it costs
+    /// nothing. Widen a needle past the clearance, or loosen the jitter that
+    /// buys it, and crowns pick up seams where a strand went unseen.
+    ///
+    /// This search runs once per foliage fragment on the surface that covers
+    /// more of a forest than any other, so the constants are worth pinning.
+    #[test]
+    fn a_needle_stays_narrow_enough_for_the_four_cell_strand_search() {
+        let root = shader_constant(FOLIAGE_SHADER, "NEEDLE_ROOT");
+        let origin = shader_constant(FOLIAGE_SHADER, "NEEDLE_JITTER_ORIGIN");
+        let span = shader_constant(FOLIAGE_SHADER, "NEEDLE_JITTER_SPAN");
+        let clearance = (1.5 - origin - span).min(0.5 + origin);
+        assert!(
+            root < clearance,
+            "a needle {root} wide outruns the {clearance} the four-cell search can see"
+        );
+    }
+
+    /// One `const` declaration from a shader, so a test can hold the WGSL to an
+    /// arithmetic invariant rather than to the text of one.
+    fn shader_constant(source: &str, name: &str) -> f32 {
+        let (_, tail) = source
+            .split_once(&format!("const {name}: f32 = "))
+            .unwrap_or_else(|| panic!("the shader no longer declares {name}"));
+        let (value, _) = tail
+            .split_once(';')
+            .unwrap_or_else(|| panic!("{name} is declared without a value"));
+        value
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} is not a plain literal"))
+    }
+
+    /// The scene half declares the bindings and the vertex stage; an entry
+    /// point half supplies only a fragment stage. Neither is a shader alone,
+    /// and a stage drifting into the wrong half would compile here and fail at
+    /// pipeline creation on a machine, not in the gate.
+    #[test]
+    fn every_world_pipeline_is_the_scene_plus_one_fragment_entry_point() {
+        assert!(SCENE_SHADER.contains("@vertex"));
+        for source in [GROUND_SHADER, FAR_GROUND_SHADER, FOLIAGE_SHADER] {
+            assert!(!source.contains("@vertex"));
+            assert!(!source.contains("@group("));
+        }
+        assert_eq!(SCENE_SHADER.matches("@fragment").count(), 0);
+        assert_eq!(GROUND_SHADER.matches("@fragment").count(), 1);
+        assert_eq!(FAR_GROUND_SHADER.matches("@fragment").count(), 1);
+        assert_eq!(FOLIAGE_SHADER.matches("@fragment").count(), 1);
+    }
 }

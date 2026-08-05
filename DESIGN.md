@@ -129,8 +129,68 @@ So:
   open.
 
 Trees are individuals, never a canopy texture. Distant tiers shed branches and
-then crown clusters, but never merge trees into a surface — a forest read as a
+then thin the crown, but never merge trees into a surface — a forest read as a
 green blanket is exactly what this system exists to avoid.
+
+A conifer crown is built the way a conifer is: whorls of branches up the trunk,
+each ring shorter and drooping further than the one above it, and along the
+outer half of every branch a bunch of shoot clusters — closer to a bunch of
+grapes than to a cone. One cluster is one ball of needles, and a crown is a few
+hundred of them overlapping. The silhouette is then broken at the scale a real
+crown is broken at, about one shoot across, because that is the scale the
+geometry is built at.
+
+Foliage this small is grown, not modeled. A ball is drawn as a few nested
+shells: a small solid core for the woody shoot, and outside it the shells the
+needles growing off that shoot stand on. The shader carves the needles out of
+those shells, keeping only what lies close to the axis of a procedural strand
+and discarding the rest — thick against the shoot, thinning to sparse points at
+the tips. Stacked, the shells give a shoot real depth, and the silhouette a
+crown ends on is the needles themselves running out rather than a drawn edge.
+
+The strands are laid out by the direction a fragment faces, not by where it sits.
+That is the one thing about a ball that survives being pushed outward: every
+shell along one ray faces the same way, so a strand stays put through the whole
+stack and reads as one needle instead of a stack of flakes. A shoot's own key
+slides it through the field, since two balls seen from one place present the
+same directions and would otherwise wear the same needles. A vertex still takes
+its *undeformed* outward direction as its normal, so an eight-triangle shell
+shades as a round mass rather than a facet.
+
+Because the strands hold still through the stack, the shells are nested tubes
+rather than independent layers: a gap between needles is a gap all the way in.
+That is what a shoot actually looks like, and it is what the depth shading is
+for — deep is dark, the tips are lit, and a backlit crown glows through its
+outermost needles rather than silhouetting. Needle tips stir in the wind; where
+they are sampled does not move, so a crown stirs without its needles swimming.
+
+The shells are opaque, and that is a deliberate reversal. Foliage drawn as
+alpha-tested billboards shades a forest's every pixel several times over and
+then throws most of the work away; an opaque crown occludes, writes depth once,
+and costs about five thousand triangles for a whole tree. The cut still stops
+once a strand falls under a pixel: past that a dense shell goes solid and a
+sparse one is dropped whole, which is the trade a mip makes.
+
+Cutting needles per fragment costs foliage its early depth test, and foliage
+alone: it is drawn by its own pipeline, from its own half of a stand's indices,
+after every solid thing in the frame has written depth. While one shader drew
+every surface, that one discard spent the early test on terrain, water, and bark
+as well — a forest shaded the hillside behind it in full and then threw it away
+— and held the crown, which touches no texture, to the register budget of the
+triplanar rock path. Splitting them is why the ground and the sky the trees
+stand against are cheap again.
+
+Shells multiply both geometry and overdraw, so the near tier spends its budget
+on depth within a shoot rather than on more shoots — fewer, larger balls than a
+crown of solids needed, with needles filling the space the extra balls faked.
+The shell count is the first thing distance takes away. The sun never sees more
+than one of them: a ball's outermost shell encloses the rest, so the cascades
+draw the hulls and stop.
+
+What was here before was one solid ball per shoot wearing a tileable mat of
+needles sampled from world space. It was cheaper, and correct in outline, but a
+mat is still paint on a surface: it could not be seen into, it had no depth to
+shade, and the outline it gave had to be bitten out of the rim by hand.
 
 ---
 
@@ -265,9 +325,11 @@ end, and say what remains when it does not.
       1:1 horizontal and vertical scale.
 - [x] **Measured forest.** Tree individuals sized and placed from lidar stand
       structure, with procedural species and architecture.
-- [x] **Rendering.** One pipeline for terrain, water, trees, and sky. Scanned PBR
-      materials, cascaded sun shadows, daylight states, seasonal snow, and
-      camera-relative double-precision positions.
+- [x] **Rendering.** One vertex format and one bind group for terrain, water,
+      trees, and sky, drawn by a pipeline per surface kind so that only the kind
+      that cuts holes in itself pays for doing so. Scanned PBR materials,
+      cascaded sun shadows, daylight states, seasonal snow, and camera-relative
+      double-precision positions.
 - [x] **Browser client.** The same world in a browser, with terrain generation on
       Web Workers.
 - [x] **Inspection.** Generator Lab draws any layer as a map and reports every

@@ -2069,6 +2069,7 @@ dependencies = [
  "glam",
  "image",
  "libm",
+ "pollster",
  "treeline-ecology",
  "treeline-mesher",
  "wgpu",

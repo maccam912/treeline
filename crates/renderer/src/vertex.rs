@@ -15,6 +15,8 @@ pub(crate) const SURFACE_KIND_SOLID: f32 = 0.0;
 pub(crate) const SURFACE_KIND_WATER: f32 = 1.0;
 pub(crate) const SURFACE_KIND_PINE_BARK: f32 = 2.0;
 pub(crate) const SURFACE_KIND_OAK_BARK: f32 = 3.0;
+/// Conifer foliage: shaded as a mass of needles rather than a lit surface, and
+/// grown procedurally out of the shell a vertex sits on rather than textured.
 pub(crate) const SURFACE_KIND_NEEDLE_FOLIAGE: f32 = 4.0;
 
 #[repr(C)]
@@ -27,10 +29,12 @@ pub(crate) struct TerrainVertex {
     pub(crate) position_low: [f32; 3],
     pub(crate) surface_kind: f32,
     pub(crate) material_uv: [f32; 2],
+    pub(crate) needle_depth: f32,
+    pub(crate) needle_seed: f32,
 }
 
 impl TerrainVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x4,
@@ -38,6 +42,8 @@ impl TerrainVertex {
         4 => Float32x3,
         5 => Float32,
         6 => Float32x2,
+        7 => Float32,
+        8 => Float32,
     ];
 
     pub(crate) fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -64,6 +70,8 @@ pub(crate) fn terrain_vertex(
         position_low,
         surface_kind: SURFACE_KIND_SOLID,
         material_uv: [0.0; 2],
+        needle_depth: 0.0,
+        needle_seed: 0.0,
     }
 }
 
@@ -115,6 +123,44 @@ pub(crate) fn material_vertex(
     vertex
 }
 
+/// One vertex of conifer foliage.
+///
+/// `exposure` runs from 0 deep in the crown's shade to 1 at a sunlit branch
+/// tip, and `height` runs up the crown. Foliage grows its needles procedurally
+/// rather than sampling a map, so the pair rides in the material UV instead of
+/// competing with it: a crown's shading is its own geometry, not a painted map.
+///
+/// `needle_depth` is which shell of a shoot the vertex belongs to, from 0 on
+/// the solid core out to 1 at the needle tips. It is the one thing the shader
+/// cannot work out for itself, because a fragment knows the direction it faces
+/// but not how far out along that direction its own shell was pushed.
+///
+/// `needle_seed` is which shoot it belongs to, in `[0, 1)`. Needles are laid out
+/// by the direction a fragment faces, since that is the only thing about a ball
+/// that holds still from one shell to the next — but two balls seen from one
+/// place present the same directions, so without a key per shoot every shoot in
+/// a crown would wear one needle pattern.
+pub(crate) fn foliage_vertex(
+    position: Vec3,
+    normal: Vec3,
+    color: [f32; 4],
+    exposure: f32,
+    height: f32,
+    needle_depth: f32,
+    needle_seed: f32,
+) -> TerrainVertex {
+    let mut vertex = material_vertex(
+        position,
+        normal,
+        color,
+        SURFACE_KIND_NEEDLE_FOLIAGE,
+        [exposure, height],
+    );
+    vertex.needle_depth = needle_depth;
+    vertex.needle_seed = needle_seed;
+    vertex
+}
+
 pub(crate) fn split_position(position: [f64; 3]) -> ([f32; 3], [f32; 3]) {
     let split = position.map(split_f64);
     (
@@ -130,20 +176,58 @@ pub(crate) fn split_f64(value: f64) -> [f32; 2] {
 
 pub(crate) fn translate_local_vertices(vertices: &mut [TerrainVertex], origin: [f64; 3]) {
     for vertex in vertices {
-        let local: [f64; 3] = std::array::from_fn(|axis| {
-            f64::from(vertex.position_high[axis]) + f64::from(vertex.position_low[axis])
-        });
         let (position_high, position_low) =
-            split_position(std::array::from_fn(|axis| origin[axis] + local[axis]));
+            translated_split(vertex.position_high, vertex.position_low, origin);
         vertex.position_high = position_high;
         vertex.position_low = position_low;
     }
+}
+
+/// Moves one split position by `origin`, resplitting it around the new value.
+pub(crate) fn translated_split(
+    position_high: [f32; 3],
+    position_low: [f32; 3],
+    origin: [f64; 3],
+) -> ([f32; 3], [f32; 3]) {
+    split_position(std::array::from_fn(|axis| {
+        origin[axis] + f64::from(position_high[axis]) + f64::from(position_low[axis])
+    }))
 }
 
 pub(crate) fn hash_lane(key: u64, lane: usize) -> f32 {
     let lane = u32::try_from(lane % 8).expect("hash lane is bounded");
     let byte = u8::try_from((key >> (lane * 8)) & 0xff).expect("masked hash lane fits u8");
     f32::from(byte) / 255.0
+}
+
+/// A value in `[0, 1)` for one identity and one lane.
+///
+/// [`hash_lane`] reads one of a key's eight bytes, which is enough variation
+/// for a tree's handful of branches but not for the thousands of needle sprays
+/// in its crown. This mixes the whole key instead, so lanes stay independent
+/// however many a crown draws.
+pub(crate) fn hash_fraction(key: u64, lane: u64) -> f32 {
+    const UNIT_STEPS: f32 = 16_777_216.0;
+
+    let mixed = splitmix64(key ^ splitmix64(lane));
+    u32_as_f32(u32_from_u64(mixed >> 40)) / UNIT_STEPS
+}
+
+const fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+const fn u32_from_u64(value: u64) -> u32 {
+    value as u32
+}
+
+#[allow(clippy::cast_precision_loss)]
+const fn u32_as_f32(value: u32) -> f32 {
+    value as f32
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -156,7 +240,6 @@ pub(crate) fn usize_as_f32(value: usize) -> f32 {
     value as f32
 }
 
-#[allow(dead_code)]
 pub(crate) fn usize_as_u32(value: usize) -> Result<u32, RendererError> {
     u32::try_from(value).map_err(|_| RendererError::TooManyIndices)
 }

@@ -16,7 +16,6 @@
 mod gpu;
 mod lighting;
 mod material;
-mod needle_texture;
 mod renderer;
 mod snow;
 mod tree_mesh;
