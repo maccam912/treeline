@@ -123,41 +123,41 @@ pub(crate) fn material_vertex(
     vertex
 }
 
-/// One vertex of conifer foliage.
+/// One vertex of a conifer crown volume.
 ///
-/// `exposure` runs from 0 deep in the crown's shade to 1 at a sunlit branch
-/// tip, and `height` runs up the crown. Foliage grows its needles procedurally
-/// rather than sampling a map, so the pair rides in the material UV instead of
-/// competing with it: a crown's shading is its own geometry, not a painted map.
+/// A crown is drawn as one closed cone rather than a mass of shells, and the
+/// cone's envelope is carried here so the shader can reconstruct the volume and
+/// ray-march it. The fields are reused for what the cone needs, since a foliage
+/// vertex has no texture to map:
 ///
-/// `needle_depth` is which shell of a shoot the vertex belongs to, from 0 on
-/// the solid core out to 1 at the needle tips. It is the one thing the shader
-/// cannot work out for itself, because a fragment knows the direction it faces
-/// but not how far out along that direction its own shell was pushed.
+/// - `base_relative` is where this vertex sits relative to the crown's base, as
+///   a small local offset. It rides in `normal`, and the shader subtracts it
+///   from the fragment's high-precision position to recover the crown base.
+/// - `apex_offset` is `apex - base`, the small vector that spans the crown. It
+///   rides in `material_uv` and `needle_seed`.
+/// - `crown_radius` (in `needle_depth`) and `seed` (in `snow_coverage`) complete
+///   the cone and give its needle field its own key.
 ///
-/// `needle_seed` is which shoot it belongs to, in `[0, 1)`. Needles are laid out
-/// by the direction a fragment faces, since that is the only thing about a ball
-/// that holds still from one shell to the next — but two balls seen from one
-/// place present the same directions, so without a key per shoot every shoot in
-/// a crown would wear one needle pattern.
-pub(crate) fn foliage_vertex(
-    position: Vec3,
-    normal: Vec3,
+/// The vertex position is the point on the cone surface in local crown space;
+/// the tree's translation to world space happens at upload, which is what keeps
+/// the crown base recoverable with full precision.
+pub(crate) fn crown_volume_vertex(
+    base_relative: Vec3,
+    apex_offset: Vec3,
+    crown_radius: f32,
+    seed: f32,
     color: [f32; 4],
-    exposure: f32,
-    height: f32,
-    needle_depth: f32,
-    needle_seed: f32,
 ) -> TerrainVertex {
     let mut vertex = material_vertex(
-        position,
-        normal,
+        base_relative,
+        base_relative,
         color,
         SURFACE_KIND_NEEDLE_FOLIAGE,
-        [exposure, height],
+        [apex_offset.x, apex_offset.y],
     );
-    vertex.needle_depth = needle_depth;
-    vertex.needle_seed = needle_seed;
+    vertex.needle_seed = apex_offset.z;
+    vertex.needle_depth = crown_radius;
+    vertex.snow_coverage = seed;
     vertex
 }
 

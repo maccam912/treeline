@@ -132,60 +132,37 @@ Trees are individuals, never a canopy texture. Distant tiers shed branches and
 then thin the crown, but never merge trees into a surface — a forest read as a
 green blanket is exactly what this system exists to avoid.
 
-A conifer crown is built the way a conifer is: whorls of branches up the trunk,
-each ring shorter and drooping further than the one above it, and along the
-outer half of every branch a bunch of shoot clusters — closer to a bunch of
-grapes than to a cone. One cluster is one ball of needles, and a crown is a few
-hundred of them overlapping. The silhouette is then broken at the scale a real
-crown is broken at, about one shoot across, because that is the scale the
-geometry is built at.
+A conifer crown is drawn as one closed volume in the shape of its envelope — a
+low-poly cone from the crown's base to its apex — with the cone's definition
+carried on its vertices. The needles are grown inside it: the foliage shader
+ray-marches the view ray through the cone, sampling a needle field, and
+accumulates how much crown the ray crossed. Where it crossed almost nothing — a
+rim where the ray grazes the surface, or a gap the field left thin — the
+fragment is discarded and the sky or hillside shows through. A silhouette broken
+at the scale of a needle is a shading property, not a geometry one.
 
-Foliage this small is grown, not modeled. A ball is drawn as a few nested
-shells: a small solid core for the woody shoot, and outside it the shells the
-needles growing off that shoot stand on. The shader carves the needles out of
-those shells, keeping only what lies close to the axis of a procedural strand
-and discarding the rest — thick against the shoot, thinning to sparse points at
-the tips. Stacked, the shells give a shoot real depth, and the silhouette a
-crown ends on is the needles themselves running out rather than a drawn edge.
+Foliage this small is grown, not modeled. A crown self-shadows by how deep the
+ray went and glows from the back where light passed through it, so a crown reads
+as depth of needles rather than a painted mass. The needle field is keyed to the
+crown, so no two crowns wear the same needles, and its noise breaks the rim into
+a ragged edge rather than a lathed cone. This is what replaced hundreds of
+nested-shell balls strung along whorls of branches: that had the right ragged
+outline, but it shaded the same crown pixels once per shell, and the overdraw of
+a pass that re-covered the pixels a forest covers most was the slow part.
 
-The strands are laid out by the direction a fragment faces, not by where it sits.
-That is the one thing about a ball that survives being pushed outward: every
-shell along one ray faces the same way, so a strand stays put through the whole
-stack and reads as one needle instead of a stack of flakes. A shoot's own key
-slides it through the field, since two balls seen from one place present the
-same directions and would otherwise wear the same needles. A vertex still takes
-its *undeformed* outward direction as its normal, so an eight-triangle shell
-shades as a round mass rather than a facet.
+A crown is opaque in the sense that it occludes and writes depth, but it is cut
+per fragment, which costs foliage its early depth test, and foliage alone: it is
+drawn by its own pipeline, from its own half of a stand's indices, after every
+solid thing in the frame has written depth. While one shader drew every surface,
+that one discard spent the early test on terrain, water, and bark as well — a
+forest shaded the hillside behind it in full and then threw it away — and held
+the crown, which touches no texture, to the register budget of the triplanar
+rock path. Splitting them is why the ground and the sky the trees stand against
+are cheap again.
 
-Because the strands hold still through the stack, the shells are nested tubes
-rather than independent layers: a gap between needles is a gap all the way in.
-That is what a shoot actually looks like, and it is what the depth shading is
-for — deep is dark, the tips are lit, and a backlit crown glows through its
-outermost needles rather than silhouetting. Needle tips stir in the wind; where
-they are sampled does not move, so a crown stirs without its needles swimming.
-
-The shells are opaque, and that is a deliberate reversal. Foliage drawn as
-alpha-tested billboards shades a forest's every pixel several times over and
-then throws most of the work away; an opaque crown occludes, writes depth once,
-and costs about five thousand triangles for a whole tree. The cut still stops
-once a strand falls under a pixel: past that a dense shell goes solid and a
-sparse one is dropped whole, which is the trade a mip makes.
-
-Cutting needles per fragment costs foliage its early depth test, and foliage
-alone: it is drawn by its own pipeline, from its own half of a stand's indices,
-after every solid thing in the frame has written depth. While one shader drew
-every surface, that one discard spent the early test on terrain, water, and bark
-as well — a forest shaded the hillside behind it in full and then threw it away
-— and held the crown, which touches no texture, to the register budget of the
-triplanar rock path. Splitting them is why the ground and the sky the trees
-stand against are cheap again.
-
-Shells multiply both geometry and overdraw, so the near tier spends its budget
-on depth within a shoot rather than on more shoots — fewer, larger balls than a
-crown of solids needed, with needles filling the space the extra balls faked.
-The shell count is the first thing distance takes away. The sun never sees more
-than one of them: a ball's outermost shell encloses the rest, so the cascades
-draw the hulls and stop.
+One volume per crown keeps the sun's view cheap too: a closed cone bounds the
+crown, so the cascades draw that and stop. Distance thins a crown by faceting the
+cone into fewer sides, never by shrinking or merging it.
 
 What was here before was one solid ball per shoot wearing a tileable mat of
 needles sampled from world space. It was cheaper, and correct in outline, but a

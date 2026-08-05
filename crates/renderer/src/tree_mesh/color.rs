@@ -48,23 +48,6 @@ pub(crate) fn foliage_color(tree: ProceduralTree) -> [f32; 4] {
     ]
 }
 
-/// One branch tip's foliage tone.
-///
-/// `variation` runs over `[-0.5, 0.5)`. Nudging the tree's foliage color by
-/// that much is what keeps a crown of overlapping whorls reading as separate
-/// branches rather than one painted shell. Shading belongs to the vertex's
-/// exposure rather than its color, so the tone stays a hue the shader can tint
-/// a needle mat by.
-pub(crate) fn foliage_tone(foliage: [f32; 4], variation: f32) -> [f32; 4] {
-    let jitter = variation * 0.09;
-    [
-        (foliage[0] + (jitter * 0.5)).clamp(0.0, 1.0),
-        (foliage[1] + jitter).clamp(0.0, 1.0),
-        (foliage[2] + (jitter * 0.5)).clamp(0.0, 1.0),
-        1.0,
-    ]
-}
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CylinderMaterial {
     pub(crate) surface_kind: f32,

@@ -91,11 +91,9 @@ fn crown(detail: TreeMeshDetail) -> TreeGeometry {
 fn assert_well_formed(geometry: &TreeGeometry) {
     let vertices = &geometry.vertices;
     assert!(!vertices.is_empty());
-    for indices in [
-        &geometry.indices,
-        &geometry.foliage_hull_indices,
-        &geometry.foliage_interior_indices,
-    ] {
+    // Trunks and crown hulls are always populated; the interior list is empty
+    // by design now that a crown is one volume rather than a stack of shells.
+    for indices in [&geometry.indices, &geometry.foliage_hull_indices] {
         assert!(!indices.is_empty());
         assert!(indices.len().is_multiple_of(3));
         assert!(
@@ -104,6 +102,7 @@ fn assert_well_formed(geometry: &TreeGeometry) {
                 .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
         );
     }
+    assert!(geometry.foliage_interior_indices.is_empty());
     assert!(vertices.iter().all(|vertex| {
         vertex.position_high.into_iter().all(f32::is_finite)
             && vertex.position_low.into_iter().all(f32::is_finite)
@@ -187,30 +186,97 @@ fn no_face_of_a_crown_is_a_sliver() {
     }
 }
 
-/// The reason the crown was rebuilt: an outline broken at the scale of a shoot,
-/// not the smooth cone a lathe would give. Measured in one band so the crown's
-/// own taper cannot pass for raggedness — inside a band, what varies is which
-/// balls happen to hang there.
+/// The crown is one cone the shader ray-marches, so every foliage vertex has to
+/// agree on what that cone is: the same apex offset, the same base radius, and
+/// the same needle-field seed. If any vertex carried a different crown, the
+/// march would step through a cone no two fragments agreed on.
 #[test]
-fn a_crown_of_clusters_has_a_ragged_outline() {
+fn a_crown_volume_carries_one_consistent_cone() {
     for detail in TIERS {
-        let mut reaches = foliage_positions(&crown(detail))
-            .into_iter()
-            .filter(|point| (CROWN_APEX.y * 0.2..CROWN_APEX.y * 0.35).contains(&point.y))
-            .map(|point| Vec3::new(point.x, 0.0, point.z).length())
-            .collect::<Vec<_>>();
+        let geometry = crown(detail);
+        let mut apex_offset = None;
+        let mut radius = None;
+        let mut seed = None;
+        for vertex in geometry.vertices.iter().filter(|vertex| is_foliage(vertex)) {
+            let vertex_apex = Vec3::new(
+                vertex.material_uv[0],
+                vertex.material_uv[1],
+                vertex.needle_seed,
+            );
+            let vertex_radius = vertex.needle_depth;
+            let vertex_seed = vertex.snow_coverage;
+            match apex_offset {
+                None => {
+                    apex_offset = Some(vertex_apex);
+                    radius = Some(vertex_radius);
+                    seed = Some(vertex_seed);
+                }
+                Some(known) => {
+                    assert!(
+                        approx_eq(vertex_apex, known),
+                        "{detail:?} mixed apex offsets in one crown"
+                    );
+                    assert!(
+                        approx_scalar(vertex_radius, radius.unwrap()),
+                        "{detail:?} mixed radii"
+                    );
+                    assert!(
+                        approx_scalar(vertex_seed, seed.unwrap()),
+                        "{detail:?} mixed seeds"
+                    );
+                }
+            }
+        }
         assert!(
-            !reaches.is_empty(),
-            "{detail:?} left a band of the crown bare"
+            approx_eq(apex_offset.unwrap(), CROWN_APEX - CROWN_BASE),
+            "{detail:?} carried the wrong apex offset"
         );
-        reaches.sort_by(f32::total_cmp);
-        let longest = reaches[reaches.len() - 1];
-        let middle = reaches[reaches.len() / 2];
         assert!(
-            middle < longest * 0.72,
-            "{detail:?} reaches {middle} nearly everywhere it reaches {longest}"
+            approx_scalar(radius.unwrap(), CROWN_RADIUS),
+            "{detail:?} carried the wrong radius"
         );
     }
+}
+
+/// The crown is a closed volume drawn back-face culled, so every face has to
+/// wind outward: a face wound inward is a hole the camera would see straight
+/// through a crown.
+#[test]
+fn every_face_of_a_crown_volume_turns_outward() {
+    for detail in TIERS {
+        let geometry = crown(detail);
+        let up = (CROWN_APEX - CROWN_BASE).normalize();
+        let indices = geometry.foliage_hull_indices.clone();
+        for triangle in indices.chunks_exact(3) {
+            let corners = [0, 1, 2].map(|corner| {
+                let index = usize::try_from(triangle[corner]).expect("an addressable vertex index");
+                position(&geometry.vertices[index])
+            });
+            let winding = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+            assert!(winding.length() > 1.0e-4, "{detail:?} wound a sliver");
+            let centroid = (corners[0] + corners[1] + corners[2]) / 3.0;
+            // A side or top face points away from the crown axis; the base cap
+            // points down. Either is outward for a cone.
+            let axis_projected = centroid - (up * (centroid - CROWN_BASE).dot(up));
+            let radial = axis_projected.normalize_or_zero();
+            let down = -up;
+            let radial_axis = radial.length_squared() > 1.0e-8;
+            let outward = if radial_axis {
+                winding.dot(radial) > 0.0 || winding.dot(down) > 0.0
+            } else {
+                winding.dot(down) > 0.0
+            };
+            assert!(outward, "{detail:?} wound a face into the crown");
+        }
+    }
+}
+
+fn approx_eq(left: Vec3, right: Vec3) -> bool {
+    (left - right).length() < 1.0e-5
+}
+
+fn approx_scalar(left: f32, right: f32) -> bool {
+    (left - right).abs() < 1.0e-5
 }
 
 /// The crown has to stay cheap. Shelling a ball multiplies it by the shell
@@ -231,11 +297,12 @@ fn a_full_detail_conifer_costs_under_six_thousand_triangles() {
     );
 }
 
-/// Depth is what the shader carves needles out of, so foliage has to carry it
-/// and nothing else may: a trunk or a patch of ground that claimed a depth
-/// would stand its own needles up and sway in the wind.
+/// The shader marches foliage from the crown radius it reads off `needle_depth`,
+/// so foliage has to carry it and nothing else may: a trunk or a patch of ground
+/// that claimed a radius would stand its own marching crown up and sway in the
+/// wind.
 #[test]
-fn only_conifer_foliage_carries_a_needle_depth() {
+fn only_conifer_foliage_carries_a_crown_radius() {
     let geometry = procedural_tree_geometry(&stand(), TreeMeshDetail::Full, |_, _| Some(42.0))
         .expect("tree geometry");
     assert!(

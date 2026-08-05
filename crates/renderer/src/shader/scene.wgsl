@@ -101,7 +101,16 @@ struct VertexOutput {
     @location(8) needle_position: vec3<f32>,
     @location(9) @interpolate(flat) needle_depth: f32,
     @location(10) @interpolate(flat) needle_seed: f32,
+    // A conifer crown's volume, carried flat so the foliage shader can
+    // reconstruct the cone and ray-march it. `crown_a` is the crown base and
+    // its radius; `crown_b` is the apex and its needle-field seed. Both are
+    // camera-relative, matching `render_position`.
+    @location(11) @interpolate(flat) crown_a: vec4<f32>,
+    @location(12) @interpolate(flat) crown_b: vec4<f32>,
 };
+
+// Foliage surface kind, agreed on with the vertex format it is tagged with.
+const FOLIAGE_SURFACE_KIND: f32 = 4.0;
 
 // How far needle tips travel in the wind, in meters, and how fast.
 const NEEDLE_SWAY_METERS: f32 = 0.05;
@@ -144,15 +153,20 @@ fn needle_sway(field_position: vec3<f32>, depth: f32) -> vec3<f32> {
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
+    let is_foliage = input.surface_kind == FOLIAGE_SURFACE_KIND;
     let normal = normalize(input.normal);
     let horizontal_normal = length(normal.xz);
     let terrain_slope = horizontal_normal / max(normal.y, 0.000001);
     let slope_retention = 1.0 - smoothstep(0.32, 1.15, terrain_slope);
     let field_position = needle_position(input.position_high, input.position_low);
+    // A crown volume does not sway its shell over the field the way a strand
+    // does, so foliage trades the sway for stillness (the needles inside still
+    // sway via their own field).
+    let sway_depth = select(input.needle_depth, 0.0, is_foliage);
     let render_position =
         (input.position_high - camera.render_origin_high.xyz)
         + (input.position_low - camera.render_origin_low.xyz)
-        + needle_sway(field_position, input.needle_depth);
+        + needle_sway(field_position, sway_depth);
     let world_position = input.position_high + input.position_low;
     output.clip_position = camera.view_projection * vec4<f32>(render_position, 1.0);
     output.world_normal = normal;
@@ -166,6 +180,19 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.needle_position = field_position;
     output.needle_depth = input.needle_depth;
     output.needle_seed = input.needle_seed;
+    // For a crown volume, `normal` holds the vertex's offset from the crown
+    // base; subtracting it from the high-precision position recovers the base
+    // without losing world-scale precision. The apex and radius and seed ride
+    // in the remaining foliage fields. Everything else leaves these zeroed.
+    let local_offset = input.normal;
+    let apex_offset = vec3<f32>(input.material_uv, input.needle_seed);
+    let crown_base = render_position - local_offset;
+    output.crown_a = select(vec4<f32>(0.0), vec4<f32>(crown_base, input.needle_depth), is_foliage);
+    output.crown_b = select(
+        vec4<f32>(0.0),
+        vec4<f32>(crown_base + apex_offset, input.snow_coverage),
+        is_foliage,
+    );
     return output;
 }
 

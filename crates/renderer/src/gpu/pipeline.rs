@@ -223,10 +223,10 @@ mod tests {
     #[test]
     fn the_shader_tests_the_surface_kind_foliage_is_tagged_with() {
         assert!(
-            FOLIAGE_SHADER.contains(&format!(
+            SCENE_SHADER.contains(&format!(
                 "const FOLIAGE_SURFACE_KIND: f32 = {SURFACE_KIND_NEEDLE_FOLIAGE:.1};"
             )),
-            "the foliage shader no longer declares surface kind {SURFACE_KIND_NEEDLE_FOLIAGE}"
+            "the scene shader no longer declares surface kind {SURFACE_KIND_NEEDLE_FOLIAGE}"
         );
     }
 
@@ -263,43 +263,15 @@ mod tests {
         }
     }
 
-    /// The foliage shader looks at four cells for the strand nearest a
-    /// fragment where a cellular noise would normally need nine, and that is
-    /// exact rather than approximate only while two numbers agree.
-    ///
-    /// A strand held to the middle of its cell stands some clearance away from
-    /// anything outside the four; a strand narrower than that clearance cannot
-    /// have covered the fragment from out there, so not finding it costs
-    /// nothing. Widen a needle past the clearance, or loosen the jitter that
-    /// buys it, and crowns pick up seams where a strand went unseen.
-    ///
-    /// This search runs once per foliage fragment on the surface that covers
-    /// more of a forest than any other, so the constants are worth pinning.
+    /// A crown is one volume ray-marched through the interior, so a cone's
+    /// definition has to be recoverable from the flat vertex data — otherwise
+    /// the march would be reconstructing a cone the geometry never drew.
     #[test]
-    fn a_needle_stays_narrow_enough_for_the_four_cell_strand_search() {
-        let root = shader_constant(FOLIAGE_SHADER, "NEEDLE_ROOT");
-        let origin = shader_constant(FOLIAGE_SHADER, "NEEDLE_JITTER_ORIGIN");
-        let span = shader_constant(FOLIAGE_SHADER, "NEEDLE_JITTER_SPAN");
-        let clearance = (1.5 - origin - span).min(0.5 + origin);
-        assert!(
-            root < clearance,
-            "a needle {root} wide outruns the {clearance} the four-cell search can see"
-        );
-    }
-
-    /// One `const` declaration from a shader, so a test can hold the WGSL to an
-    /// arithmetic invariant rather than to the text of one.
-    fn shader_constant(source: &str, name: &str) -> f32 {
-        let (_, tail) = source
-            .split_once(&format!("const {name}: f32 = "))
-            .unwrap_or_else(|| panic!("the shader no longer declares {name}"));
-        let (value, _) = tail
-            .split_once(';')
-            .unwrap_or_else(|| panic!("{name} is declared without a value"));
-        value
-            .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("{name} is not a plain literal"))
+    fn the_foliage_shader_reconstructs_a_crown_from_camera_relative_vertices() {
+        assert!(SCENE_SHADER.contains("crown_a"));
+        assert!(SCENE_SHADER.contains("crown_b"));
+        assert!(FOLIAGE_SHADER.contains("input.crown_a"));
+        assert!(FOLIAGE_SHADER.contains("input.crown_b"));
     }
 
     /// The scene half declares the bindings and the vertex stage; an entry

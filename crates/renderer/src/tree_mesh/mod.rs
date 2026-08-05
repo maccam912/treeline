@@ -6,7 +6,6 @@
 //! its silhouette at a fraction of the cost.
 
 mod branch;
-mod cluster;
 mod color;
 mod conifer;
 mod geometry;
