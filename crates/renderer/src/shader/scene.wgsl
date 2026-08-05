@@ -59,21 +59,27 @@ struct Lighting {
 var<uniform> lighting: Lighting;
 
 @group(0) @binding(4)
-var shadow_map: texture_depth_2d_array;
+var shadow_map_0: texture_depth_2d;
 
 @group(0) @binding(5)
-var shadow_sampler: sampler_comparison;
+var shadow_map_1: texture_depth_2d;
 
 @group(0) @binding(6)
-var material_diffuse: texture_2d_array<f32>;
+var shadow_map_2: texture_depth_2d;
 
 @group(0) @binding(7)
-var material_normal: texture_2d_array<f32>;
+var shadow_sampler: sampler_comparison;
 
 @group(0) @binding(8)
-var material_arm: texture_2d_array<f32>;
+var material_diffuse: texture_2d_array<f32>;
 
 @group(0) @binding(9)
+var material_normal: texture_2d_array<f32>;
+
+@group(0) @binding(10)
+var material_arm: texture_2d_array<f32>;
+
+@group(0) @binding(11)
 var material_sampler: sampler;
 
 struct VertexInput {
@@ -205,6 +211,18 @@ fn facing_normal(world_normal: vec3<f32>, front_facing: bool) -> vec3<f32> {
     return select(-normal, normal, front_facing);
 }
 
+// Samples one cascade's depth texture. Each cascade lives in its own 2D
+// texture rather than in an array, because WebGL2 has no depth array textures.
+fn sample_shadow(cascade: u32, uv: vec2<f32>, reference_depth: f32) -> f32 {
+    if (cascade == 0u) {
+        return textureSampleCompareLevel(shadow_map_0, shadow_sampler, uv, reference_depth);
+    } else if (cascade == 1u) {
+        return textureSampleCompareLevel(shadow_map_1, shadow_sampler, uv, reference_depth);
+    } else {
+        return textureSampleCompareLevel(shadow_map_2, shadow_sampler, uv, reference_depth);
+    }
+}
+
 fn cascade_shadow(
     cascade: u32,
     render_position: vec3<f32>,
@@ -229,13 +247,7 @@ fn cascade_shadow(
     for (var z = -1; z <= 1; z += 1) {
         for (var x = -1; x <= 1; x += 1) {
             let offset = vec2<f32>(f32(x), f32(z)) * texel;
-            visibility += textureSampleCompareLevel(
-                shadow_map,
-                shadow_sampler,
-                uv + offset,
-                i32(cascade),
-                reference_depth,
-            );
+            visibility += sample_shadow(cascade, uv + offset, reference_depth);
         }
     }
     return visibility / 9.0;

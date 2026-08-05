@@ -34,7 +34,7 @@ pub(crate) const fn depth_texture_layout_entry(binding: u32) -> wgpu::BindGroupL
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Depth,
-            view_dimension: wgpu::TextureViewDimension::D2Array,
+            view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
         count: None,

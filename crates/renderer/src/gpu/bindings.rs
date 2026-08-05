@@ -67,12 +67,17 @@ impl TerrainBindings {
                 // Wind reaches the vertex stage too: needle shells sway on it.
                 uniform_layout_entry(2, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
                 uniform_layout_entry(3, wgpu::ShaderStages::FRAGMENT),
+                // One depth texture per cascade. WebGL2 has no depth array
+                // textures, so the cascades cannot share a single array the way
+                // they do on native backends; each stays its own 2D texture.
                 depth_texture_layout_entry(4),
-                comparison_sampler_layout_entry(5),
-                sampled_texture_array_layout_entry(6),
-                sampled_texture_array_layout_entry(7),
+                depth_texture_layout_entry(5),
+                depth_texture_layout_entry(6),
+                comparison_sampler_layout_entry(7),
                 sampled_texture_array_layout_entry(8),
-                filtering_sampler_layout_entry(9),
+                sampled_texture_array_layout_entry(9),
+                sampled_texture_array_layout_entry(10),
+                filtering_sampler_layout_entry(11),
             ],
         });
         let atmosphere = AtmosphereSettings::default();
@@ -171,30 +176,38 @@ pub(crate) fn terrain_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.sampling_view),
+                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.layer_views[0]),
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: wgpu::BindingResource::Sampler(&resources.shadow_map.sampler),
+                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.layer_views[1]),
             },
             wgpu::BindGroupEntry {
                 binding: 6,
+                resource: wgpu::BindingResource::TextureView(&resources.shadow_map.layer_views[2]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(&resources.shadow_map.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
                 resource: wgpu::BindingResource::TextureView(
                     &resources.material_textures.diffuse_view,
                 ),
             },
             wgpu::BindGroupEntry {
-                binding: 7,
+                binding: 9,
                 resource: wgpu::BindingResource::TextureView(
                     &resources.material_textures.normal_view,
                 ),
             },
             wgpu::BindGroupEntry {
-                binding: 8,
+                binding: 10,
                 resource: wgpu::BindingResource::TextureView(&resources.material_textures.arm_view),
             },
             wgpu::BindGroupEntry {
-                binding: 9,
+                binding: 11,
                 resource: wgpu::BindingResource::Sampler(&resources.material_textures.sampler),
             },
         ],
