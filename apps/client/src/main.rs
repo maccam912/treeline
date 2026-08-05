@@ -164,7 +164,7 @@ impl ApplicationHandler for TreelineApp {
             match result {
                 Ok(game) => self.game = Some(game),
                 Err(error) => {
-                    eprintln!("failed to start Treeline: {error}");
+                    browser::report_startup_failure(&error);
                     event_loop.exit();
                 }
             }

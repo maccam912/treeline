@@ -28,12 +28,17 @@ web-time.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook.workspace = true
 js-sys.workspace = true
+# Browsers without WebGPU (most phones) need wgpu's WebGL2 backend compiled in,
+# or `request_adapter` finds nothing and the canvas stays black.
+wgpu = { workspace = true, features = ["webgl"] }
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = [
     "Blob",
     "BlobPropertyBag",
+    "console",
     "DedicatedWorkerGlobalScope",
+    "HtmlElement",
     "Document",
     "Element",
     "Event",

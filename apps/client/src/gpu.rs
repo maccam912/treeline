@@ -18,6 +18,40 @@ pub struct Gpu {
     pub shadows_enabled: bool,
 }
 
+/// Picks the backend set to bring the instance up on.
+///
+/// Browsers need the choice made before the canvas is touched. A canvas keeps
+/// the first drawing context it is given, so an instance that claims it for
+/// WebGPU leaves no way back to WebGL2 — and phones routinely expose
+/// `navigator.gpu` while refusing to hand out an adapter. Probing WebGPU first,
+/// away from the canvas, keeps those devices on the WebGL2 path.
+async fn usable_backends() -> wgpu::Backends {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        wgpu::Backends::all()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let probe = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::BROWSER_WEBGPU,
+            ..wgpu::InstanceDescriptor::default()
+        });
+        let webgpu_works = probe
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .is_some();
+        if webgpu_works {
+            wgpu::Backends::BROWSER_WEBGPU
+        } else {
+            wgpu::Backends::GL
+        }
+    }
+}
+
 impl Gpu {
     /// Opens a device and configures the window's surface.
     ///
@@ -26,7 +60,10 @@ impl Gpu {
     /// Returns an error when no compatible adapter exists or the device cannot
     /// be created.
     pub async fn new(window: Arc<Window>) -> Result<Self, Box<dyn Error>> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: usable_backends().await,
+            ..wgpu::InstanceDescriptor::default()
+        });
         let surface = instance.create_surface(window.clone())?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -36,12 +73,16 @@ impl Gpu {
             })
             .await
             .ok_or_else(|| std::io::Error::other("no compatible graphics adapter found"))?;
+        // Asking for the desktop defaults fails outright on WebGL2 and on
+        // phone-class adapters, which report far smaller ceilings. The renderer
+        // uses no storage buffers or compute, so whatever the adapter offers is
+        // enough.
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Treeline device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: adapter.limits(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
                 None,
@@ -50,9 +91,12 @@ impl Gpu {
 
         let size = window.inner_size();
         let capabilities = surface.get_capabilities(&adapter);
-        // WebGL2 cannot represent the renderer's shadow depth textures, so the
-        // browser build turns shadows off and lights everything with the sun.
-        let shadows_enabled = adapter.get_info().backend != wgpu::Backend::Gl;
+        // Shadows need depth textures sampled through a comparison sampler.
+        // WebGL2 has both, so this asks the adapter rather than the backend.
+        let shadows_enabled = adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::COMPARISON_SAMPLERS);
         // An sRGB surface lets the hardware do the final color conversion, so
         // shading stays linear all the way through.
         let format = capabilities
