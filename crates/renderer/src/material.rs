@@ -3,10 +3,6 @@
 //! Four material layers share one array texture: ground, rock, and two barks.
 //! Mip levels are generated on the CPU at load, which keeps the renderer free
 //! of a compute pass purely for downsampling.
-//!
-//! Conifer foliage is not here. Needles are finer than any map this size could
-//! hold at the distance a crown is looked at, so they are grown in the shader
-//! out of the shells they stand on instead.
 
 use image::ImageFormat;
 use image::RgbaImage;

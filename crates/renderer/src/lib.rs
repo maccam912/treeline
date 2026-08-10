@@ -58,11 +58,11 @@ pub enum TerrainRenderTier {
 /// Geometry detail for one deterministic set of procedural tree individuals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TreeMeshDetail {
-    /// Trunks, branches, damage, and species-specific crown clusters.
+    /// Trunks, branches, and damage.
     Full,
-    /// Trunks and one species-shaped crown, without individual branches.
+    /// Trunks alone, without individual branches.
     Simplified,
-    /// A minimal trunk and crown silhouette for the outer individual-tree ring.
+    /// A minimal trunk silhouette for the outer individual-tree ring.
     Silhouette,
 }
 

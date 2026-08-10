@@ -2,13 +2,7 @@
 //!
 //! A frame renders the sun's shadow cascades first, then the sky backdrop, then
 //! far terrain, then near terrain — far before near so the near tier's depth
-//! wins wherever the two overlap — and foliage last of all.
-//!
-//! Foliage goes last because it is the one surface that cuts holes in itself,
-//! and so the one that cannot be depth-tested before it shades. Every solid
-//! thing in the frame has written its depth by the time a crown is drawn, which
-//! is the most the depth buffer can do for a pass that has to run to find out
-//! whether it had anything to draw.
+//! wins wherever the two overlap.
 
 use glam::Mat4;
 use treeline_ecology::ProceduralTree;
@@ -164,10 +158,8 @@ impl TerrainRenderer {
         Ok(TerrainMesh {
             vertex_buffer,
             index_buffer,
-            opaque_index_count: u32::try_from(mesh.indices.len())
+            index_count: u32::try_from(mesh.indices.len())
                 .map_err(|_| RendererError::TooManyIndices)?,
-            foliage_hull_index_count: 0,
-            foliage_interior_index_count: 0,
         })
     }
 
@@ -218,10 +210,8 @@ impl TerrainRenderer {
         Ok(TerrainMesh {
             vertex_buffer,
             index_buffer,
-            opaque_index_count: u32::try_from(mesh.indices.len())
+            index_count: u32::try_from(mesh.indices.len())
                 .map_err(|_| RendererError::TooManyIndices)?,
-            foliage_hull_index_count: 0,
-            foliage_interior_index_count: 0,
         })
     }
 
@@ -231,10 +221,8 @@ impl TerrainRenderer {
     /// the caller, keeping ecology independent from streaming-world artifacts.
     /// Individuals without a surface sample are omitted.
     ///
-    /// Trunks, branches, and crowns are all triangles in one buffer, so a whole
-    /// tile of trees is one upload. It draws in two, because a needle shell
-    /// cuts its own silhouette and a trunk does not: the opaque half goes down
-    /// first, and the foliage half follows behind it in its own pipeline.
+    /// Trunks and branches are all triangles in one buffer, so a whole tile of
+    /// trees is one upload and one draw.
     ///
     /// # Errors
     ///
@@ -253,24 +241,16 @@ impl TerrainRenderer {
             contents: bytemuck::cast_slice(&geometry.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        // Opaque, then needle hulls, then the shells behind them: one buffer,
-        // three ranges, so no pass that wants a different run of it pays for a
-        // binding change or a second upload.
-        let indices = geometry.all_indices().collect::<Vec<_>>();
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("procedural tree indices"),
-            contents: bytemuck::cast_slice(&indices),
+            contents: bytemuck::cast_slice(&geometry.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
         Ok(TerrainMesh {
             vertex_buffer,
             index_buffer,
-            opaque_index_count: u32::try_from(geometry.indices.len())
-                .map_err(|_| RendererError::TooManyIndices)?,
-            foliage_hull_index_count: u32::try_from(geometry.foliage_hull_indices.len())
-                .map_err(|_| RendererError::TooManyIndices)?,
-            foliage_interior_index_count: u32::try_from(geometry.foliage_interior_indices.len())
+            index_count: u32::try_from(geometry.indices.len())
                 .map_err(|_| RendererError::TooManyIndices)?,
         })
     }
@@ -414,7 +394,7 @@ impl TerrainRenderer {
                 });
                 shadow_pass.set_pipeline(shadow_pipeline);
                 shadow_pass.set_bind_group(0, bind_group, &[]);
-                draw_meshes(&mut shadow_pass, shadow_meshes, TerrainMesh::shadow_indices);
+                draw_meshes(&mut shadow_pass, shadow_meshes);
             }
         }
 
@@ -449,27 +429,17 @@ impl TerrainRenderer {
         pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.world.far_ground);
         pass.set_bind_group(0, &self.far_bind_group, &[]);
-        draw_meshes(&mut pass, &far_meshes, TerrainMesh::opaque_indices);
+        draw_meshes(&mut pass, &far_meshes);
         pass.set_pipeline(&self.world.near_ground);
         pass.set_bind_group(0, &self.near_bind_group, &[]);
-        draw_meshes(&mut pass, &near_meshes, TerrainMesh::opaque_indices);
-        // Foliage last, over a depth buffer every solid thing has already
-        // written to. It is the one pass that shades before it is depth-tested,
-        // so it is the one that gains most from having nothing left to occlude
-        // it. Crowns live in the near tier, so the bind group already stands.
-        pass.set_pipeline(&self.world.foliage);
-        draw_meshes(&mut pass, &near_meshes, TerrainMesh::foliage_indices);
+        draw_meshes(&mut pass, &near_meshes);
     }
 }
 
-/// Draws one range of each mesh, skipping the meshes that have none.
-fn draw_meshes(
-    pass: &mut wgpu::RenderPass<'_>,
-    meshes: &[&TerrainMesh],
-    range: fn(&TerrainMesh) -> std::ops::Range<u32>,
-) {
+/// Draws each mesh, skipping the ones that are empty.
+fn draw_meshes(pass: &mut wgpu::RenderPass<'_>, meshes: &[&TerrainMesh]) {
     for mesh in meshes {
-        let indices = range(mesh);
+        let indices = mesh.indices();
         if indices.is_empty() {
             continue;
         }

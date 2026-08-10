@@ -2,20 +2,19 @@
 // vertex lands, and the light and air that reach it.
 //
 // This is never a shader on its own. One fragment entry point is appended to it
-// per pipeline — ground, the far tier's cutout, or foliage — so each surface
-// kind compiles as its own small shader instead of as one branch of a large
-// one. Two things come of that, and both matter more than they look.
+// per pipeline — the near tier's ground or the far tier's cutout — so each
+// surface kind compiles as its own small shader instead of as one branch of a
+// large one. Two things come of that, and both matter more than they look.
 //
 // A shader that can `discard` cannot be depth-tested before it runs, because
-// the test does not know yet whether the fragment survives. While one shader
-// drew everything, the needle cutout in the foliage branch spent that early
-// test on terrain, water, and bark as well: a forest shaded the hillside behind
-// it in full and then threw it away. Split apart, only foliage pays.
+// the test does not know yet whether the fragment survives. The far tier cuts
+// the near tier's footprint out of itself; while one shader drew everything,
+// that discard spent the early test on terrain, water, and bark as well. Split
+// apart, only the surface that cuts holes in itself pays for doing so.
 //
 // And a fragment shader costs the registers of its worst path everywhere, so
 // how many of them a machine can keep in flight is set by the heaviest surface
-// in the file. Foliage, which covers the most pixels and samples no textures at
-// all, was being held to what the triplanar rock path needs.
+// in the file — which, when everything shared one, was the triplanar rock path.
 
 struct Camera {
     view_projection: mat4x4<f32>,
@@ -78,8 +77,6 @@ struct VertexInput {
     @location(4) position_low: vec3<f32>,
     @location(5) surface_kind: f32,
     @location(6) material_uv: vec2<f32>,
-    @location(7) needle_depth: f32,
-    @location(8) needle_seed: f32,
 };
 
 struct VertexOutput {
@@ -92,75 +89,18 @@ struct VertexOutput {
     @location(5) render_position: vec3<f32>,
     @location(6) @interpolate(flat) surface_kind: f32,
     @location(7) material_uv: vec2<f32>,
-    @location(8) needle_position: vec3<f32>,
-    @location(9) @interpolate(flat) needle_depth: f32,
-    @location(10) @interpolate(flat) needle_seed: f32,
-    // A conifer crown's volume, carried flat so the foliage shader can
-    // reconstruct the cone and ray-march it. `crown_a` is the crown base and
-    // its radius; `crown_b` is the apex and its needle-field seed. Both are
-    // camera-relative, matching `render_position`.
-    @location(11) @interpolate(flat) crown_a: vec4<f32>,
-    @location(12) @interpolate(flat) crown_b: vec4<f32>,
 };
-
-// Foliage surface kind, agreed on with the vertex format it is tagged with.
-const FOLIAGE_SURFACE_KIND: f32 = 4.0;
-
-// How far needle tips travel in the wind, in meters, and how fast.
-const NEEDLE_SWAY_METERS: f32 = 0.05;
-const NEEDLE_SWAY_RATE: f32 = 1.7;
-// How far the wind's own phase runs before it repeats, in meters. Far larger
-// than anything one crown spans, so no two trees in a stand stir together.
-const NEEDLE_WRAP_METERS: f32 = 4096.0;
-
-// Where a vertex stands in the needle field.
-//
-// World coordinates run to six figures and needles are cut at centimeters, so
-// the field is wrapped to keep the arithmetic inside what an `f32` can say. The
-// high half of a position carries its magnitude and the low half its detail, so
-// wrapping the high half alone costs nothing: the sum stays exact to well under
-// a millimeter anywhere in the world.
-fn needle_position(position_high: vec3<f32>, position_low: vec3<f32>) -> vec3<f32> {
-    let wrapped =
-        position_high - floor(position_high / NEEDLE_WRAP_METERS) * NEEDLE_WRAP_METERS;
-    return wrapped + position_low;
-}
-
-// How far the wind has carried a needle tip.
-//
-// Only where a vertex is drawn moves. Where its needles are sampled does not,
-// so a crown stirs without its needles swimming through it. Depth is zero on
-// everything that is not a needle shell, which is what keeps trunks and terrain
-// still without asking what surface they are.
-//
-// The shadow pass does not sway with it. A needle tip travels a few centimeters,
-// which is well inside what a cascade can resolve, and matching it there would
-// mean handing the wind to a pass that otherwise needs nothing but a camera.
-fn needle_sway(field_position: vec3<f32>, depth: f32) -> vec3<f32> {
-    let wind = atmosphere.wind_moisture.xy;
-    let phase = (atmosphere.wind_moisture.w * NEEDLE_SWAY_RATE)
-        + dot(field_position.xz, vec2<f32>(0.31, 0.27))
-        + (field_position.y * 0.19);
-    return vec3<f32>(wind.x, 0.0, wind.y) * (sin(phase) * NEEDLE_SWAY_METERS * depth);
-}
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
-    let is_foliage = input.surface_kind == FOLIAGE_SURFACE_KIND;
     let normal = normalize(input.normal);
     let horizontal_normal = length(normal.xz);
     let terrain_slope = horizontal_normal / max(normal.y, 0.000001);
     let slope_retention = 1.0 - smoothstep(0.32, 1.15, terrain_slope);
-    let field_position = needle_position(input.position_high, input.position_low);
-    // A crown volume does not sway its shell over the field the way a strand
-    // does, so foliage trades the sway for stillness (the needles inside still
-    // sway via their own field).
-    let sway_depth = select(input.needle_depth, 0.0, is_foliage);
     let render_position =
         (input.position_high - camera.render_origin_high.xyz)
-        + (input.position_low - camera.render_origin_low.xyz)
-        + needle_sway(field_position, sway_depth);
+        + (input.position_low - camera.render_origin_low.xyz);
     let world_position = input.position_high + input.position_low;
     output.clip_position = camera.view_projection * vec4<f32>(render_position, 1.0);
     output.world_normal = normal;
@@ -171,22 +111,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.render_position = render_position;
     output.surface_kind = input.surface_kind;
     output.material_uv = input.material_uv;
-    output.needle_position = field_position;
-    output.needle_depth = input.needle_depth;
-    output.needle_seed = input.needle_seed;
-    // For a crown volume, `normal` holds the vertex's offset from the crown
-    // base; subtracting it from the high-precision position recovers the base
-    // without losing world-scale precision. The apex and radius and seed ride
-    // in the remaining foliage fields. Everything else leaves these zeroed.
-    let local_offset = input.normal;
-    let apex_offset = vec3<f32>(input.material_uv, input.needle_seed);
-    let crown_base = render_position - local_offset;
-    output.crown_a = select(vec4<f32>(0.0), vec4<f32>(crown_base, input.needle_depth), is_foliage);
-    output.crown_b = select(
-        vec4<f32>(0.0),
-        vec4<f32>(crown_base + apex_offset, input.snow_coverage),
-        is_foliage,
-    );
     return output;
 }
 
@@ -211,8 +135,8 @@ fn sun_visibility(
 // what the ground bounces back up.
 //
 // `diffuse_response` is how much of the sun the surface takes, which is the one
-// term a surface kind is free to disagree about — foliage keeps taking light
-// past the terminator where a solid has already gone dark.
+// term a surface kind is free to disagree about: a thin or massed surface may
+// keep taking light past the terminator where a solid has already gone dark.
 fn ambient_and_direct(
     albedo: vec3<f32>,
     normal: vec3<f32>,

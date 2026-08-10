@@ -50,9 +50,8 @@ fn every_pipeline_builds_and_draws_a_stand_of_trees() {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("renderer smoke test encoder"),
     });
-    // The same stand stands in for both tiers, so all three world pipelines
-    // record a draw: the far tier's cutout, the near tier's ground, and the
-    // foliage half of the near tier's trees.
+    // The same stand stands in for both tiers, so both world pipelines record
+    // a draw: the far tier's cutout and the near tier's ground.
     renderer.render(&mut encoder, &view, [&mesh], [&mesh], &[&mesh]);
     queue.submit(Some(encoder.finish()));
     device.poll(wgpu::Maintain::Wait);

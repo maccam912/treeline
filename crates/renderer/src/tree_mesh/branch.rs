@@ -1,57 +1,33 @@
-//! Branches, and the crowns that hang off them.
+//! The branches that reach out of a trunk.
 //!
-//! A broadleaf's crown is its branches: clusters of foliage on the ends of
-//! cylinders that reach out of the trunk. A conifer's is not — its whorls are
-//! an opaque skirt, and every branch drawn inside one is triangles nobody sees.
+//! A branch is a tapered cylinder of bark, placed by the individual's branching
+//! angle and density and shortened by whatever damage it carries. What hangs off
+//! the end of one is foliage, and foliage is drawn nowhere at the moment — see
+//! [`super::append_crown`].
 
 use glam::Vec3;
 use treeline_ecology::{CrownShape, ProceduralTree, TreeCondition};
 
-use crate::tree_mesh::color::{
-    bark_color, bark_cylinder_material, foliage_color, tree_has_foliage,
-};
+use crate::RendererError;
+use crate::tree_mesh::color::{bark_color, bark_cylinder_material};
 use crate::tree_mesh::geometry::TreeGeometry;
-use crate::tree_mesh::shape::{CylinderSpec, append_octahedral_crown, append_tapered_cylinder};
-use crate::tree_mesh::{TreeFrame, append_terminal_crown, crown_start};
+use crate::tree_mesh::shape::{CylinderSpec, append_tapered_cylinder};
+use crate::tree_mesh::{TreeFrame, crown_start};
 use crate::vertex::{f64_as_f32, hash_lane, usize_as_f32};
-use crate::{RendererError, TreeMeshDetail};
 
-/// Whether a tree's branches are worth drawing.
-///
-/// A living conifer's whorls are its crown, and the crown is opaque, so every
-/// branch cylinder inside it would be triangles nobody ever sees. A dead one
-/// has nothing to hide behind and is mostly branches.
-fn branches_are_visible(tree: ProceduralTree) -> bool {
-    tree.genotype.crown_shape != CrownShape::Conical || !tree_has_foliage(tree)
-}
-
-pub(crate) fn append_tree_crown(
+pub(crate) fn append_branches(
     geometry: &mut TreeGeometry,
     tree: ProceduralTree,
     frame: TreeFrame,
-    detail: TreeMeshDetail,
 ) -> Result<(), RendererError> {
-    if branches_are_visible(tree) {
-        let branch_count = branch_count(tree);
-        for branch_index in 0..branch_count {
-            append_tree_branch(geometry, tree, frame, branch_index, branch_count)?;
-        }
+    let branch_count = branch_count(tree);
+    for branch_index in 0..branch_count {
+        append_tree_branch(geometry, tree, frame, branch_index, branch_count)?;
     }
-
-    if !tree_has_foliage(tree) {
-        return Ok(());
-    }
-    append_terminal_crown(
-        geometry,
-        tree,
-        frame,
-        f64_as_f32(tree.crown_radius_meters),
-        foliage_color(tree),
-        detail,
-    )
+    Ok(())
 }
 
-pub(crate) fn append_tree_branch(
+fn append_tree_branch(
     geometry: &mut TreeGeometry,
     tree: ProceduralTree,
     frame: TreeFrame,
@@ -92,30 +68,10 @@ pub(crate) fn append_tree_branch(
             color: bark_color(tree),
             material: bark_cylinder_material(tree, branch_index + 1),
         },
-    )?;
-    if tree_has_foliage(tree) && tree.genotype.crown_shape != CrownShape::Conical {
-        let cluster_radius = crown_radius
-            * (0.22 + (f64_as_f32(tree.genotype.leaf_density_fraction) * 0.16))
-            * damage_scale;
-        let vertical_scale = match tree.genotype.crown_shape {
-            CrownShape::Columnar => 1.35,
-            CrownShape::Conical | CrownShape::Rounded => 1.0,
-        };
-        append_octahedral_crown(
-            geometry,
-            end,
-            Vec3::new(
-                cluster_radius,
-                cluster_radius * vertical_scale,
-                cluster_radius,
-            ),
-            foliage_color(tree),
-        )?;
-    }
-    Ok(())
+    )
 }
 
-pub(crate) fn branch_count(tree: ProceduralTree) -> usize {
+fn branch_count(tree: ProceduralTree) -> usize {
     let density = tree.genotype.branch_density_fraction * (1.0 - (tree.damage_fraction * 0.58));
     let mut count = 4_usize;
     for threshold in [0.18, 0.32, 0.46, 0.60, 0.74, 0.88] {

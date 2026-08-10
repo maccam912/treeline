@@ -67,8 +67,7 @@ impl TerrainBindings {
         let mut layout_entries = vec![
             uniform_layout_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
             uniform_layout_entry(1, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-            // Wind reaches the vertex stage too: needle shells sway on it.
-            uniform_layout_entry(2, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+            uniform_layout_entry(2, wgpu::ShaderStages::FRAGMENT),
             uniform_layout_entry(3, wgpu::ShaderStages::FRAGMENT),
             sampled_texture_array_layout_entry(4),
             sampled_texture_array_layout_entry(5),

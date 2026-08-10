@@ -1,13 +1,18 @@
 //! Turning tree individuals into geometry.
 //!
 //! A tree is drawn from its genotype rather than from a model library: trunk
-//! taper, branch angles, and crown shape all come from the individual. Detail
-//! levels drop branches first, then thin the crown, so a distant stand keeps
-//! its silhouette at a fraction of the cost.
+//! taper and branch angles come from the individual. Detail levels drop
+//! branches first, so a distant stand keeps its silhouette at a fraction of the
+//! cost.
+//!
+//! Crowns are not drawn at all: foliage rendering is being rebuilt from
+//! scratch, and [`append_crown`] is the blank it will be rebuilt into. What a
+//! crown is made of still reaches it — the individual, where its trunk ends,
+//! and how wide the stand measured its crown — so nothing on the data side had
+//! to be kept alive artificially for it.
 
 mod branch;
 mod color;
-mod conifer;
 mod geometry;
 mod shape;
 #[cfg(test)]
@@ -18,12 +23,9 @@ use treeline_ecology::{CrownShape, ProceduralTree, TreeCondition};
 
 use crate::vertex::{f64_as_f32, translate_local_vertices};
 use crate::{RendererError, TreeMeshDetail};
-use branch::append_tree_crown;
-use color::{
-    CylinderMaterial, bark_color, bark_cylinder_material, foliage_color, tree_has_foliage,
-};
-use conifer::append_conifer_crown;
-use shape::{CylinderSpec, append_octahedral_crown, append_tapered_cylinder};
+use branch::append_branches;
+use color::{CylinderMaterial, bark_color, bark_cylinder_material};
+use shape::{CylinderSpec, append_tapered_cylinder};
 
 pub(crate) use geometry::TreeGeometry;
 
@@ -91,30 +93,16 @@ pub(crate) fn append_tree(
         },
     )?;
 
-    if tree.condition == TreeCondition::Sapling {
-        return append_sapling_crown(geometry, tree, base, top);
-    }
-
     let frame = TreeFrame {
         base,
-        top,
         trunk_vector,
         trunk_radius,
     };
-    if detail == TreeMeshDetail::Full {
-        append_tree_crown(geometry, tree, frame, detail)
-    } else if tree_has_foliage(tree) {
-        append_terminal_crown(
-            geometry,
-            tree,
-            frame,
-            f64_as_f32(tree.crown_radius_meters),
-            foliage_color(tree),
-            detail,
-        )
-    } else {
-        Ok(())
+    // A sapling is a stem, and too small to carry branches at any tier.
+    if tree.condition != TreeCondition::Sapling && detail == TreeMeshDetail::Full {
+        append_branches(geometry, tree, frame)?;
     }
+    append_crown(geometry, tree, frame, detail)
 }
 
 /// Where a crown starts on the trunk, as a fraction of its height.
@@ -126,80 +114,30 @@ fn crown_start(tree: ProceduralTree) -> f32 {
     }
 }
 
+/// The trunk a crown and its branches hang off, in the tree's local space.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TreeFrame {
     base: Vec3,
-    top: Vec3,
     trunk_vector: Vec3,
     trunk_radius: f32,
 }
 
-/// The foliage mass a tree carries at the top of its trunk.
+/// The foliage a tree carries on its trunk. Draws nothing.
 ///
-/// Conifers get whorls of branch skirts, which every detail tier fills the same
-/// envelope with; broadleaves get one crown solid.
-pub(crate) fn append_terminal_crown(
-    geometry: &mut TreeGeometry,
-    tree: ProceduralTree,
-    frame: TreeFrame,
-    crown_radius: f32,
-    foliage: [f32; 4],
-    detail: TreeMeshDetail,
+/// Foliage rendering is being written from scratch, and this is where it hooks
+/// back in. Everything the old crowns were built from still arrives here: the
+/// individual carries its crown radius, shape, and condition, and `frame` says
+/// where its trunk runs.
+///
+/// The `Result` is what a crown will hand back the moment it appends anything:
+/// every other geometry call here can outgrow `u32` addressing, and this one
+/// will too.
+#[allow(clippy::unnecessary_wraps)]
+fn append_crown(
+    _geometry: &mut TreeGeometry,
+    _tree: ProceduralTree,
+    _frame: TreeFrame,
+    _detail: TreeMeshDetail,
 ) -> Result<(), RendererError> {
-    match tree.genotype.crown_shape {
-        CrownShape::Conical => append_conifer_crown(
-            geometry,
-            tree,
-            frame.base + (frame.trunk_vector * crown_start(tree)),
-            frame.top + (Vec3::Y * crown_radius * 0.18),
-            crown_radius,
-            foliage,
-            detail,
-        ),
-        CrownShape::Columnar | CrownShape::Rounded => append_octahedral_crown(
-            geometry,
-            frame.base + (frame.trunk_vector * 0.82),
-            Vec3::new(
-                crown_radius * 0.72,
-                crown_radius
-                    * if tree.genotype.crown_shape == CrownShape::Columnar {
-                        1.25
-                    } else {
-                        0.82
-                    },
-                crown_radius * 0.72,
-            ),
-            foliage,
-        ),
-    }
-}
-
-pub(crate) fn append_sapling_crown(
-    geometry: &mut TreeGeometry,
-    tree: ProceduralTree,
-    base: Vec3,
-    top: Vec3,
-) -> Result<(), RendererError> {
-    if !tree_has_foliage(tree) {
-        return Ok(());
-    }
-    let radius = f64_as_f32(tree.crown_radius_meters);
-    if tree.genotype.crown_shape == CrownShape::Conical {
-        append_conifer_crown(
-            geometry,
-            tree,
-            base + ((top - base) * 0.36),
-            top,
-            radius,
-            foliage_color(tree),
-            TreeMeshDetail::Simplified,
-        )
-    } else {
-        append_octahedral_crown(
-            geometry,
-            base + ((top - base) * 0.72),
-            Vec3::new(radius, radius * 1.15, radius),
-            foliage_color(tree),
-        )
-    }
+    Ok(())
 }

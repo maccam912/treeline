@@ -9,15 +9,10 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use treeline_mesher::Mesh;
 
-use crate::RendererError;
-
 pub(crate) const SURFACE_KIND_SOLID: f32 = 0.0;
 pub(crate) const SURFACE_KIND_WATER: f32 = 1.0;
 pub(crate) const SURFACE_KIND_PINE_BARK: f32 = 2.0;
 pub(crate) const SURFACE_KIND_OAK_BARK: f32 = 3.0;
-/// Conifer foliage: shaded as a mass of needles rather than a lit surface, and
-/// grown procedurally out of the shell a vertex sits on rather than textured.
-pub(crate) const SURFACE_KIND_NEEDLE_FOLIAGE: f32 = 4.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -29,12 +24,10 @@ pub(crate) struct TerrainVertex {
     pub(crate) position_low: [f32; 3],
     pub(crate) surface_kind: f32,
     pub(crate) material_uv: [f32; 2],
-    pub(crate) needle_depth: f32,
-    pub(crate) needle_seed: f32,
 }
 
 impl TerrainVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x4,
@@ -42,8 +35,6 @@ impl TerrainVertex {
         4 => Float32x3,
         5 => Float32,
         6 => Float32x2,
-        7 => Float32,
-        8 => Float32,
     ];
 
     pub(crate) fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -70,8 +61,6 @@ pub(crate) fn terrain_vertex(
         position_low,
         surface_kind: SURFACE_KIND_SOLID,
         material_uv: [0.0; 2],
-        needle_depth: 0.0,
-        needle_seed: 0.0,
     }
 }
 
@@ -123,44 +112,6 @@ pub(crate) fn material_vertex(
     vertex
 }
 
-/// One vertex of a conifer crown volume.
-///
-/// A crown is drawn as one closed cone rather than a mass of shells, and the
-/// cone's envelope is carried here so the shader can reconstruct the volume and
-/// ray-march it. The fields are reused for what the cone needs, since a foliage
-/// vertex has no texture to map:
-///
-/// - `base_relative` is where this vertex sits relative to the crown's base, as
-///   a small local offset. It rides in `normal`, and the shader subtracts it
-///   from the fragment's high-precision position to recover the crown base.
-/// - `apex_offset` is `apex - base`, the small vector that spans the crown. It
-///   rides in `material_uv` and `needle_seed`.
-/// - `crown_radius` (in `needle_depth`) and `seed` (in `snow_coverage`) complete
-///   the cone and give its needle field its own key.
-///
-/// The vertex position is the point on the cone surface in local crown space;
-/// the tree's translation to world space happens at upload, which is what keeps
-/// the crown base recoverable with full precision.
-pub(crate) fn crown_volume_vertex(
-    base_relative: Vec3,
-    apex_offset: Vec3,
-    crown_radius: f32,
-    seed: f32,
-    color: [f32; 4],
-) -> TerrainVertex {
-    let mut vertex = material_vertex(
-        base_relative,
-        base_relative,
-        color,
-        SURFACE_KIND_NEEDLE_FOLIAGE,
-        [apex_offset.x, apex_offset.y],
-    );
-    vertex.needle_seed = apex_offset.z;
-    vertex.needle_depth = crown_radius;
-    vertex.snow_coverage = seed;
-    vertex
-}
-
 pub(crate) fn split_position(position: [f64; 3]) -> ([f32; 3], [f32; 3]) {
     let split = position.map(split_f64);
     (
@@ -200,36 +151,6 @@ pub(crate) fn hash_lane(key: u64, lane: usize) -> f32 {
     f32::from(byte) / 255.0
 }
 
-/// A value in `[0, 1)` for one identity and one lane.
-///
-/// [`hash_lane`] reads one of a key's eight bytes, which is enough variation
-/// for a tree's handful of branches but not for the thousands of needle sprays
-/// in its crown. This mixes the whole key instead, so lanes stay independent
-/// however many a crown draws.
-pub(crate) fn hash_fraction(key: u64, lane: u64) -> f32 {
-    const UNIT_STEPS: f32 = 16_777_216.0;
-
-    let mixed = splitmix64(key ^ splitmix64(lane));
-    u32_as_f32(u32_from_u64(mixed >> 40)) / UNIT_STEPS
-}
-
-const fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
-}
-
-#[allow(clippy::cast_possible_truncation)]
-const fn u32_from_u64(value: u64) -> u32 {
-    value as u32
-}
-
-#[allow(clippy::cast_precision_loss)]
-const fn u32_as_f32(value: u32) -> f32 {
-    value as f32
-}
-
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn f64_as_f32(value: f64) -> f32 {
     value as f32
@@ -238,10 +159,6 @@ pub(crate) fn f64_as_f32(value: f64) -> f32 {
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn usize_as_f32(value: usize) -> f32 {
     value as f32
-}
-
-pub(crate) fn usize_as_u32(value: usize) -> Result<u32, RendererError> {
-    u32::try_from(value).map_err(|_| RendererError::TooManyIndices)
 }
 
 #[cfg(test)]
@@ -314,16 +231,14 @@ mod tests {
 
     #[test]
     fn every_surface_kind_occupies_a_distinct_band() {
-        const _: () = assert!(SURFACE_KIND_NEEDLE_FOLIAGE > SURFACE_KIND_OAK_BARK);
         let mut kinds = vec![
             SURFACE_KIND_SOLID,
             SURFACE_KIND_WATER,
             SURFACE_KIND_PINE_BARK,
             SURFACE_KIND_OAK_BARK,
-            SURFACE_KIND_NEEDLE_FOLIAGE,
         ];
         kinds.sort_by(f32::total_cmp);
         kinds.dedup();
-        assert_eq!(kinds.len(), 5);
+        assert_eq!(kinds.len(), 4);
     }
 }

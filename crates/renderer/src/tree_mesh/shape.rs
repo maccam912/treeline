@@ -1,9 +1,7 @@
 //! The primitive solids tree geometry is assembled from.
 //!
-//! Trunks and branches are tapered cylinders; broadleaf crowns are octahedra.
-//! Keeping them here lets the tree grammar read as structure rather than vertex
-//! arithmetic. Conifer foliage is not here at all: it is shelled, and lives in
-//! [`crate::tree_mesh::cluster`].
+//! Trunks and branches are tapered cylinders. Keeping them here lets the tree
+//! grammar read as structure rather than vertex arithmetic.
 
 use glam::Vec3;
 
@@ -98,46 +96,6 @@ pub(crate) fn append_tapered_cylinder(
             base_index + ring_stride + next,
             base_index + ring_stride + side,
         ]);
-    }
-    Ok(())
-}
-
-pub(crate) fn append_octahedral_crown(
-    geometry: &mut TreeGeometry,
-    center: Vec3,
-    radius: Vec3,
-    color: [f32; 4],
-) -> Result<(), RendererError> {
-    let vertices = &mut geometry.vertices;
-    let indices = &mut geometry.indices;
-    let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
-    let offsets = [
-        Vec3::Y * radius.y,
-        Vec3::X * radius.x,
-        Vec3::Z * radius.z,
-        -Vec3::X * radius.x,
-        -Vec3::Z * radius.z,
-        -Vec3::Y * radius.y,
-    ];
-    for offset in offsets {
-        vertices.push(local_vertex(
-            center + offset,
-            offset.normalize_or_zero(),
-            color,
-            0.0,
-        ));
-    }
-    for triangle in [
-        [0, 2, 1],
-        [0, 3, 2],
-        [0, 4, 3],
-        [0, 1, 4],
-        [5, 1, 2],
-        [5, 2, 3],
-        [5, 3, 4],
-        [5, 4, 1],
-    ] {
-        indices.extend(triangle.map(|index| base_index + index));
     }
     Ok(())
 }
