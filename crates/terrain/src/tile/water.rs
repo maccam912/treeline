@@ -10,10 +10,12 @@ pub const WATER_MASK_SPACING_METERS: f64 = 4.0;
 
 /// Versioned horizontal expansion of every mapped footprint, in meters.
 ///
-/// One water cell of dilation lets the horizontal sheet intersect the
+/// Two water cells of dilation let the horizontal sheet pass beneath the
 /// surrounding shore instead of ending at the polygon edge. It is a rendering
 /// decision recorded in bundle metadata, not measured lake extent.
-pub const FOOTPRINT_EXPANSION_METERS: f64 = 4.0;
+pub const FOOTPRINT_EXPANSION_METERS: f64 = 8.0;
+
+const FOOTPRINT_EXPANSION_CELLS: isize = 2;
 
 /// One mapped lake at a horizontal position.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,11 +79,11 @@ impl Water {
     /// Returns the lake covering a horizontal position, if any.
     pub fn lake_at(&self, x: f64, z: f64) -> Option<LakeSample> {
         let expansion_cells = FOOTPRINT_EXPANSION_METERS / self.raster.spacing_meters;
-        debug_assert_eq!(expansion_cells.to_bits(), 1.0_f64.to_bits());
+        debug_assert_eq!(expansion_cells.to_bits(), 2.0_f64.to_bits());
         let (cell_x, cell_z) = self.raster.containing_cell(x, z, expansion_cells)?;
         let id = match self.mapped_id(cell_x, cell_z) {
             Some(id) => id,
-            None => self.dilated_id(cell_x, cell_z)?,
+            None => self.dilated_id(cell_x, cell_z, FOOTPRINT_EXPANSION_CELLS)?,
         };
         Some(LakeSample {
             id,
@@ -99,14 +101,14 @@ impl Water {
             .filter(|id| *id != 0)
     }
 
-    /// Extends every mapped shore by one cell in each direction.
+    /// Extends every mapped shore by the configured cell radius.
     ///
     /// The lowest identifier wins the rare overlap, so a shore cell resolves to
     /// the same lake on every visit.
-    fn dilated_id(&self, cell_x: isize, cell_z: isize) -> Option<u8> {
-        (-1..=1)
+    fn dilated_id(&self, cell_x: isize, cell_z: isize, radius: isize) -> Option<u8> {
+        (-radius..=radius)
             .flat_map(|offset_z| {
-                (-1..=1).map(move |offset_x| (cell_x + offset_x, cell_z + offset_z))
+                (-radius..=radius).map(move |offset_x| (cell_x + offset_x, cell_z + offset_z))
             })
             .filter_map(|(x, z)| self.mapped_id(x, z))
             .min()

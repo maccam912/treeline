@@ -12,8 +12,8 @@ use treeline_terrain::WATER_MASK_SPACING_METERS;
 use crate::mesh::TerrainMeshSpec;
 use crate::terrain::WorldTerrain;
 
-/// Raises the representative bare-earth level to meet the visible shoreline.
-const WATER_LEVEL_OFFSET_METERS: f64 = 2.0;
+/// Keeps the sheet just above its representative level to avoid z-fighting.
+const RENDER_OFFSET_METERS: f64 = 0.05;
 
 /// Depth given to a lake cell that the recorded level does not reach.
 ///
@@ -50,7 +50,7 @@ pub fn lake_sheet(terrain: WorldTerrain, spec: TerrainMeshSpec) -> Result<Mesh, 
                 cell_z,
                 min,
                 max,
-                lake.surface_elevation_meters + WATER_LEVEL_OFFSET_METERS,
+                lake.surface_elevation_meters + RENDER_OFFSET_METERS,
             )?;
         }
     }
@@ -211,14 +211,14 @@ mod tests {
     }
 
     #[test]
-    fn water_uses_the_configured_level_offset() {
+    fn water_uses_only_the_render_offset() {
         let mesh = lake_sheet(TERRAIN, chunk_spec(LAKE_INTERIOR)).expect("valid grid");
         let level = TERRAIN
             .lake_at(LAKE_INTERIOR[0], LAKE_INTERIOR[1])
             .expect("mapped lake")
             .surface_elevation_meters;
         for position in &mesh.positions {
-            assert!((position[1] - level - WATER_LEVEL_OFFSET_METERS).abs() < 1.0e-9);
+            assert!((position[1] - level - RENDER_OFFSET_METERS).abs() < 1.0e-9);
         }
     }
 

@@ -449,7 +449,7 @@ def main() -> None:
     if args.metadata:
         metadata = {
             "schema_version": 1,
-            "settings_identity": "0x5355525645590003",
+            "settings_identity": "0x5355525645590004",
             "artifact_sha256": hashlib.sha256(encoded).hexdigest(),
             "artifact_size_bytes": len(encoded),
             "center_wgs84": [46.16084629042455, -88.3374704874157],
@@ -485,8 +485,8 @@ def main() -> None:
                 "artifact_sha256": hashlib.sha256(water_encoded).hexdigest(),
                 "artifact_size_bytes": len(water_encoded),
                 "spacing_meters": WATER_SPACING_METERS,
-                "runtime_level_offset_meters": 2.0,
-                "runtime_footprint_expansion_meters": 4.0,
+                "runtime_level_offset_meters": 0.0,
+                "runtime_footprint_expansion_meters": 8.0,
                 "source": "USGS National Hydrography Dataset, Waterbody - Large Scale",
                 "source_url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",
                 "source_rights": "Open and non-proprietary (USGS)",

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "settings_identity": "0x5355525645590003",
+  "settings_identity": "0x5355525645590004",
   "artifact_sha256": "731e484fd076332ec4796a0f748e5c40b2c97abb9eb18c53caa0b1c63f8b44d8",
   "artifact_size_bytes": 25005040,
   "center_wgs84": [
@@ -41,8 +41,8 @@
     "artifact_sha256": "5105d36d9babe8c57531669519aadec3daa33c98860037e9f2e596062ea569f1",
     "artifact_size_bytes": 36715,
     "spacing_meters": 4.0,
-    "runtime_level_offset_meters": 2.0,
-    "runtime_footprint_expansion_meters": 4.0,
+    "runtime_level_offset_meters": 0.0,
+    "runtime_footprint_expansion_meters": 8.0,
     "source": "USGS National Hydrography Dataset, Waterbody - Large Scale",
     "source_url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",
     "source_rights": "Open and non-proprietary (USGS)",

@@ -98,11 +98,12 @@ both retain the mask's four-meter resolution, so streaming LOD never turns a
 curved shoreline into coarse terrain-sized blocks.
 
 Each lake carries a representative level: the median bare-earth elevation inside
-its source polygon. The runtime raises that representative level by two meters so
-the rendered sheet meets the mapped shoreline instead of being clipped by the
-coarse terrain surface. That is a level, not a bathymetry. Treeline does not claim
-to know how deep these lakes are, and the runtime gives a shore cell a minimum
-visible film rather than pretending to a depth it has not measured.
+its source polygon. The rendered sheet stays at that level, apart from a five
+centimeter anti-z-fighting lift, and extends eight meters beneath the surrounding
+shore so its raster boundary remains hidden by terrain. That is a level, not a
+bathymetry. Treeline does not claim to know how deep these lakes are, and the
+runtime gives a shore cell a minimum visible film rather than pretending to a
+depth it has not measured.
 
 Rivers, flow, and dynamic water are not implemented. Treeline previously
 simulated all three procedurally; that went with the procedural surface. They

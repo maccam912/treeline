@@ -23,7 +23,7 @@ pub use water::{LakeSample, WATER_MASK_SPACING_METERS};
 ///
 /// Any incompatible change to a layer's bytes, coordinate frame, sampler, or
 /// meaning must take a new value so saved worlds cannot silently change.
-pub const SURVEYED_SETTINGS_HASH: u64 = 0x5355_5256_4559_0003;
+pub const SURVEYED_SETTINGS_HASH: u64 = 0x5355_5256_4559_0004;
 
 /// Edge length of the bundle's footprint in local world meters.
 pub const SURVEYED_TILE_EDGE_METERS: f64 = 10_000.0;
@@ -77,9 +77,9 @@ mod tests {
     fn bundle_metadata_agrees_with_the_selecting_identity() {
         assert!(
             include_str!("../../assets/michigan_tile.json")
-                .contains("\"settings_identity\": \"0x5355525645590003\"")
+                .contains("\"settings_identity\": \"0x5355525645590004\"")
         );
-        assert_eq!(SURVEYED_SETTINGS_HASH, 0x5355_5256_4559_0003);
+        assert_eq!(SURVEYED_SETTINGS_HASH, 0x5355_5256_4559_0004);
     }
 
     #[test]
@@ -131,13 +131,14 @@ mod tests {
     }
 
     #[test]
-    fn lake_footprints_expand_one_cell_beyond_the_mapped_shore() {
+    fn lake_footprints_expand_two_cells_beyond_the_mapped_shore() {
         let water = water::decode();
         let (shore_x, shore_z, id) = water
             .east_facing_shore()
             .expect("surveyed water contains an east-facing shore");
 
         assert_eq!(lake_at(shore_x, shore_z).map(|lake| lake.id), Some(id));
+        assert!(lake_at(shore_x + WATER_MASK_SPACING_METERS, shore_z).is_some());
     }
 
     #[test]
