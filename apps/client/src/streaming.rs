@@ -5,11 +5,14 @@
 //! and uploads whatever comes back. Terrain generation happens elsewhere; this
 //! only decides what to ask for and what to keep.
 
+mod far_mask;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::{
-    Assets, Commands, Entity, Mesh as BevyMesh, Mesh3d, MeshMaterial3d, Resource, Transform,
+    Assets, Commands, Entity, Handle, Mesh as BevyMesh, Mesh3d, MeshMaterial3d, Resource, Transform,
 };
 use treeline_coordinates::WorldPosition;
 use treeline_mesher::Mesh;
@@ -26,6 +29,7 @@ use web_time::{Duration, Instant};
 
 use crate::TerrainMeshQueue;
 use crate::progress::LoadProgress;
+use far_mask::FarMeshMask;
 
 /// How many completed meshes to upload per frame, and the time budget for them.
 ///
@@ -56,6 +60,8 @@ pub struct ResidentFarTile {
     pub spec: FarTerrainMeshSpec,
     pub terrain: Entity,
     pub water: Option<Entity>,
+    terrain_mask: FarMeshMask,
+    water_mask: Option<FarMeshMask>,
 }
 
 /// Everything resident, and everything asked for but not yet delivered.
@@ -182,7 +188,9 @@ pub fn update(
     integrate_completed(
         commands, meshes, materials, terrain, resident, jobs, progress,
     );
-    schedule(commands, streamers, motion, resident, jobs)
+    let result = schedule(commands, streamers, motion, resident, jobs);
+    mask_far_surfaces(meshes, resident);
+    result
 }
 
 /// Uploads completed meshes, within this frame's budget.
@@ -233,7 +241,7 @@ fn integrate_completed(
         };
         // A failed upload must not abort the whole update either; the cleared
         // request lets a later frame retry.
-        let Ok((surface, water)) = upload(
+        let Ok(uploaded) = upload(
             commands,
             meshes,
             materials,
@@ -250,20 +258,28 @@ fn integrate_completed(
                     spec.chunk,
                     ResidentChunk {
                         spec,
-                        terrain: surface,
-                        water,
+                        terrain: uploaded.terrain,
+                        water: uploaded.water,
                     },
                 ) {
                     despawn_surface(commands, previous.terrain, previous.water);
                 }
             }
             TerrainMeshSpec::Far(spec) => {
+                commands.entity(uploaded.terrain).insert(NotShadowCaster);
+                let terrain_mask = FarMeshMask::new(uploaded.terrain_mesh, &mesh);
+                let water_mask = uploaded
+                    .water_mesh
+                    .zip(lake_mesh.as_ref())
+                    .map(|(handle, source)| FarMeshMask::new(handle, source));
                 if let Some(previous) = resident.far_tiles.insert(
                     spec.tile,
                     ResidentFarTile {
                         spec,
-                        terrain: surface,
-                        water,
+                        terrain: uploaded.terrain,
+                        water: uploaded.water,
+                        terrain_mask,
+                        water_mask,
                     },
                 ) {
                     despawn_surface(commands, previous.terrain, previous.water);
@@ -301,13 +317,13 @@ fn upload(
     terrain: &WorldTerrain,
     mesh: &Mesh,
     lake_mesh: Option<&Mesh>,
-) -> Result<(Entity, Option<Entity>), Box<dyn Error>> {
+) -> Result<UploadedSurface, Box<dyn Error>> {
     let surface = prepare_terrain_mesh(mesh, |x, z| {
         terrain
             .snow_cover_for_slope(x, z, SURFACE_SEASON, 0.0)
             .map(|snow| snow.coverage_fraction)
     })?;
-    let surface_entity = spawn_prepared(
+    let (surface_entity, terrain_mesh) = spawn_prepared(
         commands,
         meshes,
         materials.terrain.clone(),
@@ -319,9 +335,24 @@ fn upload(
         .map(prepare_water_mesh)
         .transpose()?
         .map(|prepared| {
-            spawn_prepared(commands, meshes, materials.water.clone(), prepared, "water")
+            let (entity, mesh) =
+                spawn_prepared(commands, meshes, materials.water.clone(), prepared, "water");
+            commands.entity(entity).insert(NotShadowCaster);
+            (entity, mesh)
         });
-    Ok((surface_entity, water))
+    Ok(UploadedSurface {
+        terrain: surface_entity,
+        terrain_mesh,
+        water: water.as_ref().map(|(entity, _)| *entity),
+        water_mesh: water.map(|(_, mesh)| mesh),
+    })
+}
+
+struct UploadedSurface {
+    terrain: Entity,
+    terrain_mesh: Handle<BevyMesh>,
+    water: Option<Entity>,
+    water_mesh: Option<Handle<BevyMesh>>,
 }
 
 fn spawn_prepared(
@@ -330,16 +361,28 @@ fn spawn_prepared(
     material: bevy::prelude::Handle<bevy::prelude::StandardMaterial>,
     prepared: treeline_renderer::PreparedMesh,
     name: &'static str,
-) -> Entity {
-    commands
+) -> (Entity, Handle<BevyMesh>) {
+    let mesh = meshes.add(prepared.mesh);
+    let entity = commands
         .spawn((
             bevy::prelude::Name::new(name),
-            Mesh3d(meshes.add(prepared.mesh)),
+            Mesh3d(mesh.clone()),
             MeshMaterial3d(material),
             Transform::default(),
             WorldMeshOrigin(prepared.world_origin),
         ))
-        .id()
+        .id();
+    (entity, mesh)
+}
+
+fn mask_far_surfaces(meshes: &mut Assets<BevyMesh>, resident: &mut ResidentTerrain) {
+    let covered = resident.chunks.keys().copied().collect::<BTreeSet<_>>();
+    for far in resident.far_tiles.values_mut() {
+        far.terrain_mask.update(meshes, &covered);
+        if let Some(water) = &mut far.water_mask {
+            water.update(meshes, &covered);
+        }
+    }
 }
 
 fn despawn_surface(commands: &mut Commands, terrain: Entity, water: Option<Entity>) {

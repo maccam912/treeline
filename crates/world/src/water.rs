@@ -12,8 +12,11 @@ use treeline_terrain::WATER_MASK_SPACING_METERS;
 use crate::mesh::TerrainMeshSpec;
 use crate::terrain::WorldTerrain;
 
-/// Keeps the sheet just above its representative level to avoid z-fighting.
-const RENDER_OFFSET_METERS: f64 = 0.05;
+/// Empirical correction applied to the representative source level.
+const LEVEL_OFFSET_METERS: f64 = 0.05;
+
+/// Keeps the corrected sheet just above its level to avoid z-fighting.
+const ANTI_Z_FIGHTING_LIFT_METERS: f64 = 0.05;
 
 /// Depth given to a lake cell that the recorded level does not reach.
 ///
@@ -50,7 +53,7 @@ pub fn lake_sheet(terrain: WorldTerrain, spec: TerrainMeshSpec) -> Result<Mesh, 
                 cell_z,
                 min,
                 max,
-                lake.surface_elevation_meters + RENDER_OFFSET_METERS,
+                lake.surface_elevation_meters + LEVEL_OFFSET_METERS + ANTI_Z_FIGHTING_LIFT_METERS,
             )?;
         }
     }
@@ -179,7 +182,6 @@ mod tests {
     use crate::streaming::{ChunkMeshSpec, FarTerrainMeshSpec, FarTileIndex};
     use crate::{DEFAULT_WORLD_IDENTITY, TerrainMeshSpec};
     use treeline_coordinates::WorldPosition;
-    use treeline_terrain::{SURVEYED_SPAWN_X, SURVEYED_SPAWN_Z};
     use treeline_voxel::{ChunkIndex, TransitionFaces};
 
     const TERRAIN: WorldTerrain = WorldTerrain::new(DEFAULT_WORLD_IDENTITY);
@@ -205,20 +207,22 @@ mod tests {
 
     #[test]
     fn dry_ground_gets_no_water() {
-        let mesh = lake_sheet(TERRAIN, chunk_spec([SURVEYED_SPAWN_X, SURVEYED_SPAWN_Z]))
-            .expect("valid grid");
+        let mesh = lake_sheet(TERRAIN, chunk_spec([128.0, 128.0])).expect("valid grid");
         assert!(mesh.indices.is_empty());
     }
 
     #[test]
-    fn water_uses_only_the_render_offset() {
+    fn water_uses_the_calibrated_level_and_render_lift() {
         let mesh = lake_sheet(TERRAIN, chunk_spec(LAKE_INTERIOR)).expect("valid grid");
         let level = TERRAIN
             .lake_at(LAKE_INTERIOR[0], LAKE_INTERIOR[1])
             .expect("mapped lake")
             .surface_elevation_meters;
         for position in &mesh.positions {
-            assert!((position[1] - level - RENDER_OFFSET_METERS).abs() < 1.0e-9);
+            assert!(
+                (position[1] - level - LEVEL_OFFSET_METERS - ANTI_Z_FIGHTING_LIFT_METERS).abs()
+                    < 1.0e-9
+            );
         }
     }
 

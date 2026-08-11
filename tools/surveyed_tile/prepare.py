@@ -25,6 +25,8 @@ TARGET_BOUNDS = (390_000.0, 5_110_000.0, 400_000.0, 5_120_000.0)
 TARGET_SPACING_METERS = 2.0
 COLOR_SPACING_METERS = 8.0
 WATER_SPACING_METERS = 4.0
+WATER_LEVEL_OFFSET_METERS = 0.05
+WATER_FOOTPRINT_EXPANSION_METERS = 12.0
 CANOPY_SPACING_METERS = 6.0
 CANOPY_SOURCE_SPACING_METERS = 2.0
 MINIMUM_TREE_HEIGHT_METERS = 2.0
@@ -449,7 +451,7 @@ def main() -> None:
     if args.metadata:
         metadata = {
             "schema_version": 1,
-            "settings_identity": "0x5355525645590004",
+            "settings_identity": "0x5355525645590005",
             "artifact_sha256": hashlib.sha256(encoded).hexdigest(),
             "artifact_size_bytes": len(encoded),
             "center_wgs84": [46.16084629042455, -88.3374704874157],
@@ -485,8 +487,8 @@ def main() -> None:
                 "artifact_sha256": hashlib.sha256(water_encoded).hexdigest(),
                 "artifact_size_bytes": len(water_encoded),
                 "spacing_meters": WATER_SPACING_METERS,
-                "runtime_level_offset_meters": 0.0,
-                "runtime_footprint_expansion_meters": 8.0,
+                "runtime_level_offset_meters": WATER_LEVEL_OFFSET_METERS,
+                "runtime_footprint_expansion_meters": WATER_FOOTPRINT_EXPANSION_METERS,
                 "source": "USGS National Hydrography Dataset, Waterbody - Large Scale",
                 "source_url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",
                 "source_rights": "Open and non-proprietary (USGS)",

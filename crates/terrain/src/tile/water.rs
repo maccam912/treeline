@@ -10,12 +10,12 @@ pub const WATER_MASK_SPACING_METERS: f64 = 4.0;
 
 /// Versioned horizontal expansion of every mapped footprint, in meters.
 ///
-/// Two water cells of dilation let the horizontal sheet pass beneath the
+/// Three water cells of dilation let the horizontal sheet pass beneath the
 /// surrounding shore instead of ending at the polygon edge. It is a rendering
 /// decision recorded in bundle metadata, not measured lake extent.
-pub const FOOTPRINT_EXPANSION_METERS: f64 = 8.0;
+pub const FOOTPRINT_EXPANSION_METERS: f64 = 12.0;
 
-const FOOTPRINT_EXPANSION_CELLS: isize = 2;
+const FOOTPRINT_EXPANSION_CELLS: isize = 3;
 
 /// One mapped lake at a horizontal position.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,7 +79,7 @@ impl Water {
     /// Returns the lake covering a horizontal position, if any.
     pub fn lake_at(&self, x: f64, z: f64) -> Option<LakeSample> {
         let expansion_cells = FOOTPRINT_EXPANSION_METERS / self.raster.spacing_meters;
-        debug_assert_eq!(expansion_cells.to_bits(), 2.0_f64.to_bits());
+        debug_assert_eq!(expansion_cells.to_bits(), 3.0_f64.to_bits());
         let (cell_x, cell_z) = self.raster.containing_cell(x, z, expansion_cells)?;
         let id = match self.mapped_id(cell_x, cell_z) {
             Some(id) => id,
