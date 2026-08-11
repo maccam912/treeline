@@ -1,6 +1,7 @@
 //! Where the player is looking from, and how they move.
 
-use glam::{DVec3, Mat4, Vec2, Vec3};
+use bevy::prelude::Resource;
+use glam::{DVec3, Vec2};
 use treeline_coordinates::WorldPosition;
 use treeline_terrain::{DensityField, SurfaceField};
 
@@ -38,7 +39,7 @@ impl CameraMode {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Resource)]
 pub struct Camera {
     pub position: DVec3,
     yaw: f64,
@@ -178,17 +179,6 @@ impl Camera {
         let direction = movement.normalize();
         [direction.x, direction.z]
     }
-
-    /// Builds the view-projection matrix for a viewport.
-    ///
-    /// An infinite reverse-Z projection keeps the 32-bit depth buffer precise
-    /// for nearby vegetation and the distant horizon at the same time.
-    pub fn view_projection(self, width: u32, height: u32) -> [[f32; 4]; 4] {
-        let aspect = u32_as_f32(width) / u32_as_f32(height.max(1));
-        let projection = Mat4::perspective_infinite_reverse_rh(60.0_f32.to_radians(), aspect, 0.1);
-        let view = Mat4::look_to_rh(Vec3::ZERO, self.direction().as_vec3(), Vec3::Y);
-        (projection * view).to_cols_array_2d()
-    }
 }
 
 /// Surface elevation at a position the player can actually be at.
@@ -254,16 +244,11 @@ pub fn walkable_floor_height(
     None
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn u32_as_f32(value: u32) -> f32 {
-    value as f32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::keyboard::KeyCode;
     use treeline_terrain::{Material, TerrainSample};
-    use winit::keyboard::KeyCode;
 
     #[derive(Clone, Copy, Debug)]
     struct SlopedGround;

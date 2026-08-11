@@ -82,36 +82,6 @@ pub fn far_terrain_mesh(
     surface_grid(field, spec.surface_grid())
 }
 
-/// The chunk rectangle that near terrain fully covers.
-///
-/// Far tiles cut this rectangle out of themselves so the two tiers do not
-/// draw the same ground twice.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct NearTerrainCutout {
-    pub min: ChunkIndex,
-    pub max_exclusive: ChunkIndex,
-}
-
-impl NearTerrainCutout {
-    pub const fn new(min: ChunkIndex, max_exclusive: ChunkIndex) -> Option<Self> {
-        if min.x >= max_exclusive.x || min.z >= max_exclusive.z {
-            return None;
-        }
-        Some(Self { min, max_exclusive })
-    }
-
-    pub fn around(center: ChunkIndex, radius: u64) -> Option<Self> {
-        let radius = i64::try_from(radius).ok()?;
-        Some(Self {
-            min: ChunkIndex::new(center.x.checked_sub(radius)?, center.z.checked_sub(radius)?),
-            max_exclusive: ChunkIndex::new(
-                center.x.checked_add(radius)?.checked_add(1)?,
-                center.z.checked_add(radius)?.checked_add(1)?,
-            ),
-        })
-    }
-}
-
 /// Far-terrain residency radii, in tiles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FarTerrainStreamingConfig {
@@ -315,16 +285,5 @@ mod tests {
 
         assert!(settled.load.is_empty());
         assert!(settled.unload.is_empty());
-    }
-
-    #[test]
-    fn cutouts_reject_empty_rectangles() {
-        assert_eq!(
-            NearTerrainCutout::new(ChunkIndex::new(0, 0), ChunkIndex::new(0, 1)),
-            None
-        );
-        let cutout = NearTerrainCutout::around(ChunkIndex::new(0, 0), 2).expect("valid cutout");
-        assert_eq!(cutout.min, ChunkIndex::new(-2, -2));
-        assert_eq!(cutout.max_exclusive, ChunkIndex::new(3, 3));
     }
 }

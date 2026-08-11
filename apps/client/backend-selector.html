@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta
+      name="description"
+      content="Explore Treeline's deterministic wilderness terrain in your browser."
+    />
+    <title>Treeline — Preparing renderer…</title>
+    <style>
+      html,
+      body {
+        display: grid;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        place-items: center;
+        background: #09110d;
+        color: #f2f0df;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="status">Choosing the best renderer…</p>
+    <script type="module">
+      const status = document.querySelector("#status");
+      let useWebGpu = false;
+      try {
+        useWebGpu = Boolean(navigator.gpu && (await navigator.gpu.requestAdapter()));
+      } catch (error) {
+        console.info("WebGPU unavailable; using WebGL2", error);
+      }
+
+      const backend = useWebGpu ? "webgpu" : "webgl";
+      status.textContent = `Starting Treeline with ${useWebGpu ? "WebGPU" : "WebGL2"}…`;
+      const target = new URL(`${backend}/`, window.location.href);
+      target.search = window.location.search;
+      target.hash = window.location.hash;
+      window.location.replace(target);
+    </script>
+  </body>
+</html>

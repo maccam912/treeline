@@ -28,7 +28,6 @@ pub use mesh::{
 pub use streaming::{
     ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig, ChunkStreamingPlan, FarTerrainMeshSpec,
     FarTerrainStreamer, FarTerrainStreamingConfig, FarTerrainStreamingPlan, FarTileIndex,
-    NearTerrainCutout,
 };
 pub use terrain::{LakeSurface, SnowCover, WorldTerrain};
 
@@ -42,7 +41,7 @@ use treeline_terrain::SURVEYED_SETTINGS_HASH;
 /// Increment when a change makes the same identity produce a different world.
 /// The measured layers are versioned separately by the settings hash, which
 /// selects the bundle; this versions everything derived from them.
-pub const CURRENT_GENERATOR_VERSION: u32 = treeline_ecology::FOREST_GENERATOR_VERSION;
+pub const CURRENT_GENERATOR_VERSION: u32 = 22;
 
 /// The world the client loads.
 ///

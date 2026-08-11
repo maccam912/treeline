@@ -485,7 +485,7 @@ def main() -> None:
                 "artifact_sha256": hashlib.sha256(water_encoded).hexdigest(),
                 "artifact_size_bytes": len(water_encoded),
                 "spacing_meters": WATER_SPACING_METERS,
-                "runtime_level_offset_meters": 0.0,
+                "runtime_level_offset_meters": 2.0,
                 "runtime_footprint_expansion_meters": 4.0,
                 "source": "USGS National Hydrography Dataset, Waterbody - Large Scale",
                 "source_url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",

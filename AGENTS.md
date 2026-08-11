@@ -24,7 +24,7 @@ crates/
   voxel/        Chunks, LOD levels, lattice alignment
   mesher/       Marching Cubes, Transvoxel, surface grids
   world/        Composition, streaming, and the mesh queue
-  renderer/     wgpu: terrain, water, trees, sky
+  renderer/     Bevy integration: measured meshes, materials, lighting
   platform/     Platform boundaries kept out of generation
   protocol/     Versioned network contracts
 

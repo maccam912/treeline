@@ -13,8 +13,7 @@ use crate::{Mesh, MeshingError, f64_as_f32, index_as_f64, normalize};
 /// Triangulates a deterministic surface-height field without sampling a volume.
 ///
 /// Vertex normals use central differences beyond the tile boundary, so
-/// adjacent tiles share both positions and normals. Optional cutouts omit only
-/// whole aligned cells and are used when near voxel terrain is resident.
+/// adjacent tiles share both positions and normals.
 ///
 /// # Errors
 ///
@@ -72,17 +71,7 @@ pub fn surface_grid(
         .ok_or(MeshingError::GridTooLarge)?;
     let mut indices = Vec::with_capacity(index_capacity);
     for z in 0..cells_z {
-        let min_z = spec.origin_z + (index_as_f64(z) * spec.spacing_meters);
-        let max_z = min_z + spec.spacing_meters;
         for x in 0..cells_x {
-            let min_x = spec.origin_x + (index_as_f64(x) * spec.spacing_meters);
-            let max_x = min_x + spec.spacing_meters;
-            if spec
-                .cutout
-                .is_some_and(|cutout| cutout.contains_cell(min_x, max_x, min_z, max_z))
-            {
-                continue;
-            }
             let top_left = z
                 .checked_mul(count_x)
                 .and_then(|row| row.checked_add(x))
@@ -116,7 +105,6 @@ pub fn surface_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SurfaceCutout;
     use crate::test_support::assert_front_facing;
     use std::collections::BTreeSet;
     use treeline_terrain::{GroundPlane, Material, SmoothHills};
@@ -163,25 +151,6 @@ mod tests {
             surface_boundary_vertices(&left, 0.0),
             surface_boundary_vertices(&right, 0.0)
         );
-    }
-
-    #[test]
-    fn aligned_surface_cutout_omits_only_covered_cells() {
-        let field = GroundPlane {
-            surface_height: 0.0,
-            material: Material::Soil,
-        };
-        let full = surface_grid(&field, SurfaceGridSpec::new(0.0, 0.0, [4, 4], 8.0))
-            .expect("full surface");
-        let cut = surface_grid(
-            &field,
-            SurfaceGridSpec::new(0.0, 0.0, [4, 4], 8.0)
-                .with_cutout(SurfaceCutout::new(8.0, 24.0, 8.0, 24.0)),
-        )
-        .expect("cut surface");
-
-        assert_eq!(full.indices.len() - cut.indices.len(), 4 * 6);
-        assert!(cut.is_well_formed());
     }
 
     fn surface_boundary_vertices(mesh: &Mesh, boundary_x: f64) -> BTreeSet<[u64; 6]> {

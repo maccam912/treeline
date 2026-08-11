@@ -93,11 +93,15 @@ made of, and its cost is real.
 
 Water is a horizontal sheet over mapped lake footprints, drawn as a separate
 surface. It never changes terrain density, so the shoreline the player walks and
-the shoreline they see come from the same measured mask.
+the shoreline they see come from the same measured mask. Near and distant water
+both retain the mask's four-meter resolution, so streaming LOD never turns a
+curved shoreline into coarse terrain-sized blocks.
 
 Each lake carries a representative level: the median bare-earth elevation inside
-its source polygon. That is a level, not a bathymetry. Treeline does not claim to
-know how deep these lakes are, and the runtime gives a shore cell a minimum
+its source polygon. The runtime raises that representative level by two meters so
+the rendered sheet meets the mapped shoreline instead of being clipped by the
+coarse terrain surface. That is a level, not a bathymetry. Treeline does not claim
+to know how deep these lakes are, and the runtime gives a shore cell a minimum
 visible film rather than pretending to a depth it has not measured.
 
 Rivers, flow, and dynamic water are not implemented. Treeline previously
@@ -207,8 +211,9 @@ Neither may change silently under a saved world.
 
 ## 10. Architecture
 
-A thin Rust workspace. Only machinery this game needs — no scene graph, no
-scripting runtime, no editor framework, no reusable engine.
+A Rust workspace with Bevy owning the application and rendering layer. Domain
+generation remains engine-independent; Treeline does not build a second scene
+graph, scripting runtime, editor framework, or reusable engine alongside Bevy.
 
 ```text
 crates/
@@ -219,7 +224,7 @@ crates/
   voxel/        Chunks, LOD levels, lattice alignment
   mesher/       Marching Cubes, Transvoxel, surface grids
   world/        Composition, streaming, and the mesh queue
-  renderer/     wgpu: terrain, water, trees, sky
+  renderer/     Bevy integration: measured meshes, materials, lighting
   platform/     Platform boundaries kept out of generation
   protocol/     Versioned network contracts
 
@@ -277,14 +282,18 @@ end, and say what remains when it does not.
       1:1 horizontal and vertical scale.
 - [x] **Measured forest.** Tree individuals sized and placed from lidar stand
       structure, with procedural species and architecture.
-- [x] **Rendering.** One vertex format and one bind group for terrain, water,
-      trees, and sky, drawn by a pipeline per surface kind so that only the kind
-      that cuts holes in itself pays for doing so. Scanned PBR materials,
-      cascaded sun shadows, daylight states, seasonal snow, and camera-relative
-      double-precision positions. Foliage is the exception: trees draw as trunks
-      and branches, and crowns are unimplemented pending a rewrite.
+- [x] **Rendering.** A Bevy-native application and renderer: generated terrain,
+      water, and tree geometry become Bevy mesh entities with standard PBR
+      materials; Bevy owns windows, cameras, render scheduling, asset residency,
+      cascaded sun shadows, contact shadows, fog, and temporal anti-aliasing.
+      Seasonal snow and daylight states remain Treeline domain treatments, and
+      camera-relative floating origins preserve the measured world's precision.
+      Foliage is the exception: trees draw as trunks and branches, and crowns
+      remain unimplemented pending a rewrite.
 - [x] **Browser client.** The same world in a browser, with terrain generation on
-      Web Workers.
+      Web Workers. Deployment selects WebGPU when the browser can supply an
+      adapter and otherwise loads a WebGL2 build with incompatible camera effects
+      disabled for older and mobile browsers.
 - [x] **Inspection.** Generator Lab draws any layer as a map and reports every
       layer at a clicked position.
 

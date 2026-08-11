@@ -8,9 +8,12 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 
+use bevy::prelude::{
+    Assets, Commands, Entity, Mesh, Mesh3d, MeshMaterial3d, Name, Resource, Transform,
+};
 use treeline_coordinates::WorldPosition;
 use treeline_ecology::TreeBounds;
-use treeline_renderer::{TerrainMesh, TerrainRenderer, TreeMeshDetail};
+use treeline_renderer::{TreeMeshDetail, WorldMaterials, WorldMeshOrigin, prepare_trees};
 use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
 use treeline_world::{ChunkStreamingConfig, WorldTerrain};
@@ -25,11 +28,6 @@ const TILE_CHUNKS_PER_EDGE: u64 = 4;
 const RESIDENCY_MULTIPLIER: u64 = 20;
 const FULL_DETAIL_MULTIPLIER: u64 = 5;
 const SIMPLIFIED_MULTIPLIER: u64 = 10;
-
-/// Tree tiles close enough to cast sun shadows.
-///
-/// Four 512 m tiles cover the renderer's maximum shadow-caster reach.
-pub const SHADOW_TILE_RADIUS: u64 = 4;
 
 /// Stable identity of one tree tile.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -72,34 +70,25 @@ struct TreeTileSpec {
 #[derive(Debug)]
 struct ResidentTreeTile {
     spec: TreeTileSpec,
-    mesh: Option<TerrainMesh>,
+    entity: Option<Entity>,
 }
 
 /// Every tree tile currently resident, plus the queue of tiles to build.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Resource)]
 pub struct ResidentTrees {
     tiles: BTreeMap<TreeTileIndex, ResidentTreeTile>,
     pending: VecDeque<TreeTileSpec>,
 }
 
 impl ResidentTrees {
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self, commands: &mut Commands) {
+        for resident in self.tiles.values() {
+            if let Some(entity) = resident.entity {
+                commands.entity(entity).despawn();
+            }
+        }
         self.tiles.clear();
         self.pending.clear();
-    }
-
-    /// Every resident tree mesh, for the main render pass.
-    pub fn meshes(&self) -> impl Iterator<Item = &TerrainMesh> {
-        self.tiles.values().filter_map(|tile| tile.mesh.as_ref())
-    }
-
-    /// Tree meshes near enough to cast shadows.
-    pub fn shadow_meshes(&self, center: TreeTileIndex) -> impl Iterator<Item = &TerrainMesh> {
-        self.tiles.iter().filter_map(move |(tile, resident)| {
-            (tile.chebyshev_distance(center) <= SHADOW_TILE_RADIUS)
-                .then_some(resident.mesh.as_ref())
-                .flatten()
-        })
     }
 
     /// Reconciles residency and builds at most one tile per frame.
@@ -113,8 +102,9 @@ impl ResidentTrees {
     /// tree mesh cannot be uploaded.
     pub fn update(
         &mut self,
-        device: &wgpu::Device,
-        renderer: &TerrainRenderer,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+        materials: &WorldMaterials,
         terrain: &WorldTerrain,
         config: ChunkStreamingConfig,
         player_position: WorldPosition,
@@ -124,16 +114,31 @@ impl ResidentTrees {
         let desired = desired_tiles(center, config)?;
         let retain_radius = residency_radius(config).saturating_add(1);
 
-        self.tiles
-            .retain(|tile, _| tile.chebyshev_distance(center) <= retain_radius);
+        let removed = self
+            .tiles
+            .extract_if(.., |tile, _| {
+                tile.chebyshev_distance(center) > retain_radius
+            })
+            .map(|(_, resident)| resident)
+            .collect::<Vec<_>>();
+        for resident in removed {
+            if let Some(entity) = resident.entity {
+                commands.entity(entity).despawn();
+            }
+        }
         self.pending
             .retain(|spec| desired.get(&spec.tile) == Some(&spec.detail));
         self.enqueue_missing(center, &desired);
 
         if let Some(spec) = self.pending.pop_front() {
-            let mesh = build_tile(device, renderer, terrain, spec)?;
-            self.tiles
-                .insert(spec.tile, ResidentTreeTile { spec, mesh });
+            let entity = build_tile(commands, meshes, materials, terrain, spec)?;
+            if let Some(previous) = self
+                .tiles
+                .insert(spec.tile, ResidentTreeTile { spec, entity })
+                && let Some(entity) = previous.entity
+            {
+                commands.entity(entity).despawn();
+            }
         }
         Ok(())
     }
@@ -213,11 +218,12 @@ fn tile_radius(config: ChunkStreamingConfig, multiplier: u64) -> u64 {
 
 /// Builds one tile's trees, or nothing when its ground carries no forest.
 fn build_tile(
-    device: &wgpu::Device,
-    renderer: &TerrainRenderer,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &WorldMaterials,
     terrain: &WorldTerrain,
     spec: TreeTileSpec,
-) -> Result<Option<TerrainMesh>, Box<dyn Error>> {
+) -> Result<Option<Entity>, Box<dyn Error>> {
     let bounds = spec
         .tile
         .bounds()
@@ -228,12 +234,21 @@ fn build_tile(
     if trees.is_empty() {
         return Ok(None);
     }
-    Ok(Some(renderer.upload_trees(
-        device,
-        &trees,
-        spec.detail,
-        |x, z| terrain.surface_height(x, z),
-    )?))
+    let Some(prepared) = prepare_trees(&trees, spec.detail, |x, z| terrain.surface_height(x, z))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        commands
+            .spawn((
+                Name::new("tree tile"),
+                Mesh3d(meshes.add(prepared.mesh)),
+                MeshMaterial3d(materials.trees.clone()),
+                Transform::default(),
+                WorldMeshOrigin(prepared.world_origin),
+            ))
+            .id(),
+    ))
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -317,14 +332,6 @@ mod tests {
     #[test]
     fn trees_reach_much_further_than_walkable_terrain() {
         assert!(residency_radius(CONFIG) * TILE_CHUNKS_PER_EDGE > CONFIG.load_radius() * 4);
-    }
-
-    #[test]
-    fn shadow_casting_tiles_are_a_small_neighbourhood() {
-        let mut resident = ResidentTrees::default();
-        assert_eq!(resident.shadow_meshes(center()).count(), 0);
-        resident.clear();
-        assert!(SHADOW_TILE_RADIUS < residency_radius(CONFIG));
     }
 
     #[test]

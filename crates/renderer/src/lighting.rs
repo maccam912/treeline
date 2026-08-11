@@ -1,10 +1,4 @@
 //! Daylight, sky, and atmosphere as the rest of the engine sees them.
-//!
-//! These are the renderer's public lighting inputs. Their GPU byte layouts live
-//! in [`crate::uniform`]; nothing here knows about wgpu.
-
-/// Maximum horizontal caster distance needed by the cascaded shadow maps.
-pub const SHADOW_CASTER_DISTANCE_METERS: f64 = 480.0;
 
 /// Curated daylight states that exercise the complete sky and sun model.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -40,9 +34,7 @@ pub struct LightingSettings {
     pub sun_direction: [f32; 3],
     pub sun_intensity: f32,
     pub sun_color: [f32; 3],
-    pub sky_zenith: [f32; 3],
     pub sky_horizon: [f32; 3],
-    pub ground_ambient: [f32; 3],
 }
 
 impl LightingSettings {
@@ -52,25 +44,19 @@ impl LightingSettings {
                 sun_direction: [0.941, 0.224, 0.254],
                 sun_intensity: 0.58,
                 sun_color: [1.00, 0.47, 0.22],
-                sky_zenith: [0.09, 0.18, 0.38],
                 sky_horizon: [0.79, 0.38, 0.24],
-                ground_ambient: [0.12, 0.08, 0.08],
             },
             TimeOfDay::Noon => Self {
                 sun_direction: [0.457, 0.812, 0.355],
                 sun_intensity: 0.88,
                 sun_color: [1.00, 0.88, 0.70],
-                sky_zenith: [0.16, 0.38, 0.73],
                 sky_horizon: [0.42, 0.63, 0.85],
-                ground_ambient: [0.13, 0.10, 0.07],
             },
             TimeOfDay::Dusk => Self {
                 sun_direction: [-0.920, 0.207, -0.332],
                 sun_intensity: 0.52,
                 sun_color: [1.00, 0.39, 0.18],
-                sky_zenith: [0.08, 0.12, 0.29],
                 sky_horizon: [0.73, 0.30, 0.25],
-                ground_ambient: [0.11, 0.07, 0.08],
             },
         }
     }
@@ -87,8 +73,6 @@ impl Default for LightingSettings {
 pub struct AtmosphereSettings {
     pub fog_color: [f32; 3],
     pub fog_density: f32,
-    pub moisture: f32,
-    pub prevailing_wind: [f32; 2],
 }
 
 impl Default for AtmosphereSettings {
@@ -96,8 +80,6 @@ impl Default for AtmosphereSettings {
         Self {
             fog_color: [0.39, 0.57, 0.72],
             fog_density: 1.0,
-            moisture: 0.45,
-            prevailing_wind: [0.8, 0.2],
         }
     }
 }

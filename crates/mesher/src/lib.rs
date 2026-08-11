@@ -15,7 +15,7 @@ mod surface;
 mod test_support;
 mod volume;
 
-pub use grid::{GridSpec, SurfaceCutout, SurfaceGridSpec};
+pub use grid::{GridSpec, SurfaceGridSpec};
 pub use surface::surface_grid;
 pub use volume::{marching_cubes, marching_cubes_chunk, transvoxel_chunk};
 

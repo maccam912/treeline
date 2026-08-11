@@ -5,6 +5,9 @@ use super::raster::{Cursor, HEADER_BYTES, QUANTIZATION_METERS, Raster};
 const ARTIFACT: &[u8] = include_bytes!("../../assets/michigan_tile.tlwater");
 const MAGIC: &[u8; 8] = b"TLWTR01\0";
 
+/// Horizontal resolution of the measured footprint mask.
+pub const WATER_MASK_SPACING_METERS: f64 = 4.0;
+
 /// Versioned horizontal expansion of every mapped footprint, in meters.
 ///
 /// One water cell of dilation lets the horizontal sheet intersect the
@@ -35,6 +38,11 @@ pub struct Water {
 /// Panics when the embedded artifact does not match the bundle contract.
 pub fn decode() -> Water {
     let raster = Raster::decode(ARTIFACT, *MAGIC);
+    assert_eq!(
+        raster.spacing_meters.to_bits(),
+        WATER_MASK_SPACING_METERS.to_bits(),
+        "surveyed water spacing matches the sampling contract"
+    );
     let mut cursor = Cursor::new(ARTIFACT, HEADER_BYTES);
     let lake_count = usize::from(cursor.u16());
     let surfaces_decimeters = (0..lake_count).map(|_| cursor.i16()).collect::<Vec<_>>();

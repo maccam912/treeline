@@ -9,7 +9,7 @@ mod far;
 
 pub use far::{
     FarTerrainMeshSpec, FarTerrainStreamer, FarTerrainStreamingConfig, FarTerrainStreamingPlan,
-    FarTileIndex, NearTerrainCutout, far_terrain_mesh,
+    FarTileIndex, far_terrain_mesh,
 };
 
 use std::cmp::Reverse;

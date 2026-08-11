@@ -1,35 +1,41 @@
-//! The game: what exists while playing, and what one frame does.
+//! Bevy resources and systems that make the streamed world playable.
 
 use std::error::Error;
-use std::sync::Arc;
 
-use glam::{DVec3, Vec2};
-use treeline_renderer::{LightingSettings, TerrainRenderer, TimeOfDay};
+#[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
+use bevy::anti_alias::taa::TemporalAntiAliasing;
+use bevy::input::mouse::MouseMotion;
+use bevy::input::touch::{TouchInput, TouchPhase};
+#[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
+use bevy::light::ShadowFilteringMethod;
+use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
+#[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
+use bevy::pbr::ContactShadows;
+use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use glam::DVec3;
+use treeline_renderer::{LightingSettings, TimeOfDay, WorldMaterials, WorldMeshOrigin};
 use treeline_terrain::{SURVEYED_SPAWN_X, SURVEYED_SPAWN_Z};
 use treeline_world::{DEFAULT_WORLD_IDENTITY, WorldTerrain};
 use web_time::Instant;
-use winit::event::{ElementState, MouseButton, Touch, TouchPhase, WindowEvent};
-use winit::keyboard::{KeyCode, PhysicalKey};
-#[cfg(not(target_arch = "wasm32"))]
-use winit::window::CursorGrabMode;
-use winit::window::Window;
 
-use crate::camera::{Camera, EYE_HEIGHT, surface_height};
-use crate::gpu::Gpu;
+use crate::camera::{Camera as PlayerCamera, EYE_HEIGHT, surface_height};
 use crate::input::InputState;
 use crate::progress::LoadProgress;
-use crate::streaming::{PlayerMotion, ResidentTerrain, Streamers, Uploader};
-use crate::trees::{ResidentTrees, TreeTileIndex};
-use crate::{
-    TerrainMeshQueue, WINDOW_TITLE, atmosphere, random, start_terrain_queue, streaming, warp,
-};
+use crate::streaming::{PlayerMotion, ResidentTerrain, Streamers};
+use crate::trees::ResidentTrees;
+use crate::{TerrainMeshQueue, atmosphere, random, start_terrain_queue, streaming, warp};
 
-/// Facing roughly north-west at spawn, level with the horizon.
 const SPAWN_YAW: f64 = -1.924_842_228_418_599_5;
 const SPAWN_PITCH: f64 = -0.08;
+const FLOATING_ORIGIN_GRID_METERS: f64 = 256.0;
 
-/// A warp the player asked for, handled at the start of the next frame.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Resource)]
+pub struct GameTerrain(pub WorldTerrain);
+
+pub struct TerrainJobs(pub TerrainMeshQueue);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Resource)]
 enum WarpRequest {
     #[default]
     None,
@@ -37,439 +43,418 @@ enum WarpRequest {
     LakeShore,
 }
 
-pub struct Game {
-    window: Arc<Window>,
-    gpu: Gpu,
-    renderer: TerrainRenderer,
-    terrain: WorldTerrain,
-    streamers: Streamers,
-    resident: ResidentTerrain,
-    trees: ResidentTrees,
-    jobs: TerrainMeshQueue,
-    camera: Camera,
-    input: InputState,
-    cursor_captured: bool,
-    previous_frame: Instant,
-    progress: LoadProgress,
-    warp_request: WarpRequest,
-    time_of_day: TimeOfDay,
-    #[cfg(target_arch = "wasm32")]
-    browser: crate::browser::BrowserActions,
+#[derive(Resource)]
+struct Daylight(TimeOfDay);
+
+#[derive(Resource, Default)]
+struct FloatingOrigin([f64; 3]);
+
+#[derive(Component)]
+struct PlayerView;
+
+#[derive(Component)]
+struct Sun;
+
+#[derive(Debug, Default)]
+pub struct TreelineGamePlugin;
+
+impl Plugin for TreelineGamePlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(DirectionalLightShadowMap { size: 2048 })
+            .init_resource::<InputState>()
+            .init_resource::<ResidentTerrain>()
+            .init_resource::<ResidentTrees>()
+            .init_resource::<WarpRequest>()
+            .init_resource::<FloatingOrigin>()
+            .insert_resource(Daylight(TimeOfDay::default()))
+            .insert_resource(Streamers::default())
+            .add_systems(Startup, setup_world)
+            .add_systems(
+                Update,
+                (
+                    collect_keyboard_input,
+                    collect_mouse_look,
+                    collect_touch_input,
+                    collect_browser_actions,
+                    apply_warp,
+                    move_player,
+                    stream_world,
+                    sync_floating_origin,
+                    sync_daylight,
+                    publish_progress,
+                )
+                    .chain(),
+            );
+    }
 }
 
-impl Game {
-    /// Brings up the GPU, the world, and the terrain around the spawn point.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the GPU cannot be initialized or the spawn point
-    /// cannot be streamed.
-    pub async fn new(window: Arc<Window>) -> Result<Self, Box<dyn Error>> {
-        let started = Instant::now();
-        window.set_title("Treeline — Preparing spawn…");
+pub fn initial_world() -> Result<(WorldTerrain, TerrainMeshQueue), Box<dyn Error>> {
+    let terrain = WorldTerrain::new(DEFAULT_WORLD_IDENTITY);
+    let jobs = start_terrain_queue(terrain)?;
+    Ok((terrain, jobs))
+}
 
-        let gpu = Gpu::new(window.clone()).await?;
-        let terrain = WorldTerrain::new(DEFAULT_WORLD_IDENTITY);
-        let renderer = TerrainRenderer::new(
-            &gpu.device,
-            &gpu.queue,
-            gpu.surface_config.format,
-            gpu.surface_config.width,
-            gpu.surface_config.height,
-            gpu.shadows_enabled,
-        );
-        if let Some(settings) = atmosphere::settings_for(terrain.climate()) {
-            renderer.update_atmosphere(&gpu.queue, settings);
-        }
+fn setup_world(
+    mut commands: Commands,
+    terrain: Res<GameTerrain>,
+    streamers: Res<Streamers>,
+    mut resident: ResMut<ResidentTerrain>,
+    mut jobs: NonSendMut<TerrainJobs>,
+) {
+    let started = Instant::now();
+    let spawn_y = surface_height(&terrain.0, SURVEYED_SPAWN_X, SURVEYED_SPAWN_Z) + EYE_HEIGHT;
+    let camera = PlayerCamera::new(
+        DVec3::new(SURVEYED_SPAWN_X, spawn_y, SURVEYED_SPAWN_Z),
+        SPAWN_YAW,
+        SPAWN_PITCH,
+    );
+    streaming::schedule(
+        &mut commands,
+        *streamers,
+        PlayerMotion::arrived(camera.world_position()),
+        &mut resident,
+        &mut jobs.0,
+    )
+    .expect("the surveyed spawn is streamable");
+    let progress = progress_for(started, *streamers, &resident, camera)
+        .expect("the surveyed spawn is inside the far terrain lattice");
 
-        let spawn_y = surface_height(&terrain, SURVEYED_SPAWN_X, SURVEYED_SPAWN_Z) + EYE_HEIGHT;
-        let camera = Camera::new(
-            DVec3::new(SURVEYED_SPAWN_X, spawn_y, SURVEYED_SPAWN_Z),
-            SPAWN_YAW,
-            SPAWN_PITCH,
-        );
-        let streamers = Streamers::default();
-        let mut resident = ResidentTerrain::default();
-        let mut jobs = start_terrain_queue(terrain)?;
-        streaming::schedule(
-            streamers,
-            PlayerMotion::arrived(camera.world_position()),
-            &mut resident,
-            &mut jobs,
-        )?;
-        let progress = start_progress(
-            &window, &renderer, &gpu, streamers, &resident, camera, started,
-        )?;
+    let fog = atmosphere::settings_for(terrain.0.climate()).unwrap_or_default();
+    let camera_entity = commands
+        .spawn((
+            Name::new("player camera"),
+            PlayerView,
+            Camera3d::default(),
+            Projection::Perspective(PerspectiveProjection {
+                near: 0.05,
+                far: 25_000.0,
+                ..default()
+            }),
+            Transform::default(),
+            DistanceFog {
+                color: Color::srgb(fog.fog_color[0], fog.fog_color[1], fog.fog_color[2]),
+                directional_light_color: Color::srgba(1.0, 0.86, 0.7, 0.35),
+                directional_light_exponent: 24.0,
+                falloff: FogFalloff::from_visibility(18_000.0 / fog.fog_density.max(0.1)),
+            },
+            Msaa::Off,
+        ))
+        .id();
+    add_camera_effects(&mut commands, camera_entity);
 
-        Ok(Self {
-            window,
-            gpu,
-            renderer,
-            terrain,
-            streamers,
-            resident,
-            trees: ResidentTrees::default(),
-            jobs,
-            camera,
-            input: InputState::default(),
-            cursor_captured: false,
-            previous_frame: Instant::now(),
-            progress,
-            warp_request: WarpRequest::None,
-            time_of_day: TimeOfDay::default(),
-            #[cfg(target_arch = "wasm32")]
-            browser: crate::browser::BrowserActions::new()?,
-        })
+    let cascades = CascadeShadowConfigBuilder {
+        num_cascades: if cfg!(target_arch = "wasm32") { 1 } else { 4 },
+        first_cascade_far_bound: 32.0,
+        maximum_distance: 480.0,
+        overlap_proportion: 0.18,
+        ..default()
     }
+    .build();
+    commands.spawn((
+        Name::new("sun"),
+        Sun,
+        DirectionalLight {
+            shadow_maps_enabled: true,
+            contact_shadows_enabled: true,
+            ..default()
+        },
+        Transform::default(),
+        cascades,
+    ));
+    commands.insert_resource(camera);
+    commands.insert_resource(progress);
+}
 
-    pub fn window_id(&self) -> winit::window::WindowId {
-        self.window.id()
+#[cfg(any(not(target_arch = "wasm32"), feature = "webgpu"))]
+fn add_camera_effects(commands: &mut Commands, camera: Entity) {
+    commands.entity(camera).insert((
+        ContactShadows::default(),
+        TemporalAntiAliasing::default(),
+        ShadowFilteringMethod::Temporal,
+    ));
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+fn add_camera_effects(_commands: &mut Commands, _camera: Entity) {}
+
+fn collect_keyboard_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut input: ResMut<InputState>,
+    mut warp_request: ResMut<WarpRequest>,
+    mut daylight: ResMut<Daylight>,
+    mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    terrain: Res<GameTerrain>,
+    mut camera: ResMut<PlayerCamera>,
+) {
+    for key in [
+        KeyCode::KeyW,
+        KeyCode::KeyA,
+        KeyCode::KeyS,
+        KeyCode::KeyD,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowDown,
+        KeyCode::ArrowLeft,
+        KeyCode::ArrowRight,
+        KeyCode::ShiftLeft,
+        KeyCode::ShiftRight,
+    ] {
+        input.set_key(key, keys.pressed(key));
     }
-
-    pub fn request_redraw(&self) {
-        self.window.request_redraw();
+    if mouse.just_pressed(MouseButton::Left) {
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
     }
-
-    pub fn handle_mouse_motion(&mut self, delta: (f64, f64)) {
-        if self.cursor_captured {
-            self.camera.look(delta.0, delta.1);
-        }
+    if keys.just_pressed(KeyCode::Escape) {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
+        input.clear();
     }
-
-    /// Routes one window event, returning whether the window should close.
-    pub fn handle_window_event(&mut self, event: WindowEvent) -> bool {
-        match event {
-            WindowEvent::CloseRequested => return true,
-            WindowEvent::Resized(size) => self.resize(size.width, size.height),
-            WindowEvent::RedrawRequested => self.frame(),
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    let pressed = event.state == ElementState::Pressed;
-                    if pressed && !event.repeat {
-                        self.handle_action_key(code);
-                    }
-                    self.input.set_key(code, pressed);
-                }
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => self.set_cursor_captured(true),
-            WindowEvent::Touch(touch) => self.handle_touch(touch),
-            WindowEvent::Focused(false) => {
-                self.set_cursor_captured(false);
-                self.input.clear();
-            }
-            _ => {}
-        }
-        false
+    if keys.just_pressed(KeyCode::KeyR) {
+        *warp_request = WarpRequest::Random;
     }
-
-    fn handle_action_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Escape => self.set_cursor_captured(false),
-            KeyCode::KeyR => self.warp_request = WarpRequest::Random,
-            KeyCode::KeyB => self.warp_request = WarpRequest::LakeShore,
-            KeyCode::KeyF => self.toggle_aerial_mode(),
-            KeyCode::KeyT => {
-                self.time_of_day = self.time_of_day.next();
-                eprintln!("daylight: {}", self.time_of_day.label());
-            }
-            _ => {}
-        }
+    if keys.just_pressed(KeyCode::KeyB) {
+        *warp_request = WarpRequest::LakeShore;
     }
-
-    fn handle_touch(&mut self, touch: Touch) {
-        let size = self.window.inner_size();
-        let position = Vec2::new(f64_as_f32(touch.location.x), f64_as_f32(touch.location.y));
-        match touch.phase {
-            TouchPhase::Started => self.input.begin_touch(
-                touch.id,
-                position,
-                u32_as_f32(size.width),
-                f64_as_f32(64.0 * self.window.scale_factor()),
-            ),
-            TouchPhase::Moved => self.input.move_touch(touch.id, position),
-            TouchPhase::Ended | TouchPhase::Cancelled => self.input.end_touch(touch.id),
-        }
-    }
-
-    fn toggle_aerial_mode(&mut self) {
-        let enabled = self.camera.toggle_aerial_mode(&self.terrain);
+    if keys.just_pressed(KeyCode::KeyF) {
+        let enabled = camera.toggle_aerial_mode(&terrain.0);
         #[cfg(target_arch = "wasm32")]
         crate::browser::BrowserActions::set_aerial_mode_enabled(enabled);
-        eprintln!(
-            "aerial mode {}",
-            if enabled { "enabled" } else { "disabled" }
-        );
-    }
-
-    /// Turns page-button presses into the same requests the keys produce.
-    #[cfg(target_arch = "wasm32")]
-    fn apply_browser_buttons(&mut self) {
-        if self.browser.take_random_warp() {
-            self.warp_request = WarpRequest::Random;
-        }
-        if self.browser.take_water_warp() {
-            self.warp_request = WarpRequest::LakeShore;
-        }
-        if self.browser.take_aerial_toggle() {
-            self.toggle_aerial_mode();
-        }
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        self.gpu.surface_config.width = width;
-        self.gpu.surface_config.height = height;
-        self.reconfigure_surface();
-        self.renderer.resize(&self.gpu.device, width, height);
-    }
-
-    fn reconfigure_surface(&self) {
-        self.gpu
-            .surface
-            .configure(&self.gpu.device, &self.gpu.surface_config);
-    }
-
-    fn set_cursor_captured(&mut self, captured: bool) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.cursor_captured = captured;
-        }
-
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let captured = if captured {
-                self.window
-                    .set_cursor_grab(CursorGrabMode::Locked)
-                    .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined))
-                    .is_ok()
-            } else {
-                let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-                false
-            };
-            self.window.set_cursor_visible(!captured);
-            self.cursor_captured = captured;
-        }
+        let _ = enabled;
     }
-
-    /// Advances and draws one frame.
-    fn frame(&mut self) {
-        self.update();
-        match self.render() {
-            Ok(()) | Err(wgpu::SurfaceError::Timeout) => {}
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.reconfigure_surface();
-            }
-            Err(error) => eprintln!("frame render failed: {error}"),
-        }
-    }
-
-    fn update(&mut self) {
-        #[cfg(target_arch = "wasm32")]
-        self.apply_browser_buttons();
-
-        if let Err(error) = self.apply_warp_request() {
-            eprintln!("warp failed: {error}");
-        }
-
-        let now = Instant::now();
-        // Clamp the step so a long stall — a resize, a tab regaining focus —
-        // cannot teleport the player.
-        let delta_seconds = (now - self.previous_frame).as_secs_f64().min(0.1);
-        self.previous_frame = now;
-
-        self.camera
-            .look_with_stick(self.input.look_axis(), delta_seconds);
-        let travel_direction = self.camera.travel_direction(&self.input);
-        self.camera.walk(&self.input, &self.terrain, delta_seconds);
-        self.renderer
-            .advance_water_time(&self.gpu.queue, delta_seconds);
-
-        if let Err(error) = streaming::update(
-            Uploader {
-                device: &self.gpu.device,
-                renderer: &self.renderer,
-                terrain: &self.terrain,
-            },
-            self.streamers,
-            PlayerMotion {
-                position: self.camera.world_position(),
-                travel_direction,
-            },
-            &mut self.resident,
-            &mut self.jobs,
-            &mut self.progress,
-        ) {
-            eprintln!("terrain streaming failed: {error}");
-        }
-        if let Err(error) = self.trees.update(
-            &self.gpu.device,
-            &self.renderer,
-            &self.terrain,
-            self.streamers.near.config(),
-            self.camera.world_position(),
-        ) {
-            eprintln!("tree streaming failed: {error}");
-        }
-
-        self.progress.publish(&self.window);
-        self.update_render_camera();
-        if let Ok((min, max)) =
-            streaming::far_cutout_bounds(self.streamers, self.camera.world_position())
-        {
-            self.renderer.update_far_cutout(&self.gpu.queue, min, max);
-        }
-    }
-
-    fn update_render_camera(&self) {
-        self.renderer.update_camera(
-            &self.gpu.queue,
-            self.camera.view_projection(
-                self.gpu.surface_config.width,
-                self.gpu.surface_config.height,
-            ),
-            self.camera.position.to_array(),
-            self.camera.direction().as_vec3().to_array(),
-            LightingSettings::for_time_of_day(self.time_of_day),
-        );
-    }
-
-    /// Moves the player, then rebuilds the world around them.
-    fn apply_warp_request(&mut self) -> Result<(), Box<dyn Error>> {
-        let site = match std::mem::take(&mut self.warp_request) {
-            WarpRequest::None => return Ok(()),
-            WarpRequest::Random => warp::random_site(&self.terrain, random::unit_interval)
-                .ok_or_else(|| std::io::Error::other("could not find dry ground to warp to"))?,
-            WarpRequest::LakeShore => warp::lake_shore_site(&self.terrain, random::unit_interval())
-                .ok_or_else(|| std::io::Error::other("could not find a reachable lake shore"))?,
-        };
-
-        let started = Instant::now();
-        let [x, z] = site.destination;
-        self.resident.clear(&mut self.jobs);
-        self.trees.clear();
-        self.camera.position = DVec3::new(x, self.camera.height_over(&self.terrain, x, z), z);
-        if let Some(target) = site.face {
-            self.camera.face(target);
-        }
-        self.input.clear();
-        self.previous_frame = Instant::now();
-
-        streaming::schedule(
-            self.streamers,
-            PlayerMotion::arrived(self.camera.world_position()),
-            &mut self.resident,
-            &mut self.jobs,
-        )?;
-        self.progress = start_progress(
-            &self.window,
-            &self.renderer,
-            &self.gpu,
-            self.streamers,
-            &self.resident,
-            self.camera,
-            started,
-        )?;
-        eprintln!("warped to ({x:.0}, {z:.0})");
-        Ok(())
-    }
-
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let frame = self.gpu.surface.get_current_texture()?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Treeline frame encoder"),
-            });
-
-        let far_meshes = self
-            .resident
-            .far_tiles
-            .values()
-            .map(|tile| &tile.mesh)
-            .chain(
-                self.resident
-                    .far_tiles
-                    .values()
-                    .filter_map(|tile| tile.lake_mesh.as_ref()),
-            );
-        let near_meshes = self
-            .resident
-            .chunks
-            .values()
-            .map(|chunk| &chunk.mesh)
-            .chain(
-                self.resident
-                    .chunks
-                    .values()
-                    .filter_map(|chunk| chunk.lake_mesh.as_ref()),
-            )
-            .chain(self.trees.meshes());
-
-        // Only nearby geometry casts shadows: distant trees would fill the
-        // cascades with detail no shadow is visible at.
-        let shadow_meshes = self
-            .resident
-            .far_tiles
-            .values()
-            .map(|tile| &tile.mesh)
-            .chain(self.resident.chunks.values().map(|chunk| &chunk.mesh))
-            .chain(
-                TreeTileIndex::containing(self.camera.world_position())
-                    .into_iter()
-                    .flat_map(|center| self.trees.shadow_meshes(center)),
-            )
-            .collect::<Vec<_>>();
-
-        self.renderer
-            .render(&mut encoder, &view, far_meshes, near_meshes, &shadow_meshes);
-        self.gpu.queue.submit(Some(encoder.finish()));
-        frame.present();
-        Ok(())
+    if keys.just_pressed(KeyCode::KeyT) {
+        daylight.0 = daylight.0.next();
     }
 }
 
-/// Starts a progress report and points far terrain at the new near-terrain hole.
-fn start_progress(
-    window: &Window,
-    renderer: &TerrainRenderer,
-    gpu: &Gpu,
+fn collect_mouse_look(
+    mut motions: MessageReader<MouseMotion>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    mut camera: ResMut<PlayerCamera>,
+) {
+    if cursor.grab_mode == CursorGrabMode::None {
+        motions.clear();
+        return;
+    }
+    for motion in motions.read() {
+        camera.look(f64::from(motion.delta.x), f64::from(motion.delta.y));
+    }
+}
+
+fn collect_touch_input(
+    mut touches: MessageReader<TouchInput>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut input: ResMut<InputState>,
+) {
+    let width = window.width().max(1.0);
+    let radius = 64.0 * window.resolution.scale_factor();
+    for touch in touches.read() {
+        let position = glam::Vec2::new(touch.position.x, touch.position.y);
+        match touch.phase {
+            TouchPhase::Started => input.begin_touch(touch.id, position, width, radius),
+            TouchPhase::Moved => input.move_touch(touch.id, position),
+            TouchPhase::Ended | TouchPhase::Canceled => input.end_touch(touch.id),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_browser_actions() {}
+
+#[cfg(target_arch = "wasm32")]
+fn collect_browser_actions(
+    actions: NonSend<crate::browser::BrowserActions>,
+    mut warp_request: ResMut<WarpRequest>,
+    terrain: Res<GameTerrain>,
+    mut camera: ResMut<PlayerCamera>,
+) {
+    if actions.take_random_warp() {
+        *warp_request = WarpRequest::Random;
+    }
+    if actions.take_water_warp() {
+        *warp_request = WarpRequest::LakeShore;
+    }
+    if actions.take_aerial_toggle() {
+        let enabled = camera.toggle_aerial_mode(&terrain.0);
+        crate::browser::BrowserActions::set_aerial_mode_enabled(enabled);
+    }
+}
+
+fn move_player(
+    time: Res<Time>,
+    input: Res<InputState>,
+    terrain: Res<GameTerrain>,
+    mut camera: ResMut<PlayerCamera>,
+) {
+    let delta_seconds = time.delta_secs_f64().min(0.1);
+    camera.look_with_stick(input.look_axis(), delta_seconds);
+    camera.walk(&input, &terrain.0, delta_seconds);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_world(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Res<WorldMaterials>,
+    terrain: Res<GameTerrain>,
+    streamers: Res<Streamers>,
+    camera: Res<PlayerCamera>,
+    input: Res<InputState>,
+    mut resident: ResMut<ResidentTerrain>,
+    mut trees: ResMut<ResidentTrees>,
+    mut jobs: NonSendMut<TerrainJobs>,
+    mut progress: ResMut<LoadProgress>,
+) {
+    let motion = PlayerMotion {
+        position: camera.world_position(),
+        travel_direction: camera.travel_direction(&input),
+    };
+    if let Err(error) = streaming::update(
+        &mut commands,
+        &mut meshes,
+        &materials,
+        &terrain.0,
+        *streamers,
+        motion,
+        &mut resident,
+        &mut jobs.0,
+        &mut progress,
+    ) {
+        error!("terrain streaming failed: {error}");
+    }
+    if let Err(error) = trees.update(
+        &mut commands,
+        &mut meshes,
+        &materials,
+        &terrain.0,
+        streamers.near.config(),
+        camera.world_position(),
+    ) {
+        error!("tree streaming failed: {error}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_warp(
+    mut commands: Commands,
+    terrain: Res<GameTerrain>,
+    streamers: Res<Streamers>,
+    mut request: ResMut<WarpRequest>,
+    mut camera: ResMut<PlayerCamera>,
+    mut input: ResMut<InputState>,
+    mut resident: ResMut<ResidentTerrain>,
+    mut trees: ResMut<ResidentTrees>,
+    mut jobs: NonSendMut<TerrainJobs>,
+    mut progress: ResMut<LoadProgress>,
+) {
+    let site = match std::mem::take(&mut *request) {
+        WarpRequest::None => return,
+        WarpRequest::Random => warp::random_site(&terrain.0, random::unit_interval),
+        WarpRequest::LakeShore => warp::lake_shore_site(&terrain.0, random::unit_interval()),
+    };
+    let Some(site) = site else {
+        error!("could not find a valid warp destination");
+        return;
+    };
+    let [x, z] = site.destination;
+    resident.clear(&mut commands, &mut jobs.0);
+    trees.clear(&mut commands);
+    camera.position = DVec3::new(x, camera.height_over(&terrain.0, x, z), z);
+    if let Some(target) = site.face {
+        camera.face(target);
+    }
+    input.clear();
+    if let Err(error) = streaming::schedule(
+        &mut commands,
+        *streamers,
+        PlayerMotion::arrived(camera.world_position()),
+        &mut resident,
+        &mut jobs.0,
+    ) {
+        error!("warp streaming failed: {error}");
+        return;
+    }
+    if let Some(next) = progress_for(Instant::now(), *streamers, &resident, *camera) {
+        *progress = next;
+    }
+}
+
+fn sync_floating_origin(
+    camera: Res<PlayerCamera>,
+    mut floating: ResMut<FloatingOrigin>,
+    mut world_meshes: Query<(&WorldMeshOrigin, &mut Transform), Without<PlayerView>>,
+    mut view: Single<&mut Transform, With<PlayerView>>,
+) {
+    floating.0 = [camera.position.x, 0.0, camera.position.z].map(|coordinate| {
+        libm::floor(coordinate / FLOATING_ORIGIN_GRID_METERS) * FLOATING_ORIGIN_GRID_METERS
+    });
+    for (origin, mut transform) in &mut world_meshes {
+        transform.translation = Vec3::new(
+            f64_as_f32(origin.0[0] - floating.0[0]),
+            f64_as_f32(origin.0[1] - floating.0[1]),
+            f64_as_f32(origin.0[2] - floating.0[2]),
+        );
+    }
+    view.translation = Vec3::new(
+        f64_as_f32(camera.position.x - floating.0[0]),
+        f64_as_f32(camera.position.y - floating.0[1]),
+        f64_as_f32(camera.position.z - floating.0[2]),
+    );
+    view.look_to(
+        Vec3::from_array(camera.direction().as_vec3().to_array()),
+        Vec3::Y,
+    );
+}
+
+fn sync_daylight(
+    daylight: Res<Daylight>,
+    mut sun: Single<(&mut DirectionalLight, &mut Transform), With<Sun>>,
+    mut clear: ResMut<ClearColor>,
+) {
+    if !daylight.is_changed() {
+        return;
+    }
+    let settings = LightingSettings::for_time_of_day(daylight.0);
+    sun.0.color = Color::srgb(
+        settings.sun_color[0],
+        settings.sun_color[1],
+        settings.sun_color[2],
+    );
+    sun.0.illuminance = 18_000.0 * settings.sun_intensity;
+    let toward_ground = -Vec3::from_array(settings.sun_direction);
+    sun.1.look_to(toward_ground, Vec3::Y);
+    clear.0 = Color::srgb(
+        settings.sky_horizon[0],
+        settings.sky_horizon[1],
+        settings.sky_horizon[2],
+    );
+}
+
+fn publish_progress(
+    mut progress: ResMut<LoadProgress>,
+    mut window: Single<&mut Window, With<PrimaryWindow>>,
+) {
+    progress.publish(&mut window);
+}
+
+fn progress_for(
+    started: Instant,
     streamers: Streamers,
     resident: &ResidentTerrain,
-    camera: Camera,
-    started: Instant,
-) -> Result<LoadProgress, Box<dyn Error>> {
-    let (min, max) = streaming::far_cutout_bounds(streamers, camera.world_position())?;
-    renderer.update_far_cutout(&gpu.queue, min, max);
-
+    camera: PlayerCamera,
+) -> Option<LoadProgress> {
     let (chunks, far_tiles) = resident.outstanding();
-    let progress = LoadProgress::new(
+    LoadProgress::new(
         started,
         chunks,
         far_tiles,
         streamers.far,
         camera.world_position(),
     )
-    .ok_or_else(|| std::io::Error::other("player position is outside far tile range"))?;
-    window.set_title(WINDOW_TITLE);
-    Ok(progress)
 }
 
 #[allow(clippy::cast_possible_truncation)]
 fn f64_as_f32(value: f64) -> f32 {
-    value as f32
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn u32_as_f32(value: u32) -> f32 {
     value as f32
 }

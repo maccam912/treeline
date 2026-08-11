@@ -17,7 +17,7 @@ mod water;
 use std::sync::OnceLock;
 
 pub use canopy::CanopySample;
-pub use water::LakeSample;
+pub use water::{LakeSample, WATER_MASK_SPACING_METERS};
 
 /// Versioned settings identity selecting this bundle.
 ///

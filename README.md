@@ -21,8 +21,9 @@ The full direction lives in [`DESIGN.md`](DESIGN.md); the data contract lives in
 - **A real forest.** Individual trees, placed and sized by measured stand
   structure, with procedural species and architecture. Visible to the horizon
   without ever becoming a canopy texture.
-- **Rendering.** Scanned PBR materials, cascaded sun shadows, three daylight
-  states, seasonal snow, animated water, and climate-tinted haze.
+- **Rendering.** A Bevy-native 3D client with standard PBR materials, cascaded
+  sun and contact shadows, three daylight states, seasonal snow, water, temporal
+  anti-aliasing, and climate-tinted fog.
 - **In a browser.** The same world, with terrain generation on Web Workers.
 
 Camping, survival, weather, navigation, wildlife, and multiplayer are not built
@@ -67,8 +68,7 @@ layers. `SURVEYED_WORLD.md` documents the contract those layers satisfy, the
 exact command that produced the current bundle, and the rules for admitting a
 new one.
 
-Bundle artifacts and scanned textures are stored with Git LFS, so clone with
-LFS enabled.
+Bundle artifacts are stored with Git LFS, so clone with LFS enabled.
 
 ## Developing
 
@@ -80,10 +80,13 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
 Browser-only code is behind `cfg(target_arch = "wasm32")` and needs its own
-pass:
+passes. The default build targets WebGL2 for broad mobile support; the `webgpu`
+feature builds the higher-capability variant selected by the deployed loader
+when `navigator.gpu` can supply an adapter.
 
 ```bash
 cargo clippy -p client --target wasm32-unknown-unknown --all-targets -- -D warnings
+cargo clippy -p client --target wasm32-unknown-unknown --all-targets --features webgpu -- -D warnings
 ```
 
 [`AGENTS.md`](AGENTS.md) covers the crate layout, invariants, and conventions.

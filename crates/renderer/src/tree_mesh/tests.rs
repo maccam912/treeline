@@ -12,7 +12,7 @@ use treeline_ecology::{
 use super::{
     ProceduralTree, TreeGeometry, TreeMeshDetail, bark_cylinder_material, procedural_tree_geometry,
 };
-use crate::vertex::TerrainVertex;
+use crate::vertex::{TerrainVertex, f64_as_f32};
 
 const TIERS: [TreeMeshDetail; 3] = [
     TreeMeshDetail::Full,
@@ -38,7 +38,24 @@ fn stand() -> Vec<ProceduralTree> {
 }
 
 fn position(vertex: &TerrainVertex) -> Vec3 {
-    Vec3::from(vertex.position_high) + Vec3::from(vertex.position_low)
+    Vec3::from_array(vertex.world_position.map(f64_as_f32))
+}
+
+type VertexBits = ([u64; 3], [u32; 3], [u32; 4], u32, [u32; 2]);
+
+fn vertex_bits(vertices: &[TerrainVertex]) -> Vec<VertexBits> {
+    vertices
+        .iter()
+        .map(|vertex| {
+            (
+                vertex.world_position.map(f64::to_bits),
+                vertex.normal.map(f32::to_bits),
+                vertex.color.map(f32::to_bits),
+                vertex.surface_kind.to_bits(),
+                vertex.material_uv.map(f32::to_bits),
+            )
+        })
+        .collect()
 }
 
 fn assert_well_formed(geometry: &TreeGeometry) {
@@ -53,8 +70,7 @@ fn assert_well_formed(geometry: &TreeGeometry) {
             .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
     );
     assert!(vertices.iter().all(|vertex| {
-        vertex.position_high.into_iter().all(f32::is_finite)
-            && vertex.position_low.into_iter().all(f32::is_finite)
+        vertex.world_position.into_iter().all(f64::is_finite)
             && vertex.normal.into_iter().all(f32::is_finite)
             && (vertex.color[3] - 1.0).abs() < f32::EPSILON
     }));
@@ -94,10 +110,7 @@ fn a_trees_geometry_is_bit_stable_and_neighbor_independent() {
         .expect("tree geometry");
     let again = procedural_tree_geometry(&stand, TreeMeshDetail::Full, |_, _| Some(42.0))
         .expect("tree geometry");
-    assert_eq!(
-        bytemuck::cast_slice::<_, u8>(&batch.vertices),
-        bytemuck::cast_slice::<_, u8>(&again.vertices)
-    );
+    assert_eq!(vertex_bits(&batch.vertices), vertex_bits(&again.vertices));
     assert_eq!(batch.indices, again.indices);
 
     let mut concatenated = TreeGeometry::default();
@@ -112,8 +125,8 @@ fn a_trees_geometry_is_bit_stable_and_neighbor_independent() {
         concatenated.indices.append(&mut alone.indices);
     }
     assert_eq!(
-        bytemuck::cast_slice::<_, u8>(&batch.vertices),
-        bytemuck::cast_slice::<_, u8>(&concatenated.vertices)
+        vertex_bits(&batch.vertices),
+        vertex_bits(&concatenated.vertices)
     );
     assert_eq!(batch.indices, concatenated.indices);
 }

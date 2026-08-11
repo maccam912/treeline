@@ -41,7 +41,7 @@
     "artifact_sha256": "5105d36d9babe8c57531669519aadec3daa33c98860037e9f2e596062ea569f1",
     "artifact_size_bytes": 36715,
     "spacing_meters": 4.0,
-    "runtime_level_offset_meters": 0.0,
+    "runtime_level_offset_meters": 2.0,
     "runtime_footprint_expansion_meters": 4.0,
     "source": "USGS National Hydrography Dataset, Waterbody - Large Scale",
     "source_url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",

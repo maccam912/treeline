@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use bevy::prelude::{Resource, Window};
 use treeline_coordinates::WorldPosition;
 use treeline_voxel::ChunkIndex;
 use treeline_world::{
@@ -13,12 +14,11 @@ use treeline_world::{
     TerrainMeshSpec,
 };
 use web_time::{Duration, Instant};
-use winit::window::Window;
 
 use crate::WINDOW_TITLE;
 
 /// Progress of one round of world building, from spawn or from a warp.
-#[derive(Debug)]
+#[derive(Debug, Resource)]
 pub struct LoadProgress {
     started: Instant,
     /// Outer-ring far tiles, which set the visible horizon.
@@ -131,16 +131,16 @@ impl LoadProgress {
     }
 
     /// Updates the window title, and reports timings once when the world is up.
-    pub fn publish(&mut self, window: &Window) {
+    pub fn publish(&mut self, window: &mut Window) {
         if !self.dirty {
             return;
         }
         self.dirty = false;
         let Some(wall_time) = self.finished_at else {
-            window.set_title(&self.title());
+            window.title = self.title();
             return;
         };
-        window.set_title(WINDOW_TITLE);
+        window.title = WINDOW_TITLE.into();
         if self.reported {
             return;
         }

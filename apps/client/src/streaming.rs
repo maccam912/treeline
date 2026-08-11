@@ -8,14 +8,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
+use bevy::prelude::{
+    Assets, Commands, Entity, Mesh as BevyMesh, Mesh3d, MeshMaterial3d, Resource, Transform,
+};
 use treeline_coordinates::WorldPosition;
 use treeline_mesher::Mesh;
-use treeline_renderer::{TerrainMesh, TerrainRenderer};
+use treeline_renderer::{
+    WorldMaterials, WorldMeshOrigin, prepare_terrain_mesh, prepare_water_mesh,
+};
 use treeline_voxel::ChunkIndex;
 use treeline_world::{
     ChunkMeshSpec, ChunkStreamer, ChunkStreamingConfig, FarTerrainMeshSpec, FarTerrainStreamer,
-    FarTerrainStreamingConfig, FarTileIndex, GenerationPriority, NearTerrainCutout, Season,
-    TerrainMeshSpec, WorldTerrain,
+    FarTerrainStreamingConfig, FarTileIndex, GenerationPriority, Season, TerrainMeshSpec,
+    WorldTerrain,
 };
 use web_time::{Duration, Instant};
 
@@ -41,20 +46,20 @@ const SURFACE_SEASON: Season = Season::Winter;
 #[derive(Debug)]
 pub struct ResidentChunk {
     pub spec: ChunkMeshSpec,
-    pub mesh: TerrainMesh,
-    pub lake_mesh: Option<TerrainMesh>,
+    pub terrain: Entity,
+    pub water: Option<Entity>,
 }
 
 /// One far tile resident on the GPU.
 #[derive(Debug)]
 pub struct ResidentFarTile {
     pub spec: FarTerrainMeshSpec,
-    pub mesh: TerrainMesh,
-    pub lake_mesh: Option<TerrainMesh>,
+    pub terrain: Entity,
+    pub water: Option<Entity>,
 }
 
 /// Everything resident, and everything asked for but not yet delivered.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Resource)]
 pub struct ResidentTerrain {
     pub chunks: BTreeMap<ChunkIndex, ResidentChunk>,
     pub far_tiles: BTreeMap<FarTileIndex, ResidentFarTile>,
@@ -64,7 +69,7 @@ pub struct ResidentTerrain {
 
 impl ResidentTerrain {
     /// Drops everything and cancels outstanding work, for a warp.
-    pub fn clear(&mut self, jobs: &mut TerrainMeshQueue) {
+    pub fn clear(&mut self, commands: &mut Commands, jobs: &mut TerrainMeshQueue) {
         for (_, spec) in std::mem::take(&mut self.requested_chunks) {
             jobs.cancel(TerrainMeshSpec::Near(spec));
         }
@@ -72,8 +77,12 @@ impl ResidentTerrain {
             jobs.cancel(TerrainMeshSpec::Far(spec));
         }
         jobs.retain_prewarm(&BTreeSet::new());
-        self.chunks.clear();
-        self.far_tiles.clear();
+        for resident in std::mem::take(&mut self.chunks).into_values() {
+            despawn_surface(commands, resident.terrain, resident.water);
+        }
+        for resident in std::mem::take(&mut self.far_tiles).into_values() {
+            despawn_surface(commands, resident.terrain, resident.water);
+        }
     }
 
     /// Chunks resident or on the way, which the streamer plans against.
@@ -130,7 +139,7 @@ impl PlayerMotion {
 }
 
 /// Streaming policy for both terrain tiers.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Resource)]
 pub struct Streamers {
     pub near: ChunkStreamer,
     pub far: FarTerrainStreamer,
@@ -160,28 +169,28 @@ impl Default for Streamers {
 /// Returns an error when the player leaves the representable coordinate range
 /// or a mesh cannot be uploaded.
 pub fn update(
-    uploader: Uploader<'_>,
+    commands: &mut Commands,
+    meshes: &mut Assets<BevyMesh>,
+    materials: &WorldMaterials,
+    terrain: &WorldTerrain,
     streamers: Streamers,
     motion: PlayerMotion,
     resident: &mut ResidentTerrain,
     jobs: &mut TerrainMeshQueue,
     progress: &mut LoadProgress,
 ) -> Result<(), Box<dyn Error>> {
-    integrate_completed(uploader, resident, jobs, progress);
-    schedule(streamers, motion, resident, jobs)
-}
-
-/// The GPU resources needed to make a finished mesh resident.
-#[derive(Clone, Copy)]
-pub struct Uploader<'a> {
-    pub device: &'a wgpu::Device,
-    pub renderer: &'a TerrainRenderer,
-    pub terrain: &'a WorldTerrain,
+    integrate_completed(
+        commands, meshes, materials, terrain, resident, jobs, progress,
+    );
+    schedule(commands, streamers, motion, resident, jobs)
 }
 
 /// Uploads completed meshes, within this frame's budget.
 fn integrate_completed(
-    uploader: Uploader<'_>,
+    commands: &mut Commands,
+    meshes: &mut Assets<BevyMesh>,
+    materials: &WorldMaterials,
+    terrain: &WorldTerrain,
     resident: &mut ResidentTerrain,
     jobs: &mut TerrainMeshQueue,
     progress: &mut LoadProgress,
@@ -224,30 +233,41 @@ fn integrate_completed(
         };
         // A failed upload must not abort the whole update either; the cleared
         // request lets a later frame retry.
-        let Ok((surface, water)) = upload(uploader, &mesh, lake_mesh.as_ref()) else {
+        let Ok((surface, water)) = upload(
+            commands,
+            meshes,
+            materials,
+            terrain,
+            &mesh,
+            lake_mesh.as_ref(),
+        ) else {
             eprintln!("terrain upload failed, retrying later");
             continue;
         };
         match spec {
             TerrainMeshSpec::Near(spec) => {
-                resident.chunks.insert(
+                if let Some(previous) = resident.chunks.insert(
                     spec.chunk,
                     ResidentChunk {
                         spec,
-                        mesh: surface,
-                        lake_mesh: water,
+                        terrain: surface,
+                        water,
                     },
-                );
+                ) {
+                    despawn_surface(commands, previous.terrain, previous.water);
+                }
             }
             TerrainMeshSpec::Far(spec) => {
-                resident.far_tiles.insert(
+                if let Some(previous) = resident.far_tiles.insert(
                     spec.tile,
                     ResidentFarTile {
                         spec,
-                        mesh: surface,
-                        lake_mesh: water,
+                        terrain: surface,
+                        water,
                     },
-                );
+                ) {
+                    despawn_surface(commands, previous.terrain, previous.water);
+                }
             }
         }
         progress.record_completed(
@@ -275,25 +295,58 @@ fn clear_request(spec: TerrainMeshSpec, resident: &mut ResidentTerrain) {
 /// Near and far tiers go through this one path, so they cannot drift apart in
 /// appearance at the seam between them.
 fn upload(
-    uploader: Uploader<'_>,
+    commands: &mut Commands,
+    meshes: &mut Assets<BevyMesh>,
+    materials: &WorldMaterials,
+    terrain: &WorldTerrain,
     mesh: &Mesh,
     lake_mesh: Option<&Mesh>,
-) -> Result<(TerrainMesh, Option<TerrainMesh>), Box<dyn Error>> {
-    let Uploader {
-        device,
-        renderer,
-        terrain,
-    } = uploader;
-    let surface = renderer.upload_snowy_mesh(device, mesh, |x, z| {
+) -> Result<(Entity, Option<Entity>), Box<dyn Error>> {
+    let surface = prepare_terrain_mesh(mesh, |x, z| {
         terrain
             .snow_cover_for_slope(x, z, SURFACE_SEASON, 0.0)
             .map(|snow| snow.coverage_fraction)
     })?;
+    let surface_entity = spawn_prepared(
+        commands,
+        meshes,
+        materials.terrain.clone(),
+        surface,
+        "terrain",
+    );
     let water = lake_mesh
         .filter(|mesh| !mesh.indices.is_empty())
-        .map(|mesh| renderer.upload_water_mesh(device, mesh))
-        .transpose()?;
-    Ok((surface, water))
+        .map(prepare_water_mesh)
+        .transpose()?
+        .map(|prepared| {
+            spawn_prepared(commands, meshes, materials.water.clone(), prepared, "water")
+        });
+    Ok((surface_entity, water))
+}
+
+fn spawn_prepared(
+    commands: &mut Commands,
+    meshes: &mut Assets<BevyMesh>,
+    material: bevy::prelude::Handle<bevy::prelude::StandardMaterial>,
+    prepared: treeline_renderer::PreparedMesh,
+    name: &'static str,
+) -> Entity {
+    commands
+        .spawn((
+            bevy::prelude::Name::new(name),
+            Mesh3d(meshes.add(prepared.mesh)),
+            MeshMaterial3d(material),
+            Transform::default(),
+            WorldMeshOrigin(prepared.world_origin),
+        ))
+        .id()
+}
+
+fn despawn_surface(commands: &mut Commands, terrain: Entity, water: Option<Entity>) {
+    commands.entity(terrain).despawn();
+    if let Some(water) = water {
+        commands.entity(water).despawn();
+    }
 }
 
 /// Reconciles residency with the player position and queues the difference.
@@ -302,6 +355,7 @@ fn upload(
 ///
 /// Returns an error when the player position leaves the representable range.
 pub fn schedule(
+    commands: &mut Commands,
     streamers: Streamers,
     motion: PlayerMotion,
     resident: &mut ResidentTerrain,
@@ -318,13 +372,17 @@ pub fn schedule(
         .ok_or_else(|| std::io::Error::other("player position is outside far tile index range"))?;
 
     for chunk in &near_plan.unload {
-        resident.chunks.remove(chunk);
+        if let Some(removed) = resident.chunks.remove(chunk) {
+            despawn_surface(commands, removed.terrain, removed.water);
+        }
         if let Some(spec) = resident.requested_chunks.remove(chunk) {
             jobs.cancel(TerrainMeshSpec::Near(spec));
         }
     }
     for tile in &far_plan.unload {
-        resident.far_tiles.remove(tile);
+        if let Some(removed) = resident.far_tiles.remove(tile) {
+            despawn_surface(commands, removed.terrain, removed.water);
+        }
         if let Some(spec) = resident.requested_far_tiles.remove(tile) {
             jobs.cancel(TerrainMeshSpec::Far(spec));
         }
@@ -399,22 +457,4 @@ fn prefetch(
         .filter(|spec| tracked_chunks.get(&spec.chunk) != Some(spec))
         .filter(|spec| jobs.prewarm(TerrainMeshSpec::Near(*spec)))
         .count())
-}
-
-/// The world-space rectangle far terrain omits because near terrain covers it.
-///
-/// # Errors
-///
-/// Returns an error when the player position leaves the representable range.
-pub fn far_cutout_bounds(
-    streamers: Streamers,
-    player_position: WorldPosition,
-) -> Result<([f64; 2], [f64; 2]), Box<dyn Error>> {
-    let center = ChunkIndex::containing(player_position)
-        .ok_or_else(|| std::io::Error::other("player position is outside chunk index range"))?;
-    let cutout = NearTerrainCutout::around(center, streamers.near.config().load_radius())
-        .ok_or_else(|| std::io::Error::other("near terrain cutout is outside chunk index range"))?;
-    let min = cutout.min.sample_origin();
-    let max = cutout.max_exclusive.sample_origin();
-    Ok(([min.x, min.z], [max.x, max.z]))
 }

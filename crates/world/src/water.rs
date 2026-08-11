@@ -1,17 +1,19 @@
 //! The lake sheet drawn over mapped waterbodies.
 //!
-//! Water is a separate render surface: a horizontal quad per grid cell whose
-//! center falls inside a mapped footprint. It never changes terrain density, so
-//! the shoreline the player walks and the shoreline they see come from the same
-//! measured mask.
+//! Water is a separate render surface sampled at the measured footprint mask's
+//! resolution. It never changes terrain density, so the shoreline the player
+//! walks and the shoreline they see come from the same measured mask.
+
+use std::collections::BTreeMap;
 
 use treeline_mesher::{Mesh, MeshingError, SurfaceGridSpec};
+use treeline_terrain::WATER_MASK_SPACING_METERS;
 
 use crate::mesh::TerrainMeshSpec;
 use crate::terrain::WorldTerrain;
 
-/// Lifts water above the terrain surface so the two do not z-fight.
-const RENDER_OFFSET_METERS: f64 = 0.05;
+/// Raises the representative bare-earth level to meet the visible shoreline.
+const WATER_LEVEL_OFFSET_METERS: f64 = 2.0;
 
 /// Depth given to a lake cell that the recorded level does not reach.
 ///
@@ -29,42 +31,69 @@ const WATER_COLOR: [f32; 4] = [0.04, 0.34, 0.58, 1.0];
 /// Returns [`MeshingError`] when the LOD is unsupported, the grid is invalid,
 /// or the sheet exceeds `u32` index capacity.
 pub fn lake_sheet(terrain: WorldTerrain, spec: TerrainMeshSpec) -> Result<Mesh, MeshingError> {
-    let grid = spec.surface_grid()?;
-    validate(grid)?;
+    let grid = water_grid(spec.surface_grid()?)?;
 
     let [cells_x, cells_z] = grid.cell_counts;
     let mut mesh = Mesh::default();
+    let mut vertices = BTreeMap::new();
     for cell_z in 0..cells_z {
         for cell_x in 0..cells_x {
             let (min, max) = cell_bounds(grid, cell_x, cell_z);
-            if grid
-                .cutout
-                .is_some_and(|cutout| cutout.contains_cell(min[0], max[0], min[1], max[1]))
-            {
-                continue;
-            }
             let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
             let Some(lake) = terrain.lake_at(center[0], center[1]) else {
                 continue;
             };
             append_quad(
                 &mut mesh,
+                &mut vertices,
+                cell_x,
+                cell_z,
                 min,
                 max,
-                lake.surface_elevation_meters + RENDER_OFFSET_METERS,
+                lake.surface_elevation_meters + WATER_LEVEL_OFFSET_METERS,
             )?;
         }
     }
     Ok(mesh)
 }
 
-fn validate(grid: SurfaceGridSpec) -> Result<(), MeshingError> {
-    (!grid.cell_counts.contains(&0)
-        && grid.origin_x.is_finite()
-        && grid.origin_z.is_finite()
-        && grid.spacing_meters.is_finite()
-        && grid.spacing_meters > 0.0)
-        .then_some(())
+fn water_grid(terrain_grid: SurfaceGridSpec) -> Result<SurfaceGridSpec, MeshingError> {
+    let valid = !terrain_grid.cell_counts.contains(&0)
+        && terrain_grid.origin_x.is_finite()
+        && terrain_grid.origin_z.is_finite()
+        && terrain_grid.spacing_meters.is_finite()
+        && terrain_grid.spacing_meters > 0.0;
+    if !valid {
+        return Err(MeshingError::InvalidGrid);
+    }
+
+    let cells_x = aligned_water_cells(terrain_grid.cell_counts[0], terrain_grid.spacing_meters)?;
+    let cells_z = aligned_water_cells(terrain_grid.cell_counts[1], terrain_grid.spacing_meters)?;
+    let origin_x = aligned_water_origin(terrain_grid.origin_x)?;
+    let origin_z = aligned_water_origin(terrain_grid.origin_z)?;
+    Ok(SurfaceGridSpec::new(
+        origin_x,
+        origin_z,
+        [cells_x, cells_z],
+        WATER_MASK_SPACING_METERS,
+    ))
+}
+
+fn aligned_water_cells(terrain_cells: usize, terrain_spacing: f64) -> Result<usize, MeshingError> {
+    let extent = usize_as_f64(terrain_cells) * terrain_spacing;
+    let water_cells = extent / WATER_MASK_SPACING_METERS;
+    let rounded = libm::round(water_cells);
+    if (water_cells - rounded).abs() > 1.0e-9 || rounded < 1.0 || rounded > usize_as_f64(usize::MAX)
+    {
+        return Err(MeshingError::InvalidGrid);
+    }
+    Ok(f64_as_usize(rounded))
+}
+
+fn aligned_water_origin(origin: f64) -> Result<f64, MeshingError> {
+    let lattice = origin / WATER_MASK_SPACING_METERS;
+    ((lattice - libm::round(lattice)).abs() < 1.0e-9)
+        .then_some(origin)
         .ok_or(MeshingError::InvalidGrid)
 }
 
@@ -82,38 +111,66 @@ fn cell_bounds(grid: SurfaceGridSpec, cell_x: usize, cell_z: usize) -> ([f64; 2]
 /// Appends one upward-facing water quad at a fixed elevation.
 fn append_quad(
     mesh: &mut Mesh,
+    vertices: &mut BTreeMap<(usize, usize, u64), u32>,
+    cell_x: usize,
+    cell_z: usize,
     min: [f64; 2],
     max: [f64; 2],
     surface: f64,
 ) -> Result<(), MeshingError> {
-    let base = u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
-    let corner = |offset: u32| {
-        base.checked_add(offset)
-            .ok_or(MeshingError::TooManyVertices)
-    };
-
-    mesh.positions.extend([
-        [min[0], surface, min[1]],
-        [min[0], surface, max[1]],
-        [max[0], surface, min[1]],
-        [max[0], surface, max[1]],
-    ]);
-    mesh.normals.extend([[0.0, 1.0, 0.0]; 4]);
-    mesh.colors.extend([WATER_COLOR; 4]);
+    let top_left = vertex(mesh, vertices, cell_x, cell_z, min[0], min[1], surface)?;
+    let bottom_left = vertex(mesh, vertices, cell_x, cell_z + 1, min[0], max[1], surface)?;
+    let top_right = vertex(mesh, vertices, cell_x + 1, cell_z, max[0], min[1], surface)?;
+    let bottom_right = vertex(
+        mesh,
+        vertices,
+        cell_x + 1,
+        cell_z + 1,
+        max[0],
+        max[1],
+        surface,
+    )?;
     mesh.indices.extend([
-        base,
-        corner(1)?,
-        corner(2)?,
-        corner(2)?,
-        corner(1)?,
-        corner(3)?,
+        top_left,
+        bottom_left,
+        top_right,
+        top_right,
+        bottom_left,
+        bottom_right,
     ]);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vertex(
+    mesh: &mut Mesh,
+    vertices: &mut BTreeMap<(usize, usize, u64), u32>,
+    x: usize,
+    z: usize,
+    world_x: f64,
+    world_z: f64,
+    surface: f64,
+) -> Result<u32, MeshingError> {
+    let key = (x, z, surface.to_bits());
+    if let Some(&index) = vertices.get(&key) {
+        return Ok(index);
+    }
+    let index = u32::try_from(mesh.positions.len()).map_err(|_| MeshingError::TooManyVertices)?;
+    mesh.positions.push([world_x, surface, world_z]);
+    mesh.normals.push([0.0, 1.0, 0.0]);
+    mesh.colors.push(WATER_COLOR);
+    vertices.insert(key, index);
+    Ok(index)
 }
 
 #[allow(clippy::cast_precision_loss)]
 fn usize_as_f64(value: usize) -> f64 {
     value as f64
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn f64_as_usize(value: f64) -> usize {
+    value as usize
 }
 
 #[cfg(test)]
@@ -154,14 +211,14 @@ mod tests {
     }
 
     #[test]
-    fn water_sits_just_above_its_recorded_level() {
+    fn water_uses_the_configured_level_offset() {
         let mesh = lake_sheet(TERRAIN, chunk_spec(LAKE_INTERIOR)).expect("valid grid");
         let level = TERRAIN
             .lake_at(LAKE_INTERIOR[0], LAKE_INTERIOR[1])
             .expect("mapped lake")
             .surface_elevation_meters;
         for position in &mesh.positions {
-            assert!((position[1] - level - RENDER_OFFSET_METERS).abs() < 1.0e-9);
+            assert!((position[1] - level - WATER_LEVEL_OFFSET_METERS).abs() < 1.0e-9);
         }
     }
 
@@ -173,6 +230,7 @@ mod tests {
         let mesh = lake_sheet(TERRAIN, TerrainMeshSpec::Far(FarTerrainMeshSpec { tile }))
             .expect("valid grid");
         assert!(mesh.is_well_formed());
+        assert!(maximum_triangle_axis_step(&mesh) <= WATER_MASK_SPACING_METERS);
     }
 
     #[test]
@@ -182,5 +240,20 @@ mod tests {
             lake_sheet(TERRAIN, spec).expect("valid grid"),
             lake_sheet(TERRAIN, spec).expect("valid grid")
         );
+    }
+
+    fn maximum_triangle_axis_step(mesh: &Mesh) -> f64 {
+        mesh.indices
+            .chunks_exact(3)
+            .flat_map(|triangle| {
+                [(0, 1), (1, 2), (2, 0)]
+                    .into_iter()
+                    .flat_map(move |(a, b)| {
+                        let a = mesh.positions[triangle[a] as usize];
+                        let b = mesh.positions[triangle[b] as usize];
+                        [(a[0] - b[0]).abs(), (a[2] - b[2]).abs()]
+                    })
+            })
+            .fold(0.0, f64::max)
     }
 }

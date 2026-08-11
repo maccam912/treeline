@@ -12,7 +12,7 @@ const SEASON: Season = Season::Winter;
 /// Elevation the atmosphere is evaluated at: the tile's mid-range.
 const REFERENCE_ELEVATION_METERS: f64 = 440.0;
 
-/// Derives fog color, density, and wind from climate normals.
+/// Derives fog color and density from climate normals.
 ///
 /// Cold air reads bluer and holds less haze; damp air reads greyer and thicker.
 /// Both are presentation, not simulation.
@@ -28,8 +28,6 @@ pub fn settings_for(climate: SiteClimate) -> Option<AtmosphereSettings> {
             f64_as_f32(0.66 + ((1.0 - warmth) * 0.07) + (moisture * 0.03)),
         ],
         fog_density: f64_as_f32(0.58 + (moisture * 0.92)),
-        moisture: f64_as_f32(moisture),
-        prevailing_wind: climate.prevailing_wind.map(f64_as_f32),
     })
 }
 
@@ -52,22 +50,7 @@ mod tests {
                 .into_iter()
                 .all(|channel| (0.0..=1.0).contains(&channel))
         );
-        assert!((0.0..=1.0).contains(&settings.moisture));
         assert!(settings.fog_density > 0.0);
-    }
-
-    #[test]
-    fn the_wind_matches_the_climate_it_came_from() {
-        let climate = SiteClimate::SURVEYED_TILE;
-        let settings = settings_for(climate).expect("the site has climate");
-
-        for (actual, expected) in settings
-            .prevailing_wind
-            .into_iter()
-            .zip(climate.prevailing_wind)
-        {
-            assert!((f64::from(actual) - expected).abs() < 1.0e-6);
-        }
     }
 
     #[test]
@@ -84,6 +67,5 @@ mod tests {
         .expect("valid climate");
 
         assert!(wet.fog_density > dry.fog_density);
-        assert!(wet.moisture > dry.moisture);
     }
 }

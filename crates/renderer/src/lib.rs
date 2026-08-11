@@ -1,37 +1,36 @@
-//! Rendering for Treeline's surveyed world.
+//! Bevy-native rendering support for Treeline's measured world.
 //!
-//! The renderer draws four things — terrain, water, trees, and sky — through a
-//! single pipeline and a single vertex format. What varies between them is a
-//! `surface_kind` tag and which material layer the shader samples, not the
-//! shader or the pipeline.
-//!
-//! Two properties shape the whole crate. World coordinates exceed `f32`
-//! precision, so positions travel as split high/low pairs and are reconstructed
-//! relative to the camera. And terrain is streamed as independently owned
-//! meshes, so uploads never touch shared state and can happen in any order.
-//!
-//! This crate deliberately knows nothing about world generation: callers pass
-//! in finished meshes, tree individuals, and lighting values.
+//! World generation remains independent from the engine. This crate is the
+//! adapter at the stable boundary: it turns finished terrain and tree data into
+//! Bevy mesh assets, supplies the small set of materials the game uses, and
+//! records the double-precision origin of each streamed mesh.
 
-mod gpu;
 mod lighting;
-mod material;
-mod renderer;
+mod mesh;
+mod plugin;
 mod snow;
 mod tree_mesh;
-mod uniform;
 mod vertex;
 
-pub use gpu::TerrainMesh;
-pub use lighting::{
-    AtmosphereSettings, LightingSettings, SHADOW_CASTER_DISTANCE_METERS, TimeOfDay,
-};
-pub use renderer::TerrainRenderer;
+pub use lighting::{AtmosphereSettings, LightingSettings, TimeOfDay};
+pub use mesh::{PreparedMesh, prepare_terrain_mesh, prepare_water_mesh};
+pub use plugin::{TreelineRenderPlugin, WorldMaterials};
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-/// The only way rendering fails: a mesh too large to address.
+use bevy::prelude::Component;
+use treeline_ecology::ProceduralTree;
+
+/// Double-precision world location represented by a Bevy mesh entity.
+///
+/// Bevy transforms intentionally remain close to the camera. The client keeps
+/// this authoritative origin and derives the entity's `f32` transform from the
+/// current floating origin.
+#[derive(Clone, Copy, Component, Debug, PartialEq)]
+pub struct WorldMeshOrigin(pub [f64; 3]);
+
+/// The only way mesh preparation fails: geometry too large for `u32` indices.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RendererError {
     TooManyIndices,
@@ -40,54 +39,35 @@ pub enum RendererError {
 impl Display for RendererError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooManyIndices => formatter.write_str("the terrain mesh has too many indices"),
+            Self::TooManyIndices => formatter.write_str("the mesh has too many indices"),
         }
     }
 }
 
 impl Error for RendererError {}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TerrainRenderTier {
-    FullVoxel,
-    VoxelLod,
-    CoarseSurface,
-    Horizon,
-}
-
 /// Geometry detail for one deterministic set of procedural tree individuals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TreeMeshDetail {
-    /// Trunks, branches, and damage.
     Full,
-    /// Trunks alone, without individual branches.
     Simplified,
-    /// A minimal trunk silhouette for the outer individual-tree ring.
     Silhouette,
 }
 
-/// Selects a representation from horizontal distance in meters.
-pub fn terrain_tier(distance_meters: f64) -> TerrainRenderTier {
-    if distance_meters < 200.0 {
-        TerrainRenderTier::FullVoxel
-    } else if distance_meters < 2_000.0 {
-        TerrainRenderTier::VoxelLod
-    } else if distance_meters < 20_000.0 {
-        TerrainRenderTier::CoarseSurface
-    } else {
-        TerrainRenderTier::Horizon
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn representation_coarsens_with_distance() {
-        assert_eq!(terrain_tier(10.0), TerrainRenderTier::FullVoxel);
-        assert_eq!(terrain_tier(500.0), TerrainRenderTier::VoxelLod);
-        assert_eq!(terrain_tier(5_000.0), TerrainRenderTier::CoarseSurface);
-        assert_eq!(terrain_tier(30_000.0), TerrainRenderTier::Horizon);
-    }
+/// Builds one Bevy mesh for a deterministic tile of tree individuals.
+///
+/// The tile is still a single mesh and therefore a single renderable entity;
+/// Bevy provides view and shadow-cascade culling around that coarse unit.
+///
+/// # Errors
+///
+/// Returns [`RendererError::TooManyIndices`] when the generated tree geometry
+/// cannot be represented by Bevy's `u32` index buffer.
+pub fn prepare_trees(
+    trees: &[ProceduralTree],
+    detail: TreeMeshDetail,
+    surface_height: impl FnMut(f64, f64) -> Option<f64>,
+) -> Result<Option<PreparedMesh>, RendererError> {
+    let geometry = tree_mesh::procedural_tree_geometry(trees, detail, surface_height)?;
+    Ok(mesh::prepared_tree_mesh(geometry))
 }

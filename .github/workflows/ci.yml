@@ -71,12 +71,21 @@ jobs:
       # `cfg(target_arch = "wasm32")`, so the native lint job never compiles
       # them. Without this job a break in browser-only code first appears when
       # Pages deploys from main.
-      - name: Lint browser client
+      - name: Lint WebGL2 browser client
         run: >-
           cargo clippy
           -p client
           --target wasm32-unknown-unknown
           --all-targets
+          -- -D warnings
+
+      - name: Lint WebGPU browser client
+        run: >-
+          cargo clippy
+          -p client
+          --target wasm32-unknown-unknown
+          --all-targets
+          --features webgpu
           -- -D warnings
 
   determinism:

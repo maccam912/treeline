@@ -5,10 +5,11 @@
 
 use std::collections::HashSet;
 
+use bevy::input::keyboard::KeyCode;
+use bevy::prelude::Resource;
 use glam::Vec2;
-use winit::keyboard::KeyCode;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Resource)]
 pub struct InputState {
     pressed: HashSet<KeyCode>,
     sticks: VirtualSticks,

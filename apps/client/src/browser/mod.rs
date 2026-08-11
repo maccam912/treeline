@@ -5,9 +5,7 @@
 //! keyboard on a phone, so the page carries buttons.
 
 mod actions;
-mod startup;
 mod terrain_queue;
 
 pub use actions::BrowserActions;
-pub use startup::report_startup_failure;
 pub use terrain_queue::BrowserTerrainMeshQueue;

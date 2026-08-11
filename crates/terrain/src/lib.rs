@@ -16,7 +16,7 @@ mod tile;
 pub use analytic::{GroundPlane, SmoothHills};
 pub use tile::{
     CanopySample, LakeSample, SURVEYED_SETTINGS_HASH, SURVEYED_SPAWN_X, SURVEYED_SPAWN_Z,
-    SURVEYED_TILE_EDGE_METERS,
+    SURVEYED_TILE_EDGE_METERS, WATER_MASK_SPACING_METERS,
 };
 
 use treeline_coordinates::WorldPosition;
