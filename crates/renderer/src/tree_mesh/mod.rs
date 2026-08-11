@@ -36,7 +36,7 @@ pub(crate) fn procedural_tree_geometry(
 ) -> Result<TreeGeometry, RendererError> {
     let mut geometry = TreeGeometry::default();
     for tree in trees {
-        let Some(base_y) = surface_height(tree.x, tree.z) else {
+        let Some(base_y) = embedded_base_height(*tree, &mut surface_height) else {
             continue;
         };
         let first_vertex = geometry.vertices.len();
@@ -48,6 +48,36 @@ pub(crate) fn procedural_tree_geometry(
     }
     Ok(geometry)
 }
+
+/// Places the root below the lowest sampled ground around the trunk footprint.
+///
+/// The extra base-radius embed keeps the perpendicular end of a leaning or
+/// fallen trunk below ground as well as covering terrain between samples.
+fn embedded_base_height(
+    tree: ProceduralTree,
+    surface_height: &mut impl FnMut(f64, f64) -> Option<f64>,
+) -> Option<f64> {
+    let mut lowest = surface_height(tree.x, tree.z)?;
+    let radius = tree.trunk_base_radius_meters;
+    for [x, z] in BASE_SAMPLE_DIRECTIONS {
+        if let Some(height) = surface_height(tree.x + (x * radius), tree.z + (z * radius)) {
+            lowest = lowest.min(height);
+        }
+    }
+    Some(lowest - radius)
+}
+
+const DIAGONAL_COMPONENT: f64 = std::f64::consts::FRAC_1_SQRT_2;
+const BASE_SAMPLE_DIRECTIONS: [[f64; 2]; 8] = [
+    [1.0, 0.0],
+    [DIAGONAL_COMPONENT, DIAGONAL_COMPONENT],
+    [0.0, 1.0],
+    [-DIAGONAL_COMPONENT, DIAGONAL_COMPONENT],
+    [-1.0, 0.0],
+    [-DIAGONAL_COMPONENT, -DIAGONAL_COMPONENT],
+    [0.0, -1.0],
+    [DIAGONAL_COMPONENT, -DIAGONAL_COMPONENT],
+];
 
 pub(crate) fn append_tree(
     geometry: &mut TreeGeometry,

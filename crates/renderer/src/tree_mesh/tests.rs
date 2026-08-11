@@ -147,6 +147,42 @@ fn trees_without_a_surface_sample_are_skipped() {
     assert!(geometry.indices.is_empty());
 }
 
+#[test]
+fn trunk_bases_are_buried_across_steep_ground() {
+    let mut tree = tree(1);
+    tree.lean_fraction = 0.0;
+    let surface_height = |x: f64, z: f64| (x * 4.0) + (z * 1.5) + 42.0;
+    let geometry = procedural_tree_geometry(&[tree], TreeMeshDetail::Full, |x, z| {
+        Some(surface_height(x, z))
+    })
+    .expect("tree geometry");
+
+    // Full-detail bark has seven sides and repeats its first vertex at the seam.
+    for vertex in &geometry.vertices[..8] {
+        let [x, y, z] = vertex.world_position;
+        assert!(
+            y <= surface_height(x, z),
+            "trunk base floated at [{x}, {y}, {z}]"
+        );
+    }
+}
+
+#[test]
+fn leaning_trunk_base_is_embedded_on_flat_ground() {
+    let mut tree = tree(1);
+    tree.condition = treeline_ecology::TreeCondition::Fallen;
+    tree.lean_direction = [1.0, 0.0];
+    tree.lean_fraction = 0.92;
+    let geometry = procedural_tree_geometry(&[tree], TreeMeshDetail::Full, |_, _| Some(42.0))
+        .expect("tree geometry");
+
+    assert!(
+        geometry.vertices[..8]
+            .iter()
+            .all(|vertex| vertex.world_position[1] <= 42.0)
+    );
+}
+
 /// Coarser tiers must keep every individual and only shed geometry, so a
 /// distant stand thins rather than losing trees.
 #[test]

@@ -43,22 +43,14 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Build WebGL2 fallback
-        working-directory: apps/client
-        run: trunk build --release --dist dist/webgl --public-url "./"
-
       - name: Build WebGPU client
         working-directory: apps/client
         run: >-
           trunk build
           --release
           --features webgpu
-          --dist dist/webgpu
+          --dist dist
           --public-url "./"
-
-      - name: Add renderer selector
-        working-directory: apps/client
-        run: cp backend-selector.html dist/index.html
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v4
