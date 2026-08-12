@@ -27,4 +27,4 @@ pub use stand::Stand;
 ///
 /// Increment when a change makes the same world identity and the same measured
 /// stand produce different trees.
-pub const FOREST_GENERATOR_VERSION: u32 = 21;
+pub const FOREST_GENERATOR_VERSION: u32 = 22;

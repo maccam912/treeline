@@ -148,9 +148,8 @@ fn condition(id: u64, age_years: f64, damage_fraction: f64) -> TreeCondition {
         return TreeCondition::Sapling;
     }
     let event = fraction(id, LANE_EVENT);
-    if event < 0.02 {
-        return TreeCondition::Fallen;
-    }
+    // Fallen trees stay dormant until their geometry can follow the ground;
+    // a rigid, nearly horizontal trunk visibly floats above sloping terrain.
     if event < 0.05 {
         return TreeCondition::DeadStanding;
     }
@@ -264,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stand_contains_a_range_of_life_stages() {
+    fn a_stand_contains_a_range_of_life_stages_but_no_fallen_trees() {
         let conditions = conditions(0.8, 30.0);
         let mut seen = Vec::new();
         for id in 0..4_000_u64 {
@@ -275,7 +274,7 @@ mod tests {
         }
         assert!(seen.contains(&TreeCondition::Mature));
         assert!(seen.contains(&TreeCondition::Sapling));
-        assert!(seen.contains(&TreeCondition::Fallen));
+        assert!(!seen.contains(&TreeCondition::Fallen));
         assert!(seen.contains(&TreeCondition::DeadStanding));
     }
 

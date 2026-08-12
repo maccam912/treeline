@@ -41,7 +41,7 @@ use treeline_terrain::SURVEYED_SETTINGS_HASH;
 /// Increment when a change makes the same identity produce a different world.
 /// The measured layers are versioned separately by the settings hash, which
 /// selects the bundle; this versions everything derived from them.
-pub const CURRENT_GENERATOR_VERSION: u32 = 24;
+pub const CURRENT_GENERATOR_VERSION: u32 = 25;
 
 /// The world the client loads.
 ///
