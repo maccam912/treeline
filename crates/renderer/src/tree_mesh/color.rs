@@ -3,7 +3,8 @@
 use treeline_ecology::{BarkStyle, ProceduralTree, TreeCondition, TreeFunctionalGroup};
 
 use crate::vertex::{
-    SURFACE_KIND_OAK_BARK, SURFACE_KIND_PINE_BARK, SURFACE_KIND_SOLID, f64_as_f32, hash_lane,
+    SURFACE_KIND_OAK_BARK, SURFACE_KIND_PINE_BARK, SURFACE_KIND_SOLID, f64_as_f32, hash_fraction,
+    hash_lane,
 };
 
 pub(crate) fn bark_color(tree: ProceduralTree) -> [f32; 4] {
@@ -49,4 +50,23 @@ pub(crate) fn bark_cylinder_material(tree: ProceduralTree, lane: usize) -> Cylin
         surface_kind,
         seed: hash_lane(tree.id.rotate_left(29), lane + 41),
     }
+}
+
+/// Shaded inner needles and sunlit outer tips for one pine foliage lobe.
+pub(crate) fn pine_foliage_colors(tree: ProceduralTree, seed: u64) -> [[f32; 4]; 2] {
+    let density = f64_as_f32(tree.genotype.leaf_density_fraction);
+    let tone = (hash_fraction(seed, 0x0043_4f4c_4f52) - 0.5) * 0.045;
+    let inner = [0.035 + tone, 0.13 + tone, 0.055 + (tone * 0.55), 1.0];
+    let outer = [
+        0.078 + tone + (density * 0.018),
+        0.255 + tone + (density * 0.045),
+        0.105 + (tone * 0.55) + (density * 0.018),
+        1.0,
+    ];
+    [inner, outer].map(|mut color| {
+        for channel in &mut color[..3] {
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        color
+    })
 }

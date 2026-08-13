@@ -1,9 +1,10 @@
 //! Streaming individual trees around the player.
 //!
 //! Trees stream on their own lattice rather than with terrain chunks, so
-//! coarsening terrain never swaps a forest for a canopy surface. Tiles nearest
-//! the player carry full geometry and distant ones only a silhouette, which is
-//! what makes a forest visible to the horizon at a workable vertex cost.
+//! coarsening terrain never swaps a forest for a canopy surface. Tiles within
+//! the simplified radius carry one batched draw of trunks and branch needle
+//! masses; distant tiles keep only a silhouette. That keeps a forest visible to
+//! the horizon at a workable vertex cost.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
@@ -18,7 +19,7 @@ use treeline_terrain::SurfaceField;
 use treeline_voxel::ChunkIndex;
 use treeline_world::{ChunkStreamingConfig, WorldTerrain};
 
-/// A tree tile spans four chunks, or 512 meters.
+/// A tree tile spans four 32-meter chunks, or 128 meters.
 const TILE_CHUNKS_PER_EDGE: u64 = 4;
 
 /// Tree residency reach, as multiples of the near-terrain load radius.
@@ -26,7 +27,8 @@ const TILE_CHUNKS_PER_EDGE: u64 = 4;
 /// Trees are visible far past the terrain the player can walk on, which is what
 /// makes distance legible in a forest.
 const RESIDENCY_MULTIPLIER: u64 = 20;
-const FULL_DETAIL_MULTIPLIER: u64 = 5;
+/// Tiles within this multiple of the chunk load radius carry branch geometry;
+/// everything further keeps only a silhouette.
 const SIMPLIFIED_MULTIPLIER: u64 = 10;
 
 /// Stable identity of one tree tile.
@@ -174,7 +176,6 @@ fn desired_tiles(
     config: ChunkStreamingConfig,
 ) -> Result<BTreeMap<TreeTileIndex, TreeMeshDetail>, Box<dyn Error>> {
     let radius = i64::try_from(residency_radius(config))?;
-    let full_detail = tile_radius(config, FULL_DETAIL_MULTIPLIER);
     let simplified = tile_radius(config, SIMPLIFIED_MULTIPLIER);
 
     let mut desired = BTreeMap::new();
@@ -190,10 +191,7 @@ fn desired_tiles(
                     .checked_add(z_offset)
                     .ok_or_else(|| std::io::Error::other("tree tile z index overflow"))?,
             };
-            let distance = tile.chebyshev_distance(center);
-            let detail = if distance <= full_detail {
-                TreeMeshDetail::Full
-            } else if distance <= simplified {
+            let detail = if tile.chebyshev_distance(center) <= simplified {
                 TreeMeshDetail::Simplified
             } else {
                 TreeMeshDetail::Silhouette
@@ -304,7 +302,7 @@ mod tests {
         let expected_tiles = usize::try_from((radius * 2 + 1).pow(2)).expect("count fits usize");
         assert_eq!(desired.len(), expected_tiles);
 
-        assert_eq!(desired[&center()], TreeMeshDetail::Full);
+        assert_eq!(desired[&center()], TreeMeshDetail::Simplified);
         let edge_tile = TreeTileIndex {
             x: i64::try_from(radius).expect("radius fits i64"),
             z: 0,
@@ -316,9 +314,8 @@ mod tests {
     fn detail_never_gets_finer_with_distance() {
         let desired = desired_tiles(center(), CONFIG).expect("tiles are representable");
         let rank = |detail| match detail {
-            TreeMeshDetail::Full => 0,
-            TreeMeshDetail::Simplified => 1,
-            TreeMeshDetail::Silhouette => 2,
+            TreeMeshDetail::Simplified => 0,
+            TreeMeshDetail::Silhouette => 1,
         };
         for (tile, &detail) in &desired {
             for (other, &other_detail) in &desired {
@@ -327,6 +324,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn branch_geometry_stays_inside_the_residency_disc() {
+        let desired = desired_tiles(center(), CONFIG).expect("tiles are representable");
+        let simplified_tiles = desired
+            .values()
+            .filter(|detail| **detail == TreeMeshDetail::Simplified)
+            .count();
+
+        let simplified_radius = tile_radius(CONFIG, SIMPLIFIED_MULTIPLIER);
+        let expected_tiles =
+            usize::try_from((simplified_radius * 2 + 1).pow(2)).expect("count fits usize");
+        assert_eq!(simplified_tiles, expected_tiles);
+        assert_eq!(TILE_CHUNKS_PER_EDGE, 4);
+        assert_eq!(tile_radius(CONFIG, SIMPLIFIED_MULTIPLIER), 10);
+        assert!(
+            tile_radius(CONFIG, SIMPLIFIED_MULTIPLIER) < tile_radius(CONFIG, RESIDENCY_MULTIPLIER)
+        );
     }
 
     #[test]
@@ -358,5 +374,71 @@ mod tests {
         resident.enqueue_missing(center(), &desired);
 
         assert_eq!(resident.pending.len(), queued);
+    }
+
+    #[test]
+    fn a_dense_surveyed_tile_has_a_bounded_simplified_mesh() {
+        let terrain = WorldTerrain::new(treeline_world::DEFAULT_WORLD_IDENTITY);
+        let bounds = TreeBounds::new(5_760.0, 5_888.0, 5_888.0, 6_016.0).expect("tile bounds");
+        let trees = terrain.trees_in(bounds).expect("tree generation");
+        assert!(trees.len() > 1_500, "the fixture must remain a dense tile");
+
+        let simplified = prepare_trees(&trees, TreeMeshDetail::Simplified, |x, z| {
+            terrain.surface_height(x, z)
+        })
+        .expect("simplified tree mesh")
+        .expect("the dense tile has geometry");
+        let (vertices, indices) = mesh_counts(&simplified);
+
+        eprintln!("dense simplified tile: {vertices} vertices, {indices} indices");
+
+        assert!(vertices <= 250_000, "dense tile has {vertices} vertices");
+        assert!(indices <= 1_250_000, "dense tile has {indices} indices");
+    }
+
+    #[test]
+    fn four_simplified_tiles_at_a_dense_boundary_have_a_bounded_total_mesh() {
+        let terrain = WorldTerrain::new(treeline_world::DEFAULT_WORLD_IDENTITY);
+        let mut vertices = 0;
+        let mut indices = 0;
+        for tile in [
+            TreeTileIndex { x: 45, z: 46 },
+            TreeTileIndex { x: 46, z: 46 },
+            TreeTileIndex { x: 45, z: 47 },
+            TreeTileIndex { x: 46, z: 47 },
+        ] {
+            let bounds = tile.bounds().expect("simplified tile bounds");
+            let trees = terrain.trees_in(bounds).expect("tree generation");
+            let Some(prepared) = prepare_trees(&trees, TreeMeshDetail::Simplified, |x, z| {
+                terrain.surface_height(x, z)
+            })
+            .expect("simplified tree mesh") else {
+                continue;
+            };
+            let counts = mesh_counts(&prepared);
+            vertices += counts.0;
+            indices += counts.1;
+        }
+
+        eprintln!("four simplified tiles: {vertices} vertices, {indices} indices");
+        assert!(
+            vertices <= 700_000,
+            "four simplified tiles have {vertices} vertices"
+        );
+        assert!(
+            indices <= 3_500_000,
+            "four simplified tiles have {indices} indices"
+        );
+    }
+
+    fn mesh_counts(prepared: &treeline_renderer::PreparedMesh) -> (usize, usize) {
+        (
+            prepared.mesh.count_vertices(),
+            prepared
+                .mesh
+                .indices()
+                .expect("tree surfaces are indexed")
+                .len(),
+        )
     }
 }

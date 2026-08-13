@@ -1,24 +1,22 @@
 //! What a stand of trees has to be true of, whatever the tier.
 //!
-//! Foliage is absent from these, because foliage is absent from the renderer:
-//! what a crown has to be true of belongs with the crowns, whenever they are
-//! built again.
+//! Pine foliage has the same determinism and geometry obligations as the wood,
+//! plus a few of its own: visible gaps between whorls, measured bounds, and a
+//! hard cost ceiling at every distance tier.
 
 use glam::Vec3;
 use treeline_ecology::{
-    BarkStyle, ForestComposition, GrowthConditions, Stand, TreeFunctionalGroup, grow_tree,
+    BarkStyle, ForestComposition, GrowthConditions, Stand, TreeCondition, TreeFunctionalGroup,
+    grow_tree,
 };
 
 use super::{
-    ProceduralTree, TreeGeometry, TreeMeshDetail, bark_cylinder_material, procedural_tree_geometry,
+    ProceduralTree, TreeFrame, TreeGeometry, TreeMeshDetail, append_tree, bark_cylinder_material,
+    pine, procedural_tree_geometry,
 };
-use crate::vertex::{TerrainVertex, f64_as_f32};
+use crate::vertex::{SURFACE_KIND_PINE_FOLIAGE, TerrainVertex, f64_as_f32};
 
-const TIERS: [TreeMeshDetail; 3] = [
-    TreeMeshDetail::Full,
-    TreeMeshDetail::Simplified,
-    TreeMeshDetail::Silhouette,
-];
+const TIERS: [TreeMeshDetail; 2] = [TreeMeshDetail::Simplified, TreeMeshDetail::Silhouette];
 
 fn tree(id: u64) -> ProceduralTree {
     grow_tree(
@@ -35,6 +33,47 @@ fn tree(id: u64) -> ProceduralTree {
 
 fn stand() -> Vec<ProceduralTree> {
     (1..=8).map(tree).collect()
+}
+
+fn mature_conifer() -> ProceduralTree {
+    (1..=256)
+        .map(tree)
+        .find(|tree| {
+            tree.genotype.functional_group == TreeFunctionalGroup::EvergreenNeedleleaf
+                && matches!(
+                    tree.condition,
+                    TreeCondition::Mature | TreeCondition::Ancient | TreeCondition::WindDamaged
+                )
+        })
+        .expect("the fixture range contains a living mature conifer")
+}
+
+fn local_tree_geometry(tree: ProceduralTree, detail: TreeMeshDetail) -> TreeGeometry {
+    let mut geometry = TreeGeometry::default();
+    append_tree(&mut geometry, tree, detail, Vec3::ZERO).expect("one tree fits u32 addressing");
+    geometry
+}
+
+fn foliage_vertices(geometry: &TreeGeometry) -> impl Iterator<Item = &TerrainVertex> {
+    geometry
+        .vertices
+        .iter()
+        .filter(|vertex| vertex.surface_kind.to_bits() == SURFACE_KIND_PINE_FOLIAGE.to_bits())
+}
+
+fn total_vertex_count(geometry: &TreeGeometry) -> usize {
+    geometry.vertices.len()
+}
+
+fn total_index_count(geometry: &TreeGeometry) -> usize {
+    geometry.indices.len()
+}
+
+fn upright_frame(tree: ProceduralTree) -> TreeFrame {
+    TreeFrame {
+        base: Vec3::ZERO,
+        trunk_vector: Vec3::Y * f64_as_f32(tree.height_meters),
+    }
 }
 
 fn position(vertex: &TerrainVertex) -> Vec3 {
@@ -59,21 +98,34 @@ fn vertex_bits(vertices: &[TerrainVertex]) -> Vec<VertexBits> {
 }
 
 fn assert_well_formed(geometry: &TreeGeometry) {
-    let vertices = &geometry.vertices;
-    assert!(!vertices.is_empty());
-    assert!(!geometry.indices.is_empty());
+    assert!(!geometry.vertices.is_empty());
+    assert_eq!(geometry.vertices.is_empty(), geometry.indices.is_empty());
     assert!(geometry.indices.len().is_multiple_of(3));
     assert!(
         geometry
             .indices
             .iter()
-            .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertices.len()))
+            .all(|&index| usize::try_from(index).is_ok_and(|index| index < geometry.vertices.len()))
     );
-    assert!(vertices.iter().all(|vertex| {
+    assert!(geometry.vertices.iter().all(|vertex| {
         vertex.world_position.into_iter().all(f64::is_finite)
             && vertex.normal.into_iter().all(f32::is_finite)
             && (vertex.color[3] - 1.0).abs() < f32::EPSILON
     }));
+}
+
+fn append_geometry(target: &mut TreeGeometry, source: &mut TreeGeometry) {
+    let base = u32::try_from(target.vertices.len()).expect("an addressable stand");
+    for index in &mut source.indices {
+        *index += base;
+    }
+    target.vertices.append(&mut source.vertices);
+    target.indices.append(&mut source.indices);
+}
+
+fn assert_same_geometry(left: &TreeGeometry, right: &TreeGeometry) {
+    assert_eq!(vertex_bits(&left.vertices), vertex_bits(&right.vertices));
+    assert_eq!(left.indices, right.indices);
 }
 
 /// Every triangle in a tree has to carry area: a sliver is a seam of stretched
@@ -101,47 +153,39 @@ fn no_face_of_a_tree_is_a_sliver() {
     }
 }
 
-/// Geometry must be bit-stable for one input and identical whether trees
-/// are meshed together or one at a time.
+/// Geometry must be bit-stable for one input and identical whether trees are
+/// meshed together or one at a time.
 #[test]
 fn a_trees_geometry_is_bit_stable_and_neighbor_independent() {
     let stand = stand();
-    let batch = procedural_tree_geometry(&stand, TreeMeshDetail::Full, |_, _| Some(42.0))
+    let batch = procedural_tree_geometry(&stand, TreeMeshDetail::Simplified, |_, _| Some(42.0))
         .expect("tree geometry");
-    let again = procedural_tree_geometry(&stand, TreeMeshDetail::Full, |_, _| Some(42.0))
+    let again = procedural_tree_geometry(&stand, TreeMeshDetail::Simplified, |_, _| Some(42.0))
         .expect("tree geometry");
-    assert_eq!(vertex_bits(&batch.vertices), vertex_bits(&again.vertices));
-    assert_eq!(batch.indices, again.indices);
+    assert_same_geometry(&batch, &again);
 
     let mut concatenated = TreeGeometry::default();
     for tree in &stand {
-        let mut alone = procedural_tree_geometry(&[*tree], TreeMeshDetail::Full, |_, _| Some(42.0))
-            .expect("tree geometry");
-        let base = u32::try_from(concatenated.vertices.len()).expect("an addressable stand");
-        for index in &mut alone.indices {
-            *index += base;
-        }
-        concatenated.vertices.append(&mut alone.vertices);
-        concatenated.indices.append(&mut alone.indices);
+        let mut alone =
+            procedural_tree_geometry(&[*tree], TreeMeshDetail::Simplified, |_, _| Some(42.0))
+                .expect("tree geometry");
+        append_geometry(&mut concatenated, &mut alone);
     }
-    assert_eq!(
-        vertex_bits(&batch.vertices),
-        vertex_bits(&concatenated.vertices)
-    );
-    assert_eq!(batch.indices, concatenated.indices);
+    assert_same_geometry(&batch, &concatenated);
 }
 
 #[test]
 fn a_stand_builds_well_formed_colored_geometry() {
-    let geometry =
-        procedural_tree_geometry(&stand(), TreeMeshDetail::Full, |x, z| Some((x + z) * 0.01))
-            .expect("tree geometry");
+    let geometry = procedural_tree_geometry(&stand(), TreeMeshDetail::Simplified, |x, z| {
+        Some((x + z) * 0.01)
+    })
+    .expect("tree geometry");
     assert_well_formed(&geometry);
 }
 
 #[test]
 fn trees_without_a_surface_sample_are_skipped() {
-    let geometry = procedural_tree_geometry(&stand(), TreeMeshDetail::Full, |_, _| None)
+    let geometry = procedural_tree_geometry(&stand(), TreeMeshDetail::Simplified, |_, _| None)
         .expect("tree geometry");
     assert!(geometry.vertices.is_empty());
     assert!(geometry.indices.is_empty());
@@ -152,13 +196,14 @@ fn trunk_bases_are_buried_across_steep_ground() {
     let mut tree = tree(1);
     tree.lean_fraction = 0.0;
     let surface_height = |x: f64, z: f64| (x * 4.0) + (z * 1.5) + 42.0;
-    let geometry = procedural_tree_geometry(&[tree], TreeMeshDetail::Full, |x, z| {
+    let geometry = procedural_tree_geometry(&[tree], TreeMeshDetail::Simplified, |x, z| {
         Some(surface_height(x, z))
     })
     .expect("tree geometry");
 
-    // Full-detail bark has seven sides and repeats its first vertex at the seam.
-    for vertex in &geometry.vertices[..8] {
+    // Simplified bark has five sides and repeats its first vertex at the seam,
+    // so the first ring is six vertices.
+    for vertex in &geometry.vertices[..6] {
         let [x, y, z] = vertex.world_position;
         assert!(
             y <= surface_height(x, z),
@@ -173,11 +218,11 @@ fn leaning_trunk_base_is_embedded_on_flat_ground() {
     tree.condition = treeline_ecology::TreeCondition::Fallen;
     tree.lean_direction = [1.0, 0.0];
     tree.lean_fraction = 0.92;
-    let geometry = procedural_tree_geometry(&[tree], TreeMeshDetail::Full, |_, _| Some(42.0))
+    let geometry = procedural_tree_geometry(&[tree], TreeMeshDetail::Simplified, |_, _| Some(42.0))
         .expect("tree geometry");
 
     assert!(
-        geometry.vertices[..8]
+        geometry.vertices[..6]
             .iter()
             .all(|vertex| vertex.world_position[1] <= 42.0)
     );
@@ -196,8 +241,8 @@ fn coarser_detail_sheds_geometry_without_dropping_trees() {
         assert_well_formed(geometry);
     }
     for pair in tiers.windows(2) {
-        assert!(pair[0].vertices.len() > pair[1].vertices.len());
-        assert!(pair[0].indices.len() > pair[1].indices.len());
+        assert!(total_vertex_count(&pair[0]) > total_vertex_count(&pair[1]));
+        assert!(total_index_count(&pair[0]) > total_index_count(&pair[1]));
     }
 }
 
@@ -218,4 +263,109 @@ fn conifers_and_broadleaves_sample_different_bark_textures() {
         bark_cylinder_material(*conifer, 0).surface_kind.to_bits(),
         bark_cylinder_material(*broadleaf, 0).surface_kind.to_bits()
     );
+}
+
+#[test]
+fn only_living_conifers_carry_pine_foliage() {
+    let conifer = mature_conifer();
+    let living = local_tree_geometry(conifer, TreeMeshDetail::Simplified);
+    assert!(foliage_vertices(&living).next().is_some());
+
+    let mut dead = conifer;
+    dead.condition = TreeCondition::DeadStanding;
+    let dead = local_tree_geometry(dead, TreeMeshDetail::Simplified);
+    assert!(foliage_vertices(&dead).next().is_none());
+
+    let broadleaf = (1..=256)
+        .map(tree)
+        .find(|tree| tree.genotype.functional_group != TreeFunctionalGroup::EvergreenNeedleleaf)
+        .expect("the fixture range contains a broadleaf");
+    let broadleaf = local_tree_geometry(broadleaf, TreeMeshDetail::Simplified);
+    assert!(foliage_vertices(&broadleaf).next().is_none());
+}
+
+#[test]
+fn pine_layers_are_ordered_separated_and_not_evenly_distributed() {
+    let tree = mature_conifer();
+    let fractions = pine::planned_layer_fractions(tree, upright_frame(tree));
+    assert!(fractions.len() >= 4);
+    let gaps = fractions
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    assert!(gaps.iter().all(|gap| *gap > 0.055));
+    let smallest = gaps.iter().copied().reduce(f32::min).expect("layer gap");
+    let largest = gaps.iter().copied().reduce(f32::max).expect("layer gap");
+    assert!(largest - smallest > 0.012);
+}
+
+#[test]
+fn pine_foliage_stays_inside_its_measured_crown_envelope() {
+    let mut tree = mature_conifer();
+    tree.lean_fraction = 0.0;
+    tree.lean_direction = [1.0, 0.0];
+    for detail in TIERS {
+        let geometry = local_tree_geometry(tree, detail);
+        let mut count = 0;
+        for vertex in foliage_vertices(&geometry) {
+            count += 1;
+            let [x, y, z] = vertex.world_position;
+            assert!(
+                y <= tree.height_meters + 1.0e-4,
+                "{detail:?} exceeded the top: {y} > {}",
+                tree.height_meters
+            );
+            let horizontal = libm::hypot(x, z);
+            assert!(
+                horizontal <= tree.crown_radius_meters * 1.05,
+                "{detail:?} exceeded the crown radius: {horizontal} > {}",
+                tree.crown_radius_meters * 1.05
+            );
+        }
+        assert!(count > 0);
+    }
+}
+
+#[test]
+fn pine_detail_tiers_have_fixed_per_tree_geometry_budgets() {
+    let budgets = [(760, 4_000), (44, 186)];
+    let mut conifers = 0;
+    for tree in (1..=1_024).map(tree).filter(|tree| {
+        tree.genotype.functional_group == TreeFunctionalGroup::EvergreenNeedleleaf
+            && !matches!(
+                tree.condition,
+                TreeCondition::DeadStanding | TreeCondition::Fallen
+            )
+    }) {
+        conifers += 1;
+        for (detail, (max_vertices, max_indices)) in TIERS.into_iter().zip(budgets) {
+            let geometry = local_tree_geometry(tree, detail);
+            assert!(
+                total_vertex_count(&geometry) <= max_vertices,
+                "tree {} at {detail:?} used {} vertices",
+                tree.id,
+                total_vertex_count(&geometry)
+            );
+            assert!(
+                total_index_count(&geometry) <= max_indices,
+                "tree {} at {detail:?} used {} indices",
+                tree.id,
+                total_index_count(&geometry)
+            );
+        }
+    }
+    assert!(conifers > 100, "the budget sample must cover many conifers");
+}
+
+#[test]
+fn damage_never_adds_pine_foliage() {
+    let mut healthy = mature_conifer();
+    healthy.damage_fraction = 0.0;
+    let mut damaged = healthy;
+    damaged.damage_fraction = 0.55;
+    for detail in TIERS {
+        let healthy_count = foliage_vertices(&local_tree_geometry(healthy, detail)).count();
+        let damaged_count = foliage_vertices(&local_tree_geometry(damaged, detail)).count();
+        assert!(damaged_count <= healthy_count);
+    }
 }

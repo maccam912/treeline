@@ -137,17 +137,17 @@ Trees are individuals, never a canopy texture. Distant tiers shed geometry, but
 never merge trees into a surface — a forest read as a green blanket is exactly
 what this system exists to avoid.
 
-**Foliage is not drawn.** Trees render as trunks and branches only, and crowns
-are a blank the renderer calls and nothing fills. Every crown the renderer has
-had — mats of needles painted on solid balls, then nested shells strung along
-whorls, then one ray-marched cone per crown — got the outline right and the cost
-wrong, each in its own way, so the approach is being taken from the top rather
-than tuned again.
+**Pine foliage is drawn from branch structure.** The first foliage grammar
+treats evergreen needleleaf individuals as pine-like: irregular annual whorls
+leave visible air between branch tiers, omit damaged limbs, and clear the lower
+bole as a tree matures. This is a procedural visual strategy, not a claim that
+the lidar measured species.
 
-What is being started over is the drawing, not the forest. Where a crown sits,
-how wide it is, and what shape and condition the individual grows are measured
-and derived exactly as before, and they still reach the renderer; nothing on the
-data side was removed to get the pixels out.
+At the simplified tier, each primary branch carries one multi-meter, bent,
+faceted needle mass — the scale and shape unresolved needles and branchlets
+collapse into at that distance. The horizon tier keeps only three or four
+separated, asymmetric layer masses per individual. Broadleaf crowns remain
+unimplemented.
 
 ---
 
@@ -289,8 +289,10 @@ end, and say what remains when it does not.
       cascaded sun shadows, contact shadows, fog, and temporal anti-aliasing.
       Seasonal snow and daylight states remain Treeline domain treatments, and
       camera-relative floating origins preserve the measured world's precision.
-      Foliage is the exception: trees draw as trunks and branches, and crowns
-      remain unimplemented pending a rewrite.
+      Pine-like evergreen needleleaf crowns draw as deterministic, separated
+      branch whorls at two distance tiers: simplified branch needle masses near
+      the player and separated layer-mass silhouettes at the horizon. Broadleaf
+      crowns remain.
 - [x] **Browser client.** The same world in a browser, with terrain generation on
       Web Workers. Deployment selects WebGPU when the browser can supply an
       adapter and otherwise loads a WebGL2 build with incompatible camera effects

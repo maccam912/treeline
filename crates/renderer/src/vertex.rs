@@ -3,6 +3,7 @@
 use glam::Vec3;
 
 pub(crate) const SURFACE_KIND_SOLID: f32 = 0.0;
+pub(crate) const SURFACE_KIND_PINE_FOLIAGE: f32 = 1.0;
 pub(crate) const SURFACE_KIND_PINE_BARK: f32 = 2.0;
 pub(crate) const SURFACE_KIND_OAK_BARK: f32 = 3.0;
 
@@ -57,6 +58,34 @@ pub(crate) fn hash_lane(key: u64, lane: usize) -> f32 {
     f32::from(byte) / 255.0
 }
 
+/// Stable variation for grammars that need more than the eight bytes in an id.
+///
+/// Pine crowns draw dozens of independent values. Mixing the whole identity
+/// with an explicit lane keeps those values from repeating around each whorl.
+pub(crate) fn hash_fraction(key: u64, lane: u64) -> f32 {
+    const UNIT_STEPS: f32 = 16_777_216.0;
+
+    let mixed = splitmix64(key ^ splitmix64(lane));
+    u32_as_f32(u32_from_u64(mixed >> 40)) / UNIT_STEPS
+}
+
+const fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+const fn u32_from_u64(value: u64) -> u32 {
+    value as u32
+}
+
+#[allow(clippy::cast_precision_loss)]
+const fn u32_as_f32(value: u32) -> f32 {
+    value as f32
+}
+
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn f64_as_f32(value: f64) -> f32 {
     value as f32
@@ -88,11 +117,27 @@ mod tests {
     fn bark_surface_kinds_are_distinct() {
         assert_ne!(
             SURFACE_KIND_SOLID.to_bits(),
+            SURFACE_KIND_PINE_FOLIAGE.to_bits()
+        );
+        assert_ne!(
+            SURFACE_KIND_PINE_FOLIAGE.to_bits(),
             SURFACE_KIND_PINE_BARK.to_bits()
         );
         assert_ne!(
             SURFACE_KIND_PINE_BARK.to_bits(),
             SURFACE_KIND_OAK_BARK.to_bits()
+        );
+    }
+
+    #[test]
+    fn extended_hash_lanes_are_stable_and_do_not_repeat_every_eight_draws() {
+        assert_eq!(
+            hash_fraction(0x5eed, 17).to_bits(),
+            hash_fraction(0x5eed, 17).to_bits()
+        );
+        assert_ne!(
+            hash_fraction(0x5eed, 1).to_bits(),
+            hash_fraction(0x5eed, 9).to_bits()
         );
     }
 }

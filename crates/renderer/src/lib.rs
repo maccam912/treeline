@@ -49,15 +49,14 @@ impl Error for RendererError {}
 /// Geometry detail for one deterministic set of procedural tree individuals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TreeMeshDetail {
-    Full,
+    /// Branches carry one bent, faceted needle mass each.
     Simplified,
+    /// The horizon keeps only separated layer masses per individual.
     Silhouette,
 }
 
-/// Builds one Bevy mesh for a deterministic tile of tree individuals.
-///
-/// The tile is still a single mesh and therefore a single renderable entity;
-/// Bevy provides view and shadow-cascade culling around that coarse unit.
+/// Builds the batched solid surface for a deterministic tile of tree
+/// individuals.
 ///
 /// # Errors
 ///

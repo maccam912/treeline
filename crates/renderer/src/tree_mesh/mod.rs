@@ -1,29 +1,24 @@
 //! Turning tree individuals into geometry.
 //!
-//! A tree is drawn from its genotype rather than from a model library: trunk
-//! taper and branch angles come from the individual. Detail levels drop
-//! branches first, so a distant stand keeps its silhouette at a fraction of the
-//! cost.
-//!
-//! Crowns are not drawn at all: foliage rendering is being rebuilt from
-//! scratch, and [`append_crown`] is the blank it will be rebuilt into. What a
-//! crown is made of still reaches it — the individual, where its trunk ends,
-//! and how wide the stand measured its crown — so nothing on the data side had
-//! to be kept alive artificially for it.
+//! A tree is drawn from its genotype rather than from a model library. Pine
+//! crowns grow as separated branch whorls carrying elongated needle masses; the
+//! distant tier keeps those gaps while shedding branch-level geometry for a few
+//! layer masses per individual. Broadleaf crowns remain deliberately absent
+//! until they have a grammar of their own.
 
-mod branch;
 mod color;
+mod foliage;
 mod geometry;
+mod pine;
 mod shape;
 #[cfg(test)]
 mod tests;
 
 use glam::Vec3;
-use treeline_ecology::{CrownShape, ProceduralTree, TreeCondition};
+use treeline_ecology::{ProceduralTree, TreeCondition, TreeFunctionalGroup};
 
 use crate::vertex::{f64_as_f32, translate_local_vertices};
 use crate::{RendererError, TreeMeshDetail};
-use branch::append_branches;
 use color::{CylinderMaterial, bark_color, bark_cylinder_material};
 use shape::{CylinderSpec, append_tapered_cylinder};
 
@@ -102,7 +97,6 @@ pub(crate) fn append_tree(
         * (1.0 - (f64_as_f32(tree.genotype.trunk_taper_fraction) * 0.88)))
         .max(trunk_radius * 0.08);
     let trunk_sides = match detail {
-        TreeMeshDetail::Full => 7,
         TreeMeshDetail::Simplified => 5,
         TreeMeshDetail::Silhouette => 3,
     };
@@ -123,25 +117,8 @@ pub(crate) fn append_tree(
         },
     )?;
 
-    let frame = TreeFrame {
-        base,
-        trunk_vector,
-        trunk_radius,
-    };
-    // A sapling is a stem, and too small to carry branches at any tier.
-    if tree.condition != TreeCondition::Sapling && detail == TreeMeshDetail::Full {
-        append_branches(geometry, tree, frame)?;
-    }
+    let frame = TreeFrame { base, trunk_vector };
     append_crown(geometry, tree, frame, detail)
-}
-
-/// Where a crown starts on the trunk, as a fraction of its height.
-fn crown_start(tree: ProceduralTree) -> f32 {
-    match tree.genotype.crown_shape {
-        CrownShape::Conical => 0.24,
-        CrownShape::Columnar => 0.38,
-        CrownShape::Rounded => 0.46,
-    }
 }
 
 /// The trunk a crown and its branches hang off, in the tree's local space.
@@ -149,25 +126,19 @@ fn crown_start(tree: ProceduralTree) -> f32 {
 pub(crate) struct TreeFrame {
     base: Vec3,
     trunk_vector: Vec3,
-    trunk_radius: f32,
 }
 
-/// The foliage a tree carries on its trunk. Draws nothing.
-///
-/// Foliage rendering is being written from scratch, and this is where it hooks
-/// back in. Everything the old crowns were built from still arrives here: the
-/// individual carries its crown radius, shape, and condition, and `frame` says
-/// where its trunk runs.
-///
-/// The `Result` is what a crown will hand back the moment it appends anything:
-/// every other geometry call here can outgrow `u32` addressing, and this one
-/// will too.
-#[allow(clippy::unnecessary_wraps)]
+/// Draws the foliage grammar implemented for this individual's strategy.
 fn append_crown(
-    _geometry: &mut TreeGeometry,
-    _tree: ProceduralTree,
-    _frame: TreeFrame,
-    _detail: TreeMeshDetail,
+    geometry: &mut TreeGeometry,
+    tree: ProceduralTree,
+    frame: TreeFrame,
+    detail: TreeMeshDetail,
 ) -> Result<(), RendererError> {
-    Ok(())
+    match tree.genotype.functional_group {
+        TreeFunctionalGroup::EvergreenNeedleleaf => {
+            pine::append_pine_crown(geometry, tree, frame, detail)
+        }
+        TreeFunctionalGroup::ColdDeciduous | TreeFunctionalGroup::TemperateBroadleaf => Ok(()),
+    }
 }
