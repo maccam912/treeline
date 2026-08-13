@@ -17,9 +17,13 @@ env:
 
 jobs:
   build:
-    name: Build browser game
+    name: Build browser game (${{ matrix.backend }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        backend: [webgl, webgpu]
 
     steps:
       - name: Check out repository
@@ -40,22 +44,26 @@ jobs:
         with:
           tool: trunk@0.21.14
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+      - name: Build WebGL2 client
+        if: matrix.backend == 'webgl'
+        working-directory: apps/client
+        run: trunk build --release --dist dist-webgl --public-url "./"
 
       - name: Build WebGPU client
+        if: matrix.backend == 'webgpu'
         working-directory: apps/client
         run: >-
           trunk build
           --release
           --features webgpu
-          --dist dist
+          --dist dist-webgpu
           --public-url "./"
 
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v4
+      - name: Upload ${{ matrix.backend }} artifact
+        uses: actions/upload-artifact@v4
         with:
-          path: apps/client/dist
+          name: ${{ matrix.backend }}
+          path: apps/client/dist-${{ matrix.backend }}
 
   deploy:
     name: Deploy GitHub Pages
@@ -70,6 +78,29 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download WebGL2 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webgl
+          path: dist/webgl
+
+      - name: Download WebGPU artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webgpu
+          path: dist/webgpu
+
+      - name: Add renderer selector
+        run: cp apps/client/backend-selector.html dist/index.html
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
       - name: Deploy GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
