@@ -13,6 +13,8 @@ mod browser;
 mod camera;
 mod game;
 mod input;
+#[cfg(not(target_arch = "wasm32"))]
+mod profiling;
 mod progress;
 mod random;
 mod streaming;
@@ -63,10 +65,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }),
         ..default()
     }))
-    .add_plugins(TreelineRenderPlugin)
-    .insert_resource(game::GameTerrain(terrain))
-    .insert_non_send(game::TerrainJobs(jobs))
-    .add_plugins(game::TreelineGamePlugin);
+    .add_plugins(TreelineRenderPlugin);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_plugins(profiling::FrameProfilerPlugin);
+
+    app.insert_resource(game::GameTerrain(terrain))
+        .insert_non_send(game::TerrainJobs(jobs))
+        .add_plugins(game::TreelineGamePlugin);
 
     #[cfg(target_arch = "wasm32")]
     app.insert_non_send(browser::BrowserActions::new()?);

@@ -9,6 +9,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 
+#[cfg(feature = "profiling")]
+use bevy::prelude::info_span;
 use bevy::prelude::{
     Assets, Commands, Entity, Mesh, Mesh3d, MeshMaterial3d, Name, Resource, Transform,
 };
@@ -226,17 +228,27 @@ fn build_tile(
         .tile
         .bounds()
         .ok_or_else(|| std::io::Error::other("tree tile bounds are invalid"))?;
-    let trees = terrain
-        .trees_in(bounds)
-        .ok_or_else(|| std::io::Error::other("tree generation is unavailable"))?;
+    let trees = {
+        #[cfg(feature = "profiling")]
+        let _span = info_span!("generate tree individuals").entered();
+        terrain
+            .trees_in(bounds)
+            .ok_or_else(|| std::io::Error::other("tree generation is unavailable"))?
+    };
     if trees.is_empty() {
         return Ok(None);
     }
-    let Some(prepared) = prepare_trees(&trees, spec.detail, |x, z| terrain.surface_height(x, z))?
-    else {
+    let prepared = {
+        #[cfg(feature = "profiling")]
+        let _span = info_span!("prepare tree geometry").entered();
+        prepare_trees(&trees, spec.detail, |x, z| terrain.surface_height(x, z))?
+    };
+    let Some(prepared) = prepared else {
         return Ok(None);
     };
-    Ok(Some(
+    let entity = {
+        #[cfg(feature = "profiling")]
+        let _span = info_span!("upload tree geometry").entered();
         commands
             .spawn((
                 Name::new("tree tile"),
@@ -245,8 +257,9 @@ fn build_tile(
                 Transform::default(),
                 WorldMeshOrigin(prepared.world_origin),
             ))
-            .id(),
-    ))
+            .id()
+    };
+    Ok(Some(entity))
 }
 
 #[allow(clippy::cast_precision_loss)]

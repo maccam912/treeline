@@ -44,9 +44,31 @@ cargo run -p client --release
 | `T` | Cycle dawn, noon, and dusk |
 | `R` | Warp to a random spot in the tile |
 | `B` | Warp to a lake shore |
+| `F3` | Toggle FPS and the rolling frame-time graph |
 
 Touch devices get on-screen sticks: the left half of the screen moves, the right
 half looks.
+
+## Profiling slow frames
+
+Press `F3` in the native client to show a low-overhead FPS readout and rolling
+frame-time graph. Bars are green at 60 FPS or better and red below 30 FPS, so
+hitches remain visible after the frame that caused them.
+
+For a full frame flame graph, install a Tracy profiler compatible with the
+`tracy-client` version reported by Cargo, start Tracy listening, then run:
+
+```bash
+cargo tree -p client --features profiling | grep tracy
+cargo run -p client --release --features profiling
+```
+
+The capture contains Bevy's per-system CPU spans and render-thread work.
+Treeline also labels terrain streaming, tree streaming, tree-individual
+generation, tree-geometry preparation, and tree upload. Profile an unmoving view
+to isolate steady rendering, then walk or warp to include streaming work. Bevy
+can add RenderQueue GPU timings on Vulkan and DirectX 12; on macOS, use Xcode's
+Metal debugger after the CPU trace points to a render bottleneck.
 
 ## Inspecting the world
 

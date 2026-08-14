@@ -10,10 +10,11 @@ publish = false
 default-run = "client"
 
 [features]
+profiling = ["bevy/trace_tracy"]
 webgpu = ["bevy/webgpu"]
 
 [dependencies]
-bevy.workspace = true
+bevy = { workspace = true, features = ["bevy_dev_tools"] }
 glam.workspace = true
 libm.workspace = true
 treeline-coordinates.workspace = true

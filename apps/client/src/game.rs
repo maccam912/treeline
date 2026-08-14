@@ -310,27 +310,37 @@ fn stream_world(
         position: camera.world_position(),
         travel_direction: camera.travel_direction(&input),
     };
-    if let Err(error) = streaming::update(
-        &mut commands,
-        &mut meshes,
-        &materials,
-        &terrain.0,
-        *streamers,
-        motion,
-        &mut resident,
-        &mut jobs.0,
-        &mut progress,
-    ) {
+    let terrain_result = {
+        #[cfg(feature = "profiling")]
+        let _span = info_span!("terrain streaming").entered();
+        streaming::update(
+            &mut commands,
+            &mut meshes,
+            &materials,
+            &terrain.0,
+            *streamers,
+            motion,
+            &mut resident,
+            &mut jobs.0,
+            &mut progress,
+        )
+    };
+    if let Err(error) = terrain_result {
         error!("terrain streaming failed: {error}");
     }
-    if let Err(error) = trees.update(
-        &mut commands,
-        &mut meshes,
-        &materials,
-        &terrain.0,
-        streamers.near.config(),
-        camera.world_position(),
-    ) {
+    let tree_result = {
+        #[cfg(feature = "profiling")]
+        let _span = info_span!("tree streaming").entered();
+        trees.update(
+            &mut commands,
+            &mut meshes,
+            &materials,
+            &terrain.0,
+            streamers.near.config(),
+            camera.world_position(),
+        )
+    };
+    if let Err(error) = tree_result {
         error!("tree streaming failed: {error}");
     }
 }
