@@ -1,11 +1,11 @@
 //! Turning tree individuals into geometry.
 //!
 //! A tree is drawn from its genotype rather than from a model library. Pine
-//! crowns grow as separated branch whorls carrying elongated needle masses; the
-//! distant tier keeps those gaps while shedding branch-level geometry for a few
-//! layer masses per individual. Broadleaf crowns remain deliberately absent
-//! until they have a grammar of their own.
+//! crowns grow as separated branch whorls carrying elongated needle masses.
+//! Broadleaves split into bent scaffold limbs carrying terminal leaf cloudlets,
+//! so both distance tiers preserve air through each individual crown.
 
+mod broadleaf;
 mod color;
 mod foliage;
 mod geometry;
@@ -91,11 +91,24 @@ pub(crate) fn append_tree(
     } else {
         (lean * height * f64_as_f32(tree.lean_fraction)) + (Vec3::Y * height)
     };
-    let top = base + trunk_vector;
     let trunk_radius = f64_as_f32(tree.trunk_base_radius_meters);
-    let top_radius = (trunk_radius
+    let trunk_top_radius = (trunk_radius
         * (1.0 - (f64_as_f32(tree.genotype.trunk_taper_fraction) * 0.88)))
         .max(trunk_radius * 0.08);
+    let frame = TreeFrame {
+        base,
+        trunk_vector,
+        trunk_radius,
+        trunk_top_radius,
+    };
+    let trunk_end_fraction = match tree.genotype.functional_group {
+        TreeFunctionalGroup::EvergreenNeedleleaf => 1.0,
+        TreeFunctionalGroup::ColdDeciduous | TreeFunctionalGroup::TemperateBroadleaf => {
+            broadleaf::trunk_end_fraction(tree, frame)
+        }
+    };
+    let top = base + (trunk_vector * trunk_end_fraction);
+    let top_radius = trunk_radius + ((trunk_top_radius - trunk_radius) * trunk_end_fraction);
     let trunk_sides = match detail {
         TreeMeshDetail::Simplified => 5,
         TreeMeshDetail::Silhouette => 3,
@@ -116,8 +129,6 @@ pub(crate) fn append_tree(
             },
         },
     )?;
-
-    let frame = TreeFrame { base, trunk_vector };
     append_crown(geometry, tree, frame, detail)
 }
 
@@ -126,6 +137,8 @@ pub(crate) fn append_tree(
 pub(crate) struct TreeFrame {
     base: Vec3,
     trunk_vector: Vec3,
+    trunk_radius: f32,
+    trunk_top_radius: f32,
 }
 
 /// Draws the foliage grammar implemented for this individual's strategy.
@@ -139,6 +152,8 @@ fn append_crown(
         TreeFunctionalGroup::EvergreenNeedleleaf => {
             pine::append_pine_crown(geometry, tree, frame, detail)
         }
-        TreeFunctionalGroup::ColdDeciduous | TreeFunctionalGroup::TemperateBroadleaf => Ok(()),
+        TreeFunctionalGroup::ColdDeciduous | TreeFunctionalGroup::TemperateBroadleaf => {
+            broadleaf::append_broadleaf_crown(geometry, tree, frame, detail)
+        }
     }
 }

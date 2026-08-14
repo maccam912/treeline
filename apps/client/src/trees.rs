@@ -2,9 +2,9 @@
 //!
 //! Trees stream on their own lattice rather than with terrain chunks, so
 //! coarsening terrain never swaps a forest for a canopy surface. Tiles within
-//! the simplified radius carry one batched draw of trunks and branch needle
-//! masses; distant tiles keep only a silhouette. That keeps a forest visible to
-//! the horizon at a workable vertex cost.
+//! the simplified radius carry one batched draw of trunks and branch-scale
+//! foliage; distant tiles keep only each tree's defining crown masses. That
+//! keeps a forest visible to the horizon at a workable vertex cost.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
@@ -392,8 +392,28 @@ mod tests {
 
         eprintln!("dense simplified tile: {vertices} vertices, {indices} indices");
 
-        assert!(vertices <= 250_000, "dense tile has {vertices} vertices");
-        assert!(indices <= 1_250_000, "dense tile has {indices} indices");
+        assert!(vertices <= 450_000, "dense tile has {vertices} vertices");
+        assert!(indices <= 2_050_000, "dense tile has {indices} indices");
+    }
+
+    #[test]
+    fn a_dense_surveyed_tile_has_a_bounded_silhouette_mesh() {
+        let terrain = WorldTerrain::new(treeline_world::DEFAULT_WORLD_IDENTITY);
+        let bounds = TreeBounds::new(5_760.0, 5_888.0, 5_888.0, 6_016.0).expect("tile bounds");
+        let trees = terrain.trees_in(bounds).expect("tree generation");
+        assert!(trees.len() > 1_500, "the fixture must remain a dense tile");
+
+        let silhouette = prepare_trees(&trees, TreeMeshDetail::Silhouette, |x, z| {
+            terrain.surface_height(x, z)
+        })
+        .expect("silhouette tree mesh")
+        .expect("the dense tile has geometry");
+        let (vertices, indices) = mesh_counts(&silhouette);
+
+        eprintln!("dense silhouette tile: {vertices} vertices, {indices} indices");
+
+        assert!(vertices <= 160_000, "dense tile has {vertices} vertices");
+        assert!(indices <= 700_000, "dense tile has {indices} indices");
     }
 
     #[test]
@@ -422,11 +442,11 @@ mod tests {
 
         eprintln!("four simplified tiles: {vertices} vertices, {indices} indices");
         assert!(
-            vertices <= 700_000,
+            vertices <= 1_300_000,
             "four simplified tiles have {vertices} vertices"
         );
         assert!(
-            indices <= 3_500_000,
+            indices <= 5_850_000,
             "four simplified tiles have {indices} indices"
         );
     }

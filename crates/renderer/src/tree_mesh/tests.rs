@@ -1,8 +1,8 @@
 //! What a stand of trees has to be true of, whatever the tier.
 //!
-//! Pine foliage has the same determinism and geometry obligations as the wood,
-//! plus a few of its own: visible gaps between whorls, measured bounds, and a
-//! hard cost ceiling at every distance tier.
+//! Foliage has the same determinism and geometry obligations as the wood, plus
+//! crown-specific ones: visible air, measured bounds, stable individual
+//! silhouettes, and a hard cost ceiling at every distance tier.
 
 use glam::Vec3;
 use treeline_ecology::{
@@ -73,6 +73,8 @@ fn upright_frame(tree: ProceduralTree) -> TreeFrame {
     TreeFrame {
         base: Vec3::ZERO,
         trunk_vector: Vec3::Y * f64_as_f32(tree.height_meters),
+        trunk_radius: f64_as_f32(tree.trunk_base_radius_meters),
+        trunk_top_radius: f64_as_f32(tree.trunk_base_radius_meters) * 0.12,
     }
 }
 

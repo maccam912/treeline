@@ -146,8 +146,23 @@ the lidar measured species.
 At the simplified tier, each primary branch carries one multi-meter, bent,
 faceted needle mass — the scale and shape unresolved needles and branchlets
 collapse into at that distance. The horizon tier keeps only three or four
-separated, asymmetric layer masses per individual. Broadleaf crowns remain
-unimplemented.
+separated, asymmetric layer masses per individual.
+
+**Broadleaf foliage follows forked scaffold fans.** Rounded temperate
+broadleaves lose trunk dominance inside the crown and divide into three to five
+heavy, bending axes; columnar cold deciduous trees retain a straighter, lighter
+bole and two or three narrower fans. Branch angle and density come from the
+individual genotype, while measured-bounded crown proportions decide how low
+and wide those fans can spread. Leaves gather into overlapping branch-attached
+cloudlets rather than one filled crown volume, leaving a few stable radial
+windows through the woody core.
+
+The simplified tier keeps the multi-segment scaffold, rounded terminal
+cloudlets, and darker interior masses. The horizon tier reuses the same lobe
+centers and envelopes with cheaper two-ring surfaces and only the defining fork,
+so the crown's openings survive the transition instead of closing into a solid
+blob. Close trees currently reuse this simplified tier; individual leaves and a
+close-only refinement remain later work.
 
 ---
 
@@ -292,7 +307,10 @@ end, and say what remains when it does not.
       Pine-like evergreen needleleaf crowns draw as deterministic, separated
       branch whorls at two distance tiers: simplified branch needle masses near
       the player and separated layer-mass silhouettes at the horizon. Broadleaf
-      crowns remain.
+      individuals use bent, secondary-forked scaffold fans carrying
+      overlapping foliage cloudlets; their cheaper horizon lobes preserve the
+      same macro openings. Close broadleaves currently reuse the simplified
+      tier pending close-only leaf detail.
 - [x] **Browser client.** The same world in a browser, with terrain generation on
       Web Workers. Deployment selects WebGPU when the browser can supply an
       adapter and otherwise loads a WebGL2 build with incompatible camera effects

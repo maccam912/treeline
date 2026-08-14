@@ -49,9 +49,9 @@ impl Error for RendererError {}
 /// Geometry detail for one deterministic set of procedural tree individuals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TreeMeshDetail {
-    /// Branches carry one bent, faceted needle mass each.
+    /// Branches carry branch-scale foliage masses and the defining woody frame.
     Simplified,
-    /// The horizon keeps only separated layer masses per individual.
+    /// The horizon keeps separated macro crown masses per individual.
     Silhouette,
 }
 

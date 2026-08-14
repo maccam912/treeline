@@ -40,10 +40,11 @@ pub(crate) fn append_tapered_cylinder(
     let tangent = axis.cross(reference).normalize_or_zero();
     let bitangent = axis.cross(tangent).normalize_or_zero();
     let base_index = u32::try_from(vertices.len()).map_err(|_| RendererError::TooManyIndices)?;
-    let is_bark = spec.material.surface_kind >= SURFACE_KIND_PINE_BARK;
+    let is_bark = spec.material.surface_kind == SURFACE_KIND_PINE_BARK
+        || spec.material.surface_kind == SURFACE_KIND_OAK_BARK;
     let vertices_per_ring = if is_bark { spec.sides + 1 } else { spec.sides };
     let average_radius = (spec.start_radius + spec.end_radius) * 0.5;
-    let is_pine_bark = spec.material.surface_kind < SURFACE_KIND_OAK_BARK;
+    let is_pine_bark = spec.material.surface_kind == SURFACE_KIND_PINE_BARK;
     let repeat_width_meters = if is_pine_bark { 2.0 } else { 1.0 };
     let around_repeats =
         libm::roundf((std::f32::consts::TAU * average_radius / repeat_width_meters).max(1.0))

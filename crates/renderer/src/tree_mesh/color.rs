@@ -11,7 +11,7 @@ pub(crate) fn bark_color(tree: ProceduralTree) -> [f32; 4] {
     let base = match tree.genotype.bark_style {
         BarkStyle::Scaly => [0.25, 0.18, 0.11],
         BarkStyle::Smooth => [0.43, 0.40, 0.33],
-        BarkStyle::Furrowed => [0.27, 0.20, 0.14],
+        BarkStyle::Furrowed => [0.20, 0.14, 0.085],
     };
     let bleaching = if tree.condition == TreeCondition::DeadStanding {
         0.46
@@ -64,6 +64,33 @@ pub(crate) fn pine_foliage_colors(tree: ProceduralTree, seed: u64) -> [[f32; 4];
         1.0,
     ];
     [inner, outer].map(|mut color| {
+        for channel in &mut color[..3] {
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        color
+    })
+}
+
+/// Cool interior shade and sunlit exterior leaves for one broadleaf cloudlet.
+pub(crate) fn broadleaf_foliage_colors(
+    tree: ProceduralTree,
+    seed: u64,
+    exposure: f32,
+) -> [[f32; 4]; 2] {
+    let density = f64_as_f32(tree.genotype.leaf_density_fraction);
+    let tone = (hash_fraction(seed, 0x4252_4f41_444c_4546) - 0.5) * 0.055;
+    let exposure = exposure.clamp(0.0, 1.0);
+    let (inner, outer) = match tree.genotype.functional_group {
+        TreeFunctionalGroup::ColdDeciduous => ([0.055, 0.16, 0.050, 1.0], [0.19, 0.39, 0.105, 1.0]),
+        TreeFunctionalGroup::TemperateBroadleaf => {
+            ([0.038, 0.14, 0.030, 1.0], [0.135, 0.35, 0.070, 1.0])
+        }
+        TreeFunctionalGroup::EvergreenNeedleleaf => unreachable!("broadleaf color on a conifer"),
+    };
+    [inner, outer].map(|mut color| {
+        color[0] += tone + (exposure * 0.025);
+        color[1] += tone + (exposure * 0.055) + (density * 0.025);
+        color[2] += (tone * 0.55) + (exposure * 0.012);
         for channel in &mut color[..3] {
             *channel = channel.clamp(0.0, 1.0);
         }

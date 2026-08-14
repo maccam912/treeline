@@ -6,6 +6,7 @@ pub(crate) const SURFACE_KIND_SOLID: f32 = 0.0;
 pub(crate) const SURFACE_KIND_PINE_FOLIAGE: f32 = 1.0;
 pub(crate) const SURFACE_KIND_PINE_BARK: f32 = 2.0;
 pub(crate) const SURFACE_KIND_OAK_BARK: f32 = 3.0;
+pub(crate) const SURFACE_KIND_BROADLEAF_FOLIAGE: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TerrainVertex {
@@ -126,6 +127,10 @@ mod tests {
         assert_ne!(
             SURFACE_KIND_PINE_BARK.to_bits(),
             SURFACE_KIND_OAK_BARK.to_bits()
+        );
+        assert_ne!(
+            SURFACE_KIND_OAK_BARK.to_bits(),
+            SURFACE_KIND_BROADLEAF_FOLIAGE.to_bits()
         );
     }
 
