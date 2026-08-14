@@ -29,11 +29,20 @@
     <p id="status">Choosing the best renderer…</p>
     <script type="module">
       const status = document.querySelector("#status");
+      const mobileDevice =
+        navigator.userAgentData?.mobile === true ||
+        /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+        window.matchMedia("(pointer: coarse)").matches;
       let useWebGpu = false;
-      try {
-        useWebGpu = Boolean(navigator.gpu && (await navigator.gpu.requestAdapter()));
-      } catch (error) {
-        console.info("WebGPU unavailable; using WebGL2", error);
+      // A reported adapter is not enough to establish that a phone's WebGPU
+      // implementation can keep Bevy's render loop alive. Mobile deliberately
+      // takes the lower-memory WebGL2 build.
+      if (!mobileDevice) {
+        try {
+          useWebGpu = Boolean(navigator.gpu && (await navigator.gpu.requestAdapter()));
+        } catch (error) {
+          console.info("WebGPU unavailable; using WebGL2", error);
+        }
       }
 
       const backend = useWebGpu ? "webgpu" : "webgl";

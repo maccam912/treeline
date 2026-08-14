@@ -124,11 +124,13 @@ pub struct BrowserTerrainMeshQueue {
 
 impl BrowserTerrainMeshQueue {
     pub fn new(world: WorldIdentity) -> Result<Self, Box<dyn Error>> {
-        let available = window()
+        let navigator = window()
             .ok_or_else(|| std::io::Error::other("browser window is unavailable"))?
-            .navigator()
-            .hardware_concurrency();
-        let worker_count = browser_worker_count(available);
+            .navigator();
+        let worker_count = browser_worker_count(
+            navigator.hardware_concurrency(),
+            navigator.max_touch_points() > 0,
+        );
         let events = Rc::new(RefCell::new(VecDeque::new()));
         let mut workers = Vec::with_capacity(worker_count);
         for worker_index in 0..worker_count {
@@ -310,8 +312,11 @@ fn spawn_worker(
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn browser_worker_count(available: f64) -> usize {
-    if !available.is_finite() {
+fn browser_worker_count(available: f64, touch_device: bool) -> usize {
+    // Every worker owns a Wasm linear memory containing the measured bundle.
+    // One worker keeps that duplication within a phone or tablet's process
+    // budget; generation remains asynchronous, only less parallel.
+    if touch_device || !available.is_finite() {
         return 1;
     }
     (available.max(2.0) as usize)
